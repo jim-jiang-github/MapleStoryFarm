@@ -27,6 +27,11 @@ from fastapi import Body, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
+# 跟踪模块与本文件同目录；直接 `python webui/server.py` 时它已在 sys.path 里，
+# 用 -m 方式启动时补一下，免得为了一个 import 去改运行方式
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from track import Tracker  # noqa: E402  （见 webui/track.py：卡尔曼 + 匈牙利 + ByteTrack）
+
 
 ctypes.windll.user32.SetProcessDPIAware()
 
@@ -43,6 +48,11 @@ JPEG_STREAM_Q = 85      # 实时流用：比 72 清楚，但按显示尺寸缩�
 HOST = (os.environ.get("PREVIEW_HOST") or "0.0.0.0").strip() or "0.0.0.0"
 PORT = int(os.environ.get("PREVIEW_PORT") or 8765)
 DETECT_CONF = 0.35
+# 送进跟踪器的低分门限。推理阈值压到这里、而不是 0.35，是为了 ByteTrack 的第二阶段：
+# 0.10~0.35 的框不新建轨迹，只在第一轮没配上的轨迹上补配一次，
+# 检测器偶尔掉分（遮挡、特效、远处小目标）时不至于直接丢目标。
+# 界面上看到的框仍是跟踪器确认过的，噪声框不会冒出来。
+LOW_DETECT_CONF = 0.10
 # 两种部署配置，实测差异（30 帧真实画面，含 UI 排除+去重，对比 best.pt@960）：
 #   速度: INT8 384x672  ~44ms/22FPS  recall 83.6%  多检 0.8/帧
 #   精度: INT8 544x960  ~96ms/10FPS  recall 89.6%  多检 0.3/帧
@@ -914,13 +924,15 @@ det_state = {
     "counts": {},
     "filter": "",        # 类别过滤：空串=全部；非空=只画名字包含该词的目标
     "lock": None,        # 锁定目标 {"tid","name","conf"} 或 None
+    "lock_box": None,    # 上次锁定的框：目标短暂丢失时用它就近接回，而不是跳去别的怪
+    "lock_ts": 0.0,      # 最后一次锁上的时间（超过 3 秒就不再用 lock_box 找）
     "mask": True,        # UI 排除区开关：涂掉固定 UI 区域再推理
     "mode": "fast",      # fast(20+FPS) / accurate(精度优先)
     "error": "",
 }
 det_lock = threading.Lock()
 det_thread_started = [False]     # 检测线程只启动一次（内部按 mode 热切换模型）
-# IoUTracker 等定义在下方，实例化延后到类定义之后
+# Tracker（见 webui/track.py）实例化延后到导入之后
 
 BOX_COLOR = (96, 220, 64)      # BGR 亮绿
 TXT_BG = (40, 40, 40)
@@ -969,166 +981,6 @@ def dedupe_dets(dets, thr=0.6):
     return out
 
 
-class IoUTracker:
-    """轻量 tracking-by-detection：
-    - 同类目标按 IoU 贪心匹配，给每只怪稳定 track_id
-    - min_hits: 连续命中 N 帧才确认为真实目标（只闪 1~2 帧的瞬现目标直接丢弃）
-    - max_age: 丢失 N 帧内保留轨迹（检测偶尔漏一帧不闪断）
-    - 类别投票: 轨迹类别由历史帧投票决定，确认后需明显领先才能改判（防止树→蜗牛→树）
-    - EMA 平滑框坐标（防逐帧抖动）
-    """
-
-    def __init__(self, iou_thr=0.3, min_hits=3, max_age=8, ema=0.6,
-                 shift_gate=0.15, shift_max=320.0, class_margin=6,
-                 resurrect_frames=25):
-        self.iou_thr = iou_thr
-        self.min_hits = min_hits
-        self.max_age = max_age
-        self.ema = ema
-        self.shift_gate = shift_gate   # 相位相关响应低于此值视为无有效平移
-        self.shift_max = shift_max     # 平移量超过此值视为切屏，不补偿
-        self.class_margin = class_margin  # 已确认轨迹改判类别所需的领先票数
-        self.resurrect_frames = resurrect_frames  # 轨迹消失后多久内可复用原 ID
-        self.tracks = {}
-        self.lost = {}                 # tid -> {"name","box","age"} 复活缓存
-        self.next_id = 1
-        self.pending = 0               # 尚未确认的轨迹数（被瞬现过滤掉的候选）
-
-    def update(self, dets, shift=(0.0, 0.0)):
-        """dets: [(box, name, conf)], shift: 画面内容位移(相机补偿)
-
-        统一按“类名”而不是类 ID 匹配：模型里存在多个类 ID 指向同一种怪
-        （如 1210100_Pig / 9300058_Pig），按类 ID 匹配会把同一只怪拆成多条轨迹。
-        """
-        # 相机补偿：整幅画面平移时，先把旧轨迹的框跟着平移再匹配
-        dx, dy = shift
-        if abs(dx) + abs(dy) > 0.01:
-            for tr in self.tracks.values():
-                b = tr["box"]
-                tr["box"] = [b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy]
-        tids = list(self.tracks.keys())
-        used_t, used_d = set(), set()
-
-        # 第一级: 同类 IoU 贪心匹配（静止/慢速目标）
-        pairs = []
-        for t in tids:
-            tr = self.tracks[t]
-            for di, (box, name, conf) in enumerate(dets):
-                if name != tr["name"]:
-                    continue
-                v = iou(tr["box"], box)
-                if v >= self.iou_thr:
-                    pairs.append((v, t, di))
-        pairs.sort(reverse=True)
-        for v, t, di in pairs:
-            if t in used_t or di in used_d:
-                continue
-            used_t.add(t)
-            used_d.add(di)
-            self._apply(t, dets[di])
-
-        # 第二级: 中心点距离兜底（快速移动目标）
-        pairs2 = []
-        for t in tids:
-            if t in used_t:
-                continue
-            tr = self.tracks[t]
-            cx = (tr["box"][0] + tr["box"][2]) / 2
-            cy = (tr["box"][1] + tr["box"][3]) / 2
-            bw, bh = tr["box"][2] - tr["box"][0], tr["box"][3] - tr["box"][1]
-            for di, (box, name, conf) in enumerate(dets):
-                if di in used_d:
-                    continue
-                radius = max(80.0, 1.2 * (bw + bh))
-                dcx = (box[0] + box[2]) / 2 - cx
-                dcy = (box[1] + box[3]) / 2 - cy
-                dist = (dcx * dcx + dcy * dcy) ** 0.5
-                if dist <= radius:
-                    pairs2.append((-dist, t, di))   # 负距离 = 近者优先
-        pairs2.sort()
-        for nd, t, di in pairs2:
-            if t in used_t or di in used_d:
-                continue
-            used_t.add(t)
-            used_d.add(di)
-            self._apply(t, dets[di])
-
-        # 先进先出创建新轨迹；优先复活刚消失的同类轨迹（保持 ID 与颜色不变）
-        for di, (box, name, conf) in enumerate(dets):
-            if di in used_d:
-                continue
-            tid = self._take_lost(box, name)
-            if tid is None:
-                tid = self.next_id
-                self.next_id += 1
-            self.tracks[tid] = {"box": list(box), "name": name,
-                                "conf": conf, "hits": 1, "streak": 1, "misses": 0,
-                                "confirmed": False, "votes": {name: 1}}
-            used_t.add(tid)   # 新建轨迹本帧视为已匹配，否则会被误判为漏检
-
-        dead = []
-        for t, tr in self.tracks.items():
-            if t not in used_t:
-                tr["misses"] += 1
-                tr["streak"] = 0          # 连续命中被打断；已确认状态不撤销
-                if tr["misses"] > self.max_age:
-                    dead.append(t)
-        for t in dead:
-            tr = self.tracks.pop(t)
-            self.lost[t] = {"name": tr["name"], "box": tr["box"], "age": 0}
-        for t in list(self.lost):
-            self.lost[t]["age"] += 1
-            if self.lost[t]["age"] > self.resurrect_frames:
-                del self.lost[t]
-
-        self.pending = sum(1 for tr in self.tracks.values() if not tr["confirmed"])
-        return [dict(tr, tid=t) for t, tr in self.tracks.items() if tr["confirmed"]]
-
-    def _take_lost(self, box, name):
-        """在复活缓存里找同类别、位置接近的已消失轨迹，复用它的 ID。"""
-        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-        bw, bh = box[2] - box[0], box[3] - box[1]
-        best, best_d = None, None
-        for tid, tr in self.lost.items():
-            if tr["name"] != name:
-                continue
-            lx = (tr["box"][0] + tr["box"][2]) / 2
-            ly = (tr["box"][1] + tr["box"][3]) / 2
-            d = ((cx - lx) ** 2 + (cy - ly) ** 2) ** 0.5
-            if d <= max(120.0, 1.0 * (bw + bh)) and (best_d is None or d < best_d):
-                best, best_d = tid, d
-        if best is not None:
-            del self.lost[best]
-        return best
-
-    def _apply(self, t, det):
-        box, name, conf = det
-        tr = self.tracks[t]
-        b, e = tr["box"], self.ema
-        tr["box"] = [e * box[k] + (1 - e) * b[k] for k in range(4)]
-        tr["conf"] = e * conf + (1 - e) * tr["conf"]
-        tr["hits"] += 1
-        tr["streak"] += 1
-        tr["misses"] = 0
-        self._vote(tr, name)
-        if tr["streak"] >= self.min_hits:
-            tr["confirmed"] = True
-
-    def _vote(self, tr, name):
-        """类别投票：票数最高的类作为轨迹类别；已确认的轨迹改判需明显领先。"""
-        votes = tr["votes"]
-        votes[name] = votes.get(name, 0) + 1
-        if sum(votes.values()) > 60:      # 滑窗式衰减，避免老票永久主导
-            for k in votes:
-                votes[k] = max(1, votes[k] // 2)
-        best = max(votes, key=votes.get)
-        cur = tr["name"]
-        if best == cur:
-            return
-        if not tr["confirmed"] or votes[best] >= votes.get(cur, 0) + self.class_margin:
-            tr["name"] = best
-
-
 def draw_tracks(frame, tracks, locked_tid=None):
     img = frame.copy()
     for tr in tracks:
@@ -1166,14 +1018,41 @@ def est_camera_shift(frame, prev_small, sw, sh):
     return (dx, dy)
 
 
-def pick_lock(tracks, prev_tid):
-    """锁定策略：优先延续上一帧的锁定目标（防横跳）；
-    新锁定要求轨迹成熟（hits>=5）且置信度达标（>=0.45），按面积×置信度选最优。"""
+def pick_lock(tracks, prev_tid, prev_box=None):
+    """锁定策略（按优先级）：
+
+    1. 上一帧的锁定目标还在 —— 直接延续，这是锁定稳定的根本；
+    2. 它刚丢了 —— 优先接回「离它最后位置最近、同类、且位置合理」的那条轨迹，
+       而不是画面里最大/最显眼的那只。怪被遮挡、跳出画面边缘再回来时，
+       这一步决定了锁会不会跳到别人身上；
+    3. 都没有 —— 按面积×置信度选一只成熟目标；
+    4. 仍没有 —— 选置信度最高的，保证界面上始终有锁。
+    """
     if not tracks:
         return None
     by_id = {t["tid"]: t for t in tracks}
     if prev_tid in by_id:
         return prev_tid
+
+    # 2) 就近接回：用预测的移动速度放大一点搜索半径，快速移动的怪也能接上
+    if prev_box is not None:
+        cx = (prev_box[0] + prev_box[2]) / 2
+        cy = (prev_box[1] + prev_box[3]) / 2
+        bw = prev_box[2] - prev_box[0]
+        bh = prev_box[3] - prev_box[1]
+        radius = max(180.0, 2.0 * (bw + bh))
+        best, best_d = None, None
+        for t in tracks:
+            if t["conf"] < 0.35:
+                continue
+            b = t["box"]
+            d = (((b[0] + b[2]) / 2 - cx) ** 2 + ((b[1] + b[3]) / 2 - cy) ** 2) ** 0.5
+            if d <= radius and (best_d is None or d < best_d):
+                best, best_d = t["tid"], d
+        if best is not None:
+            return best
+
+    # 3) 面积×置信度：大的、近的优先
     best, best_score = None, -1.0
     for t in tracks:
         if t["hits"] < 5 or t["conf"] < 0.45:
@@ -1182,13 +1061,12 @@ def pick_lock(tracks, prev_tid):
         score = (x2 - x1) * (y2 - y1) * t["conf"]
         if score > best_score:
             best, best_score = t["tid"], score
-    if best is None:   # 没有成熟目标时退而选置信度最高的，保证始终有锁
-        t = max(tracks, key=lambda t: t["conf"])
-        best = t["tid"]
+    if best is None:   # 4) 没有成熟目标时退而选置信度最高的，保证始终有锁
+        best = max(tracks, key=lambda t: t["conf"])["tid"]
     return best
 
 
-tracker = IoUTracker()
+tracker = Tracker()
 
 
 def detect_loop():
@@ -1242,7 +1120,8 @@ def detect_loop():
             # 推理用涂掉 UI 的副本；画框画在原始帧上，画面里 UI 照常可见
             infer_src = apply_ui_mask(frame.copy(), rects) if rects else frame
             res = model.predict(infer_src, imgsz=cfg["imgsz"],
-                                conf=cfg["conf"], verbose=False, device="cpu")[0]
+                                conf=min(cfg["conf"], LOW_DETECT_CONF),
+                                verbose=False, device="cpu")[0]
         except Exception as e:  # noqa: BLE001
             det_state["error"] = f"推理失败: {type(e).__name__}: {e}"
             time.sleep(0.5)
@@ -1272,16 +1151,21 @@ def detect_loop():
                                   cv2.COLOR_BGR2GRAY).astype(np.float32)
         with det_lock:
             prev = det_state["lock"]["tid"] if det_state["lock"] else None
-        locked_tid = pick_lock(tracks, prev)
+            prev_box = det_state["lock_box"]
+            stale = time.time() - det_state["lock_ts"] > 3.0
+        if stale:                      # 锁定已经断了 3 秒，别再拿旧位置去找
+            prev_box = None
+        locked_tid = pick_lock(tracks, prev, prev_box)
 
         counts = {}
         for tr in tracks:
             counts[tr["name"]] = counts.get(tr["name"], 0) + 1
-        lock_info = None
+        lock_info, lock_box = None, None
         for tr in tracks:
             if tr["tid"] == locked_tid:
                 lock_info = {"tid": tr["tid"], "name": tr["name"],
                              "conf": round(tr["conf"], 2)}
+                lock_box = list(tr["box"])
 
         annotated = draw_tracks(frame, tracks, locked_tid)
 
@@ -1290,6 +1174,9 @@ def detect_loop():
             det_state["infer_ms"] = (time.perf_counter() - tick) * 1000
             det_state["counts"] = counts
             det_state["lock"] = lock_info
+            if lock_box is not None:   # 锁上了才更新；丢了保留最后位置，便于下次接回同一只
+                det_state["lock_box"] = lock_box
+                det_state["lock_ts"] = time.time()
             det_state["error"] = ""
         n += 1
         dt = time.perf_counter() - t0
@@ -1630,7 +1517,9 @@ async def detect_toggle():
             det_state["annotated"] = None
             det_state["counts"] = {}
             det_state["lock"] = None
-        tracker.tracks.clear()
+            det_state["lock_box"] = None
+            det_state["lock_ts"] = 0.0
+        tracker.reset()
     return JSONResponse({"enabled": det_state["enabled"], "loading": det_state["loading"]})
 
 
