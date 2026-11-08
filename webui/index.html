@@ -234,6 +234,7 @@
         <div class="bar" data-k="exp"><span class="bk">EXP</span><span class="btrack"><i></i></span><span class="bv">—</span></div>
       </div>
       <div class="rows">
+        <div class="row"><span class="k">条位置</span><span class="v small" id="barsrc">—</span></div>
         <div class="row"><span class="k">客户区</span><span class="v" id="size">—</span></div>
         <div class="row"><span class="k">采集帧率</span><span class="v" id="cfps">—</span></div>
         <div class="row"><span class="k">推送帧率</span><span class="v" id="sfps">—</span></div>
@@ -251,7 +252,7 @@
         <button id="modeBtn">模式: 速度</button>
         <button id="focusBtn" title="把游戏窗口抬到最前并给焦点（截图前必做）">前置游戏</button>
         <button id="calBtn" title="依次框出 HP / MP / EXP 条的位置（沿条拖一下就行，会自动补齐整条槽）">标定条</button>
-        <button id="autoBtn" title="在画面底部自动找三条血/蓝/经验条，换客户端或换分辨率后点一下就好">自动定位</button>
+        <button id="autoBtn" title="在画面底部自动找三条血/蓝/经验条；自动模式下换客户端、换分辨率会自己重新定位，一般不用点">自动定位</button>
         <button id="snap">存快照</button>
       </div>
       <div class="filterrow">
@@ -260,7 +261,7 @@
     </div>
   </div>
 
-  <p class="note">双击选区进入编辑（拖动移动 · 拉角缩放 · 右上角 ✕ 删除）· 右键画面可添加排除区 · 改动即时保存到 webui/masks.json ·「标定条」按 HP → MP → EXP 顺序沿条拖一个框（只框彩色部分也行，会自动补齐整条槽）</p>
+  <p class="note">双击选区进入编辑（拖动移动 · 拉角缩放 · 右上角 ✕ 删除）· 右键画面可添加排除区 · 改动即时保存到 webui/masks.json · 三条状态条默认自动定位（换客户端/换分辨率会自己重定位）；自动定位失效时才用「标定条」按 HP → MP → EXP 顺序沿条拖一个框（只框彩色部分也行，会自动补齐整条槽），手框过的坐标不再被自动覆盖</p>
 </div>
 
 <div class="ctx" id="ctxMenu"></div>
@@ -683,6 +684,12 @@
       const r = await (await fetch("/api/bars", { cache: "no-store" })).json();
       barsCfg = r.bars || {};
       renderBars(r.values);
+      const el = $("barsrc");
+      if (el) {
+        const src = r.source === "manual" ? "手动" : "自动";
+        el.textContent = r.note ? `${src} · ${r.note}` : src;
+        el.title = r.note || "";
+      }
     } catch (e) { /* 服务未就绪：保持上次读数 */ }
   }
 

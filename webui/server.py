@@ -7,6 +7,7 @@ Open: http://127.0.0.1:8765
 import asyncio
 import ctypes
 import json
+import re
 import socket
 import sys
 import threading
@@ -338,6 +339,7 @@ BAR_LABEL = {"hp": "HP", "mp": "MP", "exp": "EXP"}
 BAR_HUE_TOL = 30        # 色相容差（OpenCV 色相 0~180，对应 0~360°）
 BAR_S_MIN, BAR_V_MIN = 90, 90   # 填充色一定"够艳够亮"，空槽是浅灰(S≈0)或深色(V<80)
 BAR_EDGE_V = 110        # 槽内（含右侧浅灰空槽）V>=150，槽外 HUD 底板 V≈68，取中间值
+BAR_JUMP_MIN = 12       # 相邻列中位色的跳变阈值（BGR 三通道差之和），用来判断"是不是一条槽"
 
 # 默认坐标：1366×768 怀旧服实测（归一到客户区宽高）。
 # 实测三条槽（含左右 1px 边框）：红 465-631 / 蓝 633-799 / 黄绿 809-975，都在 y 747-763。
@@ -352,6 +354,8 @@ DEFAULT_BARS = {
 
 bar_lock = threading.Lock()
 BAR_CFG = {}
+# 坐标是谁定的：auto = 自动定位（分辨率/客户端变了可以自己重定位）；manual = 用户手框过，不再自动覆盖
+BAR_META = {"source": "auto", "res": None}
 
 
 def _clean_hue(v):
@@ -389,9 +393,16 @@ def _clean_rect(raw):
 
 def load_bars():
     cfg = {k: dict(v) for k, v in DEFAULT_BARS.items()}
+    meta = {"source": "auto", "res": None}
     if BAR_FILE.exists():
         try:
             data = json.loads(BAR_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                if data.get("source") in ("auto", "manual"):
+                    meta["source"] = data["source"]
+                res = data.get("res")
+                if isinstance(res, (list, tuple)) and len(res) == 2:
+                    meta["res"] = [int(res[0]), int(res[1])]
             raw = data.get("bars", {}) if isinstance(data, dict) else {}
             for k in BAR_KINDS:
                 item = raw.get(k)
@@ -403,6 +414,7 @@ def load_bars():
                 cfg[k] = {**rect, "hue": _clean_hue(item.get("hue"))}
         except Exception as e:  # noqa: BLE001
             print(f"[bars] 读取 {BAR_FILE.name} 失败，改用默认坐标: {e}")
+    BAR_META.update(meta)
     return cfg
 
 
@@ -410,9 +422,21 @@ def save_bars():
     tmp = BAR_FILE.with_name(BAR_FILE.name + ".tmp")
     with bar_lock:
         data = {k: dict(v) for k, v in BAR_CFG.items()}
-    tmp.write_text(json.dumps({"bars": data}, ensure_ascii=False, indent=2),
+        meta = dict(BAR_META)
+    tmp.write_text(json.dumps({"source": meta.get("source", "auto"),
+                               "res": meta.get("res"),
+                               "bars": data}, ensure_ascii=False, indent=2),
                    encoding="utf-8")
     tmp.replace(BAR_FILE)
+
+
+def mark_bars(source=None, res=None):
+    """记录坐标来源和定这套坐标时的客户区分辨率。"""
+    with bar_lock:
+        if source in ("auto", "manual"):
+            BAR_META["source"] = source
+        if res is not None:
+            BAR_META["res"] = [int(res[0]), int(res[1])]
 
 
 BAR_CFG = load_bars()
@@ -549,9 +573,13 @@ def autolocate_bars(frame):
     # 三条全采样不到颜色 -> 多半是把别的东西（白底对话框之类）当成了槽，别覆盖原配置
     if all(v is None for v in hues.values()):
         return False, "找到的三段没有填充色，可能是误判，请手动标定", None
+    ok, why = bars_valid(frame, cfg)           # 几何对了但指错地方，也别写进去
+    if not ok:
+        return False, f"定位结果没通过自检：{why}", None
     with bar_lock:
         BAR_CFG.clear()
         BAR_CFG.update(cfg)
+    mark_bars(source="auto", res=(w, h))
     save_bars()
     return True, "已自动定位", cfg
 
@@ -627,6 +655,44 @@ def measure_bar(frame, rect, hue=None):
     return min(1.0, filled / n)
 
 
+def bars_valid(frame, cfg=None):
+    """自检：手上这套坐标现在还是不是"三条并排的槽"。返回 (ok, 原因)。
+
+    纯颜色/几何判据，不认字也不认皮肤：
+      1. 槽宽 —— 真槽被 slot_bounds 撑出来最多比框宽一点；指到一片亮底板时会撑到几百像素。
+      2. 横向跳变 —— 真槽横向只有"填充 → 空槽"一处颜色跳变；指错地方时整条都在花。
+      3. 三条等宽 —— 三条槽是同一套 UI 画的，宽度必然接近。
+    自检只用来判断"该不该重新自动定位"，不会改任何配置。
+    """
+    cfg = bar_snapshot() if cfg is None else cfg
+    h, w = frame.shape[:2]
+    widths = []
+    for kind in BAR_KINDS:
+        rect = cfg.get(kind)
+        if not rect:
+            return False, f"{BAR_LABEL[kind]} 还没有坐标"
+        x1, y1, x2, y2 = _roi_px(rect, w, h)
+        if x2 - x1 < 8 or y2 - y1 < 2:
+            return False, f"{BAR_LABEL[kind]} 的框太小"
+        sx1, sx2 = slot_bounds(frame, x1, y1, x2, y2)
+        ws = sx2 - sx1
+        if ws > max(int((x2 - x1) * 2.2), (x2 - x1) + 40):
+            return False, f"{BAR_LABEL[kind]} 附近不是一条槽"
+        sub = frame[y1:y2, sx1 + 1:sx2]
+        if sub.shape[1] < 8 or sub.shape[0] < 2:
+            return False, f"{BAR_LABEL[kind]} 裁出来的区域太小"
+        med = np.median(sub.astype(np.int16), axis=0)          # 每列中位色
+        d = np.abs(np.diff(med, axis=0)).sum(axis=1)
+        d = np.convolve(d, np.ones(3, np.float32) / 3, mode="same")
+        jumps = int((d > BAR_JUMP_MIN).sum())
+        if jumps > max(4, int(ws * 0.15)):
+            return False, f"{BAR_LABEL[kind]} 那一带颜色太碎"
+        widths.append(ws)
+    if widths and max(widths) - min(widths) > 0.3 * max(widths):
+        return False, "三条槽宽度差太多"
+    return True, ""
+
+
 def bars_debug_frame(frame):
     """给前端/自检用：把三个 ROI 和逐列判定结果画出来。"""
     out = frame.copy()
@@ -648,20 +714,58 @@ bar_state = {
     "values": {k: None for k in BAR_KINDS},
     "updated": 0.0,
     "error": "",
+    "note": "",          # 自检/自动定位的结果说明，给前端显示
     "fps": 0.0,
 }
 _bar_thread_started = [False]
+
+BAR_CHECK_EVERY = 20        # 每 20 帧（约 2s）做一次自检
+BAR_RETRY_SEC = 5.0         # 自检不过时，最多每 5s 重定位一次，别把 CPU 吃满
+
+
+def maybe_autolocate(frame):
+    """坐标来源是 auto 时，自己判断要不要重新定位。
+
+    触发条件：客户区分辨率变了，或者周期自检判定现在这套坐标已经不像三条槽
+    （换客户端/换皮肤/窗口被识别成别的尺寸都会撞上）。手动标定过就不动，只提示。
+    """
+    h, w = frame.shape[:2]
+    source = BAR_META.get("source", "auto")
+    res = BAR_META.get("res")
+    moved = bool(res) and (abs(res[0] - w) > 2 or abs(res[1] - h) > 2)
+    ok, why = bars_valid(frame, bar_snapshot())
+    if ok and not moved:
+        bar_state["note"] = "自动定位有效" if source == "auto" else "手动标定有效"
+        return False
+    if source == "manual":
+        bar_state["note"] = "手动标定的坐标对不上这个画面，可点「自动定位」" if not ok else "手动标定有效"
+        return False
+    if time.time() < bar_state.get("_next_try", 0.0):
+        return False
+    bar_state["_next_try"] = time.time() + BAR_RETRY_SEC
+    ok2, msg, _ = autolocate_bars(frame)
+    bar_state["note"] = msg if ok2 else f"自动定位失败：{msg}"
+    return ok2
 
 
 def bars_loop():
     prev = {}
     n, t0 = 0, time.perf_counter()
+    tick = 0
     while True:
         if not bar_state["enabled"] or not grabber.window_found:
             time.sleep(0.25)
             continue
-        cfg = bar_snapshot()
         frame = grabber.snapshot()
+        tick += 1
+        if tick == 1 or tick % BAR_CHECK_EVERY == 1:
+            try:
+                if maybe_autolocate(frame):
+                    prev.clear()
+                    continue           # 换了一套坐标，这一帧作废，下一帧用新坐标算
+            except Exception as e:  # noqa: BLE001
+                bar_state["error"] = f"autolocate: {type(e).__name__}: {e}"
+        cfg = bar_snapshot()
         vals = {}
         for kind in BAR_KINDS:
             rect = cfg.get(kind)
@@ -1168,6 +1272,7 @@ async def stats():
 async def bars_get():
     with bar_lock:
         vals = dict(bar_state["values"])
+        source = BAR_META.get("source", "auto")
     return JSONResponse({
         "bars": bar_snapshot(),
         "values": vals,
@@ -1175,6 +1280,8 @@ async def bars_get():
         "fps": round(bar_state["fps"], 1),
         "updated": round(bar_state["updated"], 3),
         "labels": BAR_LABEL,
+        "source": source,
+        "note": bar_state["note"],
         "error": bar_state["error"],
     })
 
@@ -1204,6 +1311,7 @@ async def bars_set(payload: dict = Body(...)):
         hue = bar_snapshot().get(kind, {}).get("hue")
     with bar_lock:
         BAR_CFG[kind] = {**rect, "hue": hue}
+    mark_bars(source="manual", res=(w, h))   # 手框过的坐标不再被自动定位覆盖
     save_bars()
     return JSONResponse({"ok": True, "kind": kind, "rect": rect, "hue": hue})
 
@@ -1213,6 +1321,7 @@ async def bars_reset():
     with bar_lock:
         BAR_CFG.clear()
         BAR_CFG.update({k: dict(v) for k, v in DEFAULT_BARS.items()})
+    mark_bars(source="auto", res=None)
     save_bars()
     return JSONResponse({"ok": True, "bars": bar_snapshot()})
 
