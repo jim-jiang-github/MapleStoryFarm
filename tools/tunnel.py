@@ -76,28 +76,25 @@ def lan_ips():
 
 
 def banner(url, tool):
-    full = f"{url}/?k={TOKEN}" if TOKEN else f"{url}/"
     line = "=" * 68
+    tail = f"?k={TOKEN}" if TOKEN else ""
+    m = f"{url}/m{tail}"
     print()
     print(line)
-    print(f"  公网地址（带口令，直接发这个链接就行）  [{tool}]")
+    print(f"  手机在外面看（这个就够了，建议加到主屏幕）  [{tool}]")
     print()
-    print(f"  {full}")
-    print()
-    # /m 是给手机的"看一眼"页面：640px 缩略图 + 大字状态，2 秒一张才 50kbps，
-    # 隧道再慢也看得动；主页面那条 H.264 需要 900k 以上，留给电脑。
-    m = f"{url}/m" + (f"?k={TOKEN}" if TOKEN else "")
-    print(f"  手机在外面看一眼（省流量，建议加到主屏幕）:")
     print(f"  {m}")
     print()
     if TOKEN:
         print(f"  口令: {TOKEN}    （不带 ?k= 打不开，7 天内免重复输入）")
     else:
         print("  注意: 没设 PREVIEW_TOKEN，任何人都能打开这个地址")
+    print()
+    print("  在家 / 局域网（电脑上改屏蔽区、标定血条用这个，画面是实时流）:")
     for ip in lan_ips():
-        tail = f"/?k={TOKEN}" if TOKEN else "/"
-        print(f"  手机同 WiFi 就看这个（更快，不占上行）: http://{ip}:{PORT}{tail}")
-    if copy_to_clipboard(full):
+        print(f"  http://{ip}:{PORT}/{tail}")
+    if copy_to_clipboard(m):
+        print()
         print("  已复制到剪贴板 ✓")
     print(line)
     print()

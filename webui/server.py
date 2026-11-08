@@ -23,11 +23,10 @@ import numpy as np
 import uvicorn
 import win32con
 import win32gui
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
-import video as video_mod
 
 ctypes.windll.user32.SetProcessDPIAware()
 
@@ -1331,153 +1330,6 @@ def encode(frame, width=None, quality=JPEG_QUALITY):
     return buf.tobytes() if ok else b""
 
 
-# ---------------- 实时视频（H.264 / MSE） ----------------
-# 外网访问不再一帧一张 JPEG：ffmpeg 编 H.264（只传变化的部分），每 0.5s 切一个 fMP4
-# 分片，前端用"短请求"逐片取、喂给 MediaSource。带宽约 2 Mbps，延迟 ~1 秒；
-# 长连接直播在免费穿透上会被缓冲成十几秒，短请求没有这个问题。
-def _video_frame():
-    with det_lock:
-        ann = det_state["annotated"] if det_state["enabled"] else None
-    return ann if ann is not None else grabber.snapshot()
-
-
-video_hub = video_mod.VideoHub(_video_frame, overlay=bars_overlay_frame)
-
-
-def _video_stream(bars, w, fps, kb=0):
-    st = video_hub.get(width=(w or None), fps=(fps or None), bars=bool(bars),
-                       bitrate=(f"{kb}k" if kb else None))
-    st.touch()
-    return st
-
-
-@app.get("/video/info")
-async def video_info(bars: int = 0, w: int = 0, fps: int = 0, kb: int = 0):
-    st = _video_stream(bars, w, fps, kb)
-    info = st.info()
-    info["available"] = bool(video_mod.ffmpeg_exe())
-    return JSONResponse(info)
-
-
-@app.get("/video/init")
-async def video_init(bars: int = 0, w: int = 0, fps: int = 0, kb: int = 0):
-    """初始化段（ftyp+moov，几百字节）。客户端拿它建 SourceBuffer，X-Seq 是起始分片号。"""
-    st = _video_stream(bars, w, fps, kb)
-    t0 = time.time()
-    while not st.init and not st.stopped.is_set() and time.time() - t0 < 6:
-        await asyncio.sleep(0.05)
-    if not st.init:
-        return Response((st.error or "视频流未就绪").encode("utf-8"),
-                        status_code=503, media_type="text/plain; charset=utf-8")
-    # 从最新一片开始：新连上的人不需要把积压的旧画面补完，直接看现在
-    head = (st.frags[-1][0] + 1) if st.frags else st.seq
-    return Response(st.init, media_type="video/mp4",
-                    headers={"Cache-Control": "no-store",
-                             "X-Seq": str(head), "X-Oldest": str(st.frags[0][0] if st.frags else st.seq),
-                             "X-Codec": video_mod.VIDEO_MIME})
-
-
-@app.get("/video/seg")
-async def video_seg(i: int = 0, bars: int = 0, w: int = 0, fps: int = 0, kb: int = 0,
-                     wait: float = 2.0, n: int = 0):
-    """取第 i 片起已经生成的分片。没有就挂最多 wait 秒（短连接，隧道能过）。
-
-    返回 204 = 暂时没新片，按 X-Next 重试；409 = 客户端落后太多，分片已被回收，重连。
-
-    n>1 时一次凑够 n 片：免费隧道每请求的固定往返就有 1 秒上下，
-    1 秒一片永远追不上实时，必须一次搬 2 秒的量。
-    """
-    st = _video_stream(bars, w, fps, kb)
-    want = n if n > 0 else st.hls_group
-    nxt, blob = await asyncio.to_thread(st.get_frags, i, min(max(wait, 0.1), 4.0),
-                                       min(max(want, 1), 6))
-    if nxt is None:
-        return Response(status_code=409, headers={"X-Resync": "1", "Cache-Control": "no-store"})
-    headers = {"X-Next": str(nxt), "Cache-Control": "no-store"}
-    if st.last_ts:
-        # 最新一片"出炉"到现在多久（前端加上播放缓冲就是端到端延迟）
-        headers["X-Age"] = str(int((time.time() - st.last_ts) * 1000))
-    if not blob:
-        return Response(status_code=204, headers=headers)
-    return Response(blob, media_type="video/mp4", headers=headers)
-
-
-@app.get("/video/live")
-async def video_live(bars: int = 0, w: int = 0, fps: int = 0, kb: int = 0):
-    """单条长连接直播：init + 之后所有分片。
-
-    隧道支持流式（cloudflared / 直连 / 局域网）时走这条最省事，延迟最低；
-    像 tunnelmole 这种会把长连接攒一大坨再发的，前端探不到数据会自动改用 /video/seg。
-    """
-    st = _video_stream(bars, w, fps, kb)
-
-    async def gen():
-        t0 = time.time()
-        while not st.init and not st.stopped.is_set() and time.time() - t0 < 6:
-            await asyncio.sleep(0.05)
-        if not st.init:
-            return
-        yield st.init
-        seq = st.frags[-1][0] + 1 if st.frags else st.seq
-        while not st.stopped.is_set():
-            nxt, blob = await asyncio.to_thread(st.get_frags, seq, 3.0)
-            if nxt is None:
-                break
-            seq = nxt
-            if blob:
-                yield blob
-            else:
-                await asyncio.sleep(0.05)
-
-    return StreamingResponse(gen(), media_type="video/mp4",
-                             headers={"Cache-Control": "no-store",
-                                      "X-Accel-Buffering": "no"})
-
-
-# ---------------- HLS：给 iPhone / iPad 用 ----------------
-# iOS Safari 没有 MSE（iOS 17 之前的 iPhone 完全没有，之后的 ManagedMediaSource 也挑食），
-# 以前只能退到"一帧一张 JPEG"——在 1 秒往返的隧道上就是 1 帧/秒的幻灯片，又卡又糊。
-# Safari 天生会放 HLS，而我们本来就是"1 秒一个 keyframe"对齐的 fMP4 分片，
-# 顺手拼个滚动播放列表就能原生播，画质和帧率跟 MSE 那条路完全一样。
-def _hls_query(request):
-    q = request.url.query
-    return ("?" + q) if q else ""
-
-
-@app.get("/video/hls/index.m3u8")
-async def video_hls_playlist(request: Request, bars: int = 0, w: int = 0,
-                             fps: int = 0, kb: int = 0):
-    st = _video_stream(bars, w, fps, kb)
-    # 冷启动时先等够一整段：空播放列表 Safari 会当成错误直接不播
-    t0 = time.time()
-    while len(st.frags) < st.hls_group and not st.stopped.is_set() and time.time() - t0 < 4:
-        await asyncio.sleep(0.1)
-    text = st.hls_playlist(extra=_hls_query(request))
-    return Response(text, media_type="application/vnd.apple.mpegurl",
-                    headers={"Cache-Control": "no-store"})
-
-
-@app.get("/video/hls/init.mp4")
-async def video_hls_init(bars: int = 0, w: int = 0, fps: int = 0, kb: int = 0):
-    st = _video_stream(bars, w, fps, kb)
-    t0 = time.time()
-    while not st.init and not st.stopped.is_set() and time.time() - t0 < 6:
-        await asyncio.sleep(0.05)
-    if not st.init:
-        return Response(status_code=503)
-    return Response(st.init, media_type="video/mp4",
-                    headers={"Cache-Control": "no-store"})
-
-
-@app.get("/video/hls/seg_{seq}.m4s")
-async def video_hls_seg(seq: int, bars: int = 0, w: int = 0, fps: int = 0, kb: int = 0):
-    st = _video_stream(bars, w, fps, kb)
-    blob = await asyncio.to_thread(st.hls_segment, seq)
-    if not blob:
-        return Response(status_code=404, headers={"Cache-Control": "no-store"})
-    return Response(blob, media_type="video/mp4", headers={"Cache-Control": "no-store"})
-
-
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return HTMLResponse(
@@ -1511,16 +1363,6 @@ async def api_motion():
             "ready": motion_state["ready"],
         })
 
-
-
-@app.get("/api/px")
-async def speed_probe(bytes: int = 262144):
-    """测速用：返回一段**不可压缩**的随机字节，前端据此算出真实链路吞吐，
-    再决定给多少码率。免费隧道质量一天之内能从 1.5 Mbps 掉到 400 kbps，
-    写死码率的后果就是「昨天能看，今天一卡一卡的」。"""
-    n = max(16384, min(int(bytes), 2 * 1024 * 1024))
-    return Response(content=os.urandom(n), media_type="application/octet-stream",
-                    headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/ver")
