@@ -1188,19 +1188,22 @@ def pick_visible(tracks, shown, now, show_conf, show_hits, prev_tid=None):
 # 按原尺寸精修（~2ms）。跑在独立线程里按 15fps 走，不占检测线程的推理时间。
 CHAR_TPL_FILE = Path(__file__).with_name("chartpl.png")
 CHAR_CONF_FILE = Path(__file__).with_name("charconf.json")
-CHAR_THRESH_DEFAULT = 0.75
+CHAR_THRESH_DEFAULT = 0.80
 CHAR_MIN_W, CHAR_MIN_H = 24, 8      # 比这还小的框多半是框歪了
 CHAR_LOST_AFTER = 0.6               # 超过这么久没命中就不再画标记（秒）
 CHAR_FPS = 15
-CHAR_SCALE_MIN_SCORE = 0.80     # 缩放标定要拿到这么高才信，否则保持 1:1
+# 尺度只在「分数确实很硬」时采信：画面里没有这块图时，随便一个尺度也能刷到 0.7 上下
+# 的假高分，按它把模板压扁，之后就永远匹配不上了。名字牌真身在 0.95 以上，所以
+# 0.88 这条线足够区分「真找到了、只是尺度差了 2%」和「画面里压根没有人」。
+CHAR_SCALE_MIN_SCORE = 0.88
+CHAR_SCALE_COARSE_MIN = 0.80    # 半分辨率粗扫的采信线（会回全图复核）
 
 char_lock = threading.Lock()
 char_state = {
     "enabled": True,
     "thresh": CHAR_THRESH_DEFAULT,
-    "tpl": None,          # 模板原图（灰度，只用来重新派生）
-    "tpl_e": None,        # 模板的边缘幅值图：匹配用这个，比灰度稳得多
-    "tpl_e_half": None,   # 半尺寸边缘图，粗搜用
+    "tpl": None,          # 模板原图（灰度，未裁紧；换尺度时由它重算）
+    "tpl_w": None,        # 裁紧 + 平滑后的白字掩码：实际参与匹配的就是它
     "size": (0, 0),
     "box": None,          # 最近一次命中的框 [x1,y1,x2,y2]（全分辨率）
     "dir": "below",       # 人物在模板的下方(below)还是上方(above)，决定箭头方向
@@ -1245,32 +1248,85 @@ def _load_char_conf():
         char_state["scale"] = 1.0
 
 
-def edge_mag(gray):
-    """梯度幅值图。
+CHAR_WHITE_THR = 185       # 帧里「白字」的亮度下限
+CHAR_TXT_THR = 150         # 模板里白字的亮度下限
+CHAR_BLUR_SIGMA = 1.0      # 匹配前的高斯平滑（把 1~2px 笔画糊到 3~4px，峰变宽）
+# 白字图里 99% 是 0（黑）。直接做 TM_CCOEFF_NORMED，那些全黑的小窗口方差≈0，
+# 归一化时除出来一堆 1.000 的假峰（实测 top5 全是 1.000，真身只有 0.958 排不上）。
+# 给两边都加 0.02 的底噪，常值窗口的相关系数就退回 0，假峰全消失。
+CHAR_EPS = 0.02
+CHAR_LOCAL_RADIUS = 60     # 锁定后先在上一帧位置 ±60px 里找
+CHAR_WIDE_RADIUS = 200     # 找不到再放宽到 ±200（跳跃/瞬移，不改走全图）
+CHAR_REACQ_MISS = 6        # 连续 miss 这么多帧才回退全图重找
+CHAR_DIST_PENALTY = 0.05   # 多候选时对「离上次位置远」的轻微惩罚
+# 屏幕 HUD 区（底部状态栏/顶部/左右两条）里也印着玩家名字，而且那处白字的形状和
+# 名字牌完全一样（实测分数 0.92，只比真身低 0.06）。人物走出画面时全图搜索会锁到
+# 那儿去，看起来就是「框突然跳到左下角」。落在这些区域里的候选要额外扣分。
+CHAR_HUD_PENALTY = 0.12
+CHAR_HUD_BOTTOM = 0.93     # y > 93%H
+CHAR_HUD_TOP = 0.05        # y < 5%H
+CHAR_HUD_SIDE = 0.09       # x < 9%W 或 x > 91%W（左侧小地图 / 右侧任务栏）
 
-    名字牌匹配为什么不用灰度直接算：名字是白字压在透明底上，底下是滚动的地面和
-    特效，同一行字在相邻两帧的灰度分数能从 1.00 掉到 0.77；换成梯度幅值后同样两帧
-    是 0.95 / 0.91 —— 文字边缘几乎不变，背景亮度变了也不影响。
+
+def _white_map(gray, thr=None):
+    """帧 -> 白字似然图。
+
+    为什么不用灰度/边缘做相关：名字牌是纯白细笔画，底下是滚动的地面和特效，同一行字
+    相邻两帧的灰度分能从 1.00 掉到 0.77；灰度还要求背景亮度也一致（实测模板背景均值
+    19、帧里 136，直接灰度匹配峰值只有 0.74，而且误检能到 0.64，根本分不开）。
+
+    这里只保留「亮且细」的像素：顶帽 = 原图 - 开运算。开运算会把大块亮区（云、白墙、
+    地面高光）留下来，相减后归零；只有 1~2px 宽的笔画会被保留。这样背景怎么变都不影响，
+    剩下的纯白细结构里，模板的形状就是唯一线索。
     """
-    g = cv2.GaussianBlur(gray, (3, 3), 0)
-    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
-    return cv2.convertScaleAbs(cv2.magnitude(gx, gy))
+    thr = CHAR_WHITE_THR if thr is None else thr
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    opened = cv2.morphologyEx(gray, cv2.MORPH_OPEN, k)
+    top = cv2.subtract(gray, opened)
+    m = ((gray >= thr) & (top >= 18)).astype(np.float32)
+    if m.sum() < 8:                       # 这一块压根没有白字
+        return m + CHAR_EPS
+    return cv2.GaussianBlur(m, (0, 0), CHAR_BLUR_SIGMA) + CHAR_EPS
 
 
-def _set_char_tpl(gray):
-    """装上模板。匹配用的是边缘图，半尺寸那份给粗搜用，一起算好省得每帧重算。"""
+def _text_spread(gray):
+    """白字在图上铺开的比例 (宽比, 高比)。两者都很大 = 传的是整张截图，不是名字牌。"""
+    m = (gray >= CHAR_TXT_THR)
+    if int(m.sum()) < 25:
+        return 0.0, 0.0
+    ys, xs = np.where(m)
     h, w = gray.shape[:2]
-    half = cv2.resize(gray, (max(8, w // 2), max(5, h // 2)), interpolation=cv2.INTER_AREA)
-    with char_lock:
-        char_state["tpl"] = gray
-        char_state["tpl_e"] = edge_mag(gray)
-        char_state["tpl_e_half"] = edge_mag(half)
-        char_state["size"] = (w, h)
-        char_state["box"] = None
-        char_state["score"] = 0.0
-        char_state["misses"] = 0
-        char_state["error"] = ""
+    return ((xs.max() - xs.min() + 1) / float(w), (ys.max() - ys.min() + 1) / float(h))
+
+
+def _char_tpl_mask(gray):
+    """模板灰度图 -> (裁紧后的灰度, 白字掩码[未模糊])。
+
+    上传的图往往带一圈背景（实测用户那张 20px 高里有 3 行纯背景），背景会把相关分数
+    拉低、还会把框撑大。这里按白字外接框裁紧，只留 2px 余量。
+    """
+    m = (gray >= CHAR_TXT_THR).astype(np.uint8)
+    if int(m.sum()) >= 25:
+        ys, xs = np.where(m > 0)
+        pad = 2
+        y0, y1 = max(0, int(ys.min()) - pad), min(gray.shape[0], int(ys.max()) + 1 + pad)
+        x0, x1 = max(0, int(xs.min()) - pad), min(gray.shape[1], int(xs.max()) + 1 + pad)
+        gray = gray[y0:y1, x0:x1]
+        m = (gray >= CHAR_TXT_THR).astype(np.uint8)
+    if int(m.sum()) < 20:                 # 不是纯白字（灰字/描边字）：按分位数兜底
+        t = float(np.percentile(gray, 90))
+        m = (gray >= t).astype(np.uint8)
+    return gray, m.astype(np.float32)
+
+
+def _tpl_mask_at(gray, scale=1.0):
+    """按指定缩放生成匹配用的模板（裁紧 + 缩放 + 平滑）。"""
+    _, m = _char_tpl_mask(gray)
+    if abs(scale - 1.0) > 0.005:
+        w = max(8, int(round(m.shape[1] * scale)))
+        h = max(5, int(round(m.shape[0] * scale)))
+        m = cv2.resize(m, (w, h), interpolation=cv2.INTER_AREA)
+    return cv2.GaussianBlur(m, (0, 0), CHAR_BLUR_SIGMA) + CHAR_EPS
 
 
 def _gray_from_image(raw):
@@ -1295,40 +1351,64 @@ def _decode_data_url(s):
         return None
 
 
-def _char_scale_sweep(gray, frame_gray):
-    """在 0.25~1.60 里试一遍缩放，找模板和画面像素尺度最匹配的那个。
+def _set_char_tpl(gray, scale=1.0):
+    """装上模板。gray 存原图（换尺度时重算用），tpl_w 是实际参与匹配的掩码。"""
+    tpl_w = _tpl_mask_at(gray, scale)
+    h, w = tpl_w.shape[:2]
+    with char_lock:
+        char_state["tpl"] = gray
+        char_state["tpl_w"] = tpl_w
+        char_state["size"] = (w, h)
+        char_state["box"] = None
+        char_state["score"] = 0.0
+        char_state["misses"] = 0
+        char_state["error"] = ""
 
-    上传的名字牌可能来自别的分辨率截图（4K 截图裁的、手机截图裁的），像素尺度
-    和当前画面不一定 1:1。先在半分辨率上粗扫一遍定尺度，之后每帧只按这个尺度
-    匹配、不再多尺度烧 CPU。返回 (best_score, best_scale)。
+
+def _probe_scale(fw, gray, sc):
+    """在某个尺度上试一次，返回 (score, scale, 显著性) 或 None。
+
+    显著性 = 最高分 - 99.9 分位分（降采样算，够用且快）。
     """
-    H, W = frame_gray.shape[:2]
-    fe = edge_mag(frame_gray)
-    small = cv2.resize(fe, (W // 2, H // 2), interpolation=cv2.INTER_AREA)
-    sh, sw = small.shape[:2]
-    te = edge_mag(gray)
-    th, tw = te.shape[:2]
-    best = (-1.0, 1.0)
-    at_one = -1.0
-    for sc in np.arange(0.25, 1.61, 0.05):
-        w, h = int(round(tw * sc / 2)), int(round(th * sc / 2))
-        # 太小的模板会在文字密集的 UI 上随机刷高分（多重比较），所以给个下限
-        if w < 16 or h < 8 or w >= sw or h >= sh:
-            continue
-        t = cv2.resize(te, (w, h), interpolation=cv2.INTER_AREA)
-        r = cv2.matchTemplate(small, t, cv2.TM_CCOEFF_NORMED)
-        _, mx, _, _ = cv2.minMaxLoc(r)
-        if abs(sc - 1.0) < 1e-6:
-            at_one = float(mx)
-        if mx > best[0]:
-            best = (float(mx), round(float(sc), 2))
-    # 只有「分数确实很硬」才相信这个尺度：画面里根本没有这块图时，随机噪声也能
-    # 刷到 0.6~0.7，按它把模板压扁就彻底废了。1:1 已经很硬就直接用 1:1。
-    if at_one >= CHAR_SCALE_MIN_SCORE:
-        return at_one, 1.0
-    if best[0] >= CHAR_SCALE_MIN_SCORE:
-        return best
-    return at_one, 1.0
+    H, W = fw.shape[:2]
+    t = _tpl_mask_at(gray, sc)
+    if t.shape[0] < 6 or t.shape[1] < 14 or t.shape[0] >= H or t.shape[1] >= W:
+        return None
+    r = cv2.matchTemplate(fw, t, cv2.TM_CCOEFF_NORMED)
+    _, mx, _, _ = cv2.minMaxLoc(r)
+    return float(mx), sc, 1.0          # 第三项留给以后换度量用，CCOEFF 不需要
+
+
+def _char_scale_sweep(gray, frame_gray):
+    """找一个让模板和画面像素尺度对得上的缩放，返回 (score, scale)。
+
+    名字牌是 2D UI，同一台机器稳定运行时 1:1 就够；但换窗口大小、换分辨率、或者
+    上传的图是从别的分辨率截图（4K、手机截图）裁的，尺度能差一倍。实测尺度差 2%
+    分数就从 0.98 掉到 0.93，差 8% 直接跳到别处。
+
+    全程在**全分辨率**上扫：曾经试过半分辨率粗扫省时间，但名字牌在半分辨率下只剩
+    十几像素宽，笔画糊成一片，0.5 和 0.32 分数一样 —— 扫出来的尺度全是错的。
+    全图扫 0.40~1.60（步长 4%）约 200ms，只在「上传」和「跟丢 4 秒后重标」时跑，
+    不进每帧路径。
+    """
+    fw = _white_map(frame_gray)
+    H, W = fw.shape[:2]
+    best = None                          # (score, scale, sig)
+    for sc in np.arange(0.40, 1.621, 0.04):
+        got = _probe_scale(fw, gray, round(float(sc), 3))
+        if got is not None and (best is None or got[0] > best[0]):
+            best = got
+    if best is None:
+        return 0.0, 1.0
+    if best[0] >= CHAR_SCALE_COARSE_MIN:
+        # 在最佳尺度附近再细调一次，免得 4% 的步长把分数压在 0.93 这种半高不高的位置
+        for d in (-0.03, -0.015, 0.015, 0.03):
+            got = _probe_scale(fw, gray, round(best[1] + d, 3))
+            if got is not None and got[0] > best[0]:
+                best = got
+    if best[0] < CHAR_SCALE_MIN_SCORE:
+        return best[0], 1.0              # 峰不够突出 / 分数不够硬：保持 1:1
+    return best[0], round(best[1], 3)
 
 
 def _install_char_tpl(gray):
@@ -1336,11 +1416,7 @@ def _install_char_tpl(gray):
     frame = grabber.snapshot()
     fg = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     score, scale = _char_scale_sweep(gray, fg)
-    if scale != 1.0:          # 按标定出来的尺度重采样，之后每帧都是 1:1
-        gray = cv2.resize(gray, (max(8, int(round(gray.shape[1] * scale))),
-                                 max(5, int(round(gray.shape[0] * scale)))),
-                          interpolation=cv2.INTER_AREA)
-    _set_char_tpl(gray)
+    _set_char_tpl(gray, scale)
     with char_lock:
         char_state["scale"] = scale
     _save_char_conf()
@@ -1366,47 +1442,134 @@ def load_char_tpl():
         img = None
     if img is None or not img.size or img.shape[1] < CHAR_MIN_W:
         return
-    sc = char_state["scale"]
-    if abs(sc - 1.0) > 0.01:      # 文件里存的是原图，按标定过的尺度在内存里重采样
-        img = cv2.resize(img, (max(8, int(round(img.shape[1] * sc))),
-                               max(5, int(round(img.shape[0] * sc)))),
-                         interpolation=cv2.INTER_AREA)
-    _set_char_tpl(img)
+    _set_char_tpl(img, char_state["scale"])
+
+
+def _best_peaks(res, n=5, rx=24, ry=8):
+    """取 n 个非极大峰（分数降序），就地抹掉邻域。返回 [(score, x, y)]。"""
+    out = []
+    r = res.copy()
+    for _ in range(n):
+        _, mx, _, loc = cv2.minMaxLoc(r)
+        if mx <= 0:
+            break
+        out.append((float(mx), int(loc[0]), int(loc[1])))
+        x, y = loc
+        r[max(0, y - ry):y + ry + 1, max(0, x - rx):x + rx + 1] = -1.0
+    return out
+
+
+def _local_search(g, tpl_w, box, radius):
+    """在 box 周围 ±radius 里搜一次，返回 (box, score) 或 None（峰压在边界上）。"""
+    th, tw = tpl_w.shape[:2]
+    H, W = g.shape[:2]
+    x1, y1 = max(0, box[0] - radius), max(0, box[1] - radius)
+    x2, y2 = min(W, box[2] + radius), min(H, box[3] + radius)
+    roi = _white_map(g[y1:y2, x1:x2])
+    if roi.shape[0] < th or roi.shape[1] < tw:
+        return None
+    res = cv2.matchTemplate(roi, tpl_w, cv2.TM_CCOEFF_NORMED)
+    _, mx, _, loc = cv2.minMaxLoc(res)
+    # 峰压在 ROI 边上：人已经走出去了，这一级的结果不可信
+    if (loc[0] <= 1 or loc[1] <= 1 or
+            loc[0] >= res.shape[1] - 2 or loc[1] >= res.shape[0] - 2):
+        return None
+    bx, by = x1 + int(loc[0]), y1 + int(loc[1])
+    return [bx, by, bx + tw, by + th], float(mx)
+
+
+def _hud_penalty(box, W, H):
+    """候选落在 HUD 区里就扣分（人物的名字牌不会在状态栏里）。"""
+    cx = (box[0] + box[2]) / 2.0 / W
+    cy = (box[1] + box[3]) / 2.0 / H
+    pen = 0.0
+    if cy > CHAR_HUD_BOTTOM or cy < CHAR_HUD_TOP:
+        pen += CHAR_HUD_PENALTY
+    if cx < CHAR_HUD_SIDE or cx > 1.0 - CHAR_HUD_SIDE:
+        pen += CHAR_HUD_PENALTY
+    return pen
 
 
 def find_char(frame):
-    """在当前画面里找名字牌。返回 (box, score)；box 为全分辨率像素坐标。"""
+    """在当前画面里找名字牌。返回 (box, score)；box 为全分辨率像素坐标。
+
+    三级策略（前两级都不到 0.2ms，只有真丢了才走全图）：
+      1) 局部 ±60px —— 正常跟踪，逐帧位移一般 < 20px，一定落在里面；
+      2) 局部 ±200px —— 跳跃/瞬移/被击退时兜住，避免「闪一下重新找」；
+      3) 全图 —— 取前 5 个峰，按「分数 - 位置惩罚」排序。
+
+    为什么不全图直搜：画面里还有别处长得一模一样的白字（左下角 LV 栏就印着同一个
+    名字，分数 0.92），全图搜很容易被它抢走；局部搜索天然排除了这种情况。
+    """
     with char_lock:
-        tpl_e, tpl_e_half = char_state["tpl_e"], char_state["tpl_e_half"]
-    if tpl_e is None:
+        tpl_w = char_state["tpl_w"]
+        last = char_state["box"]
+        misses = char_state["misses"]
+        thresh = char_state["thresh"]
+    if tpl_w is None:
         return None, 0.0
-    g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    th, tw = tpl_w.shape[:2]
+    g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
     H, W = g.shape[:2]
-    th, tw = tpl_e.shape[:2]
     if th >= H or tw >= W:
         return None, 0.0
-    fe = edge_mag(g)
 
-    # 1) 半分辨率粗搜：把「在哪儿」先定到 ±4px 级别
-    cx = cy = 0
-    best = -1.0
-    if tpl_e_half.shape[0] < H // 2 and tpl_e_half.shape[1] < W // 2:
-        small = cv2.resize(fe, (W // 2, H // 2), interpolation=cv2.INTER_AREA)
-        r = cv2.matchTemplate(small, tpl_e_half, cv2.TM_CCOEFF_NORMED)
-        _, best, _, loc = cv2.minMaxLoc(r)
-        cx, cy = loc[0] * 2, loc[1] * 2
+    # 1) / 2) 局部跟踪：命中且过门限就算数，不必回到全图
+    if last is not None and misses <= CHAR_REACQ_MISS:
+        for radius in (CHAR_LOCAL_RADIUS, CHAR_WIDE_RADIUS):
+            hit = _local_search(g, tpl_w, last, radius)
+            if hit is not None and hit[1] >= thresh:
+                return hit
+            if hit is not None and radius == CHAR_WIDE_RADIUS:
+                break      # 宽搜都只有低分：别再拿低分位置凑数
 
-    # 2) 全分辨率精修：只在粗命中点附近 ±10px 搜，拿到准确的框和分数
-    m = 10
-    x1, y1 = max(0, cx - m), max(0, cy - m)
-    x2, y2 = min(W, cx + tw + m), min(H, cy + th + m)
-    roi = fe[y1:y2, x1:x2]
-    if roi.shape[0] >= th and roi.shape[1] >= tw:
-        r2 = cv2.matchTemplate(roi, tpl_e, cv2.TM_CCOEFF_NORMED)
-        _, score, _, loc2 = cv2.minMaxLoc(r2)
-        return ([x1 + loc2[0], y1 + loc2[1], x1 + loc2[0] + tw, y1 + loc2[1] + th],
-                float(score))
-    return [cx, cy, cx + tw, cy + th], float(best)
+    # 3) 全图重找
+    fw = _white_map(g)
+    res = cv2.matchTemplate(fw, tpl_w, cv2.TM_CCOEFF_NORMED)
+    cands = _best_peaks(res, 5)
+    if not cands:
+        return None, 0.0
+    if last is not None:
+        ref = ((last[0] + last[2]) / 2.0, (last[1] + last[3]) / 2.0)
+    else:
+        ref = (W / 2.0, H * 0.45)          # 首次：人物一般在画面中部
+    diag = (W * W + H * H) ** 0.5
+    best = None
+    for sc, x, y in cands:
+        box = [x, y, x + tw, y + th]
+        d = (((x + tw / 2.0) - ref[0]) ** 2 + ((y + th / 2.0) - ref[1]) ** 2) ** 0.5
+        val = sc - CHAR_DIST_PENALTY * (d / diag) - _hud_penalty(box, W, H)
+        if best is None or val > best[0]:
+            best = (val, sc, x, y)
+    val, sc, x, y = best
+    # 判定用「扣掉位置惩罚后的分」：真身在画面中部，扣完还是 0.95 左右；HUD 里那行
+    # 同名文字 0.84 要扣 0.24 只剩 0.60，直接判不通过。显示出去的仍是原始匹配分。
+    if val < thresh:
+        return None, float(sc)
+    return [x, y, x + tw, y + th], float(sc)
+
+
+def _auto_recalibrate(frame):
+    """长时间跟丢时重标一次尺度（用户改了窗口大小/分辨率会这样）。
+
+    只有在新尺度也能拿到 >=0.88 的硬分数时才改 —— 否则说明画面里根本没有这个人，
+    重采样只会把模板改坏。
+    """
+    with char_lock:
+        tpl = char_state["tpl"]
+        old = char_state["scale"]
+    if tpl is None:
+        return False
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    score, scale = _char_scale_sweep(tpl, gray)
+    if score < CHAR_SCALE_MIN_SCORE or abs(scale - old) <= 0.02:
+        return False
+    _set_char_tpl(tpl, scale)
+    with char_lock:
+        char_state["scale"] = scale
+        char_state["score"] = round(score, 3)
+    _save_char_conf()
+    return True
 
 
 def char_loop():
@@ -1434,9 +1597,19 @@ def char_loop():
                 char_state["misses"] = 0
             else:
                 char_state["misses"] += 1
-                if char_state["misses"] > 3:      # 连续几帧没命中就当丢了
+                if char_state["misses"] > CHAR_REACQ_MISS:   # 连续没命中就当丢了
                     char_state["box"] = None
                     char_state["ts"] = 0.0
+        # 丢了 4 秒还没回来：可能是窗口大小/分辨率变了，重标一次尺度
+        with char_lock:
+            lost_long = char_state["misses"] > CHAR_FPS * 4
+        if lost_long:
+            try:
+                _auto_recalibrate(frame)
+            except Exception:  # noqa: BLE001
+                pass
+            with char_lock:
+                char_state["misses"] = 0
         time.sleep(1.0 / CHAR_FPS)
 
 
@@ -2078,10 +2251,18 @@ async def char_upload(payload: dict = Body(...)):
         return JSONResponse({"ok": False,
                              "msg": f"图太小（{w}×{h}），至少要 {CHAR_MIN_W}×{CHAR_MIN_H}"},
                             status_code=400)
-    if w > 600:                      # 上传整张截图也能用，先缩一下省内存
+    if w > 600:                      # 大图先缩一下省内存
         gray = cv2.resize(gray, (600, max(8, int(round(h * 600 / w)))),
                           interpolation=cv2.INTER_AREA)
         h, w = gray.shape[:2]
+    # 传整张截图是最常见的坑：白字散布在全图，模板就等于「整个画面的文字布局」，
+    # 匹配出来的位置必然是乱的。这种情况直接拒掉，让用户只截名字那一小块。
+    wr, hr = _text_spread(gray)
+    if w >= 400 and h >= 250 and wr > 0.85 and hr > 0.85:
+        return JSONResponse({"ok": False,
+                             "msg": "这张图里的白字铺满了整幅画面，看起来是整张截图。"
+                                    "请只截「人物名字」那一小块（长条形，几厘米宽就够）"},
+                            status_code=400)
     ok, buf = cv2.imencode(".png", gray)
     if not ok:
         return JSONResponse({"ok": False, "msg": "模板编码失败"}, status_code=500)
@@ -2099,8 +2280,7 @@ async def char_del_template():
         pass
     with char_lock:
         char_state["tpl"] = None
-        char_state["tpl_e"] = None
-        char_state["tpl_e_half"] = None
+        char_state["tpl_w"] = None
         char_state["size"] = (0, 0)
         char_state["box"] = None
         char_state["score"] = 0.0
