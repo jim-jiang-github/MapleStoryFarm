@@ -1,0 +1,410 @@
+# -*- coding: utf-8 -*-
+"""自动打怪（挂机）：读检测结果，决定按哪个键。
+
+为什么单独一个文件：这段代码全是「什么时候按什么」。跟抓屏、推理混在一起，
+出问题时分不清是识别错了还是按键节奏错了。这里只负责：拿一份当前状态快照 →
+按优先级决定动作 → 发按键。识别、跟踪、血条都在 server.py 里，通过 get_state
+回调拿过来。
+
+优先级（每 20ms 一轮）：
+  1) 血低于门限 → 喝药（有独立冷却，默认 3 秒）
+  2) 全程按 Z 拾取（默认 130ms 一次，无脑一直按）
+  3) 有目标且在攻击距离内 → 转向 + 攻击（攻击有冷却，默认 420ms）
+  4) 有目标但在范围外 → 朝它走（只按左右，这个场景没有纵向移动）
+  5) 视野内没目标 → 左右巡逻（可选，默认开）
+
+安全前提，必须遵守：
+  **只有游戏窗口在前台时才发按键。** 否则等于往当前获得焦点的窗口里打字/点鼠标。
+  一旦失焦立刻松开所有按住的键，避免方向键卡在按下状态导致角色一直跑。
+
+按键走 SendInput + 扫描码（KEYEVENTF_SCANCODE），不是 PostMessage：
+游戏多半走 DirectInput/Raw Input，读的是扫描码；PostMessage 那种窗口消息它不看。
+"""
+from __future__ import annotations
+
+import ctypes
+import json
+import threading
+import time
+from ctypes import wintypes
+from pathlib import Path
+
+CONF_FILE = Path(__file__).with_name("botconf.json")
+
+# ---------------- 键位 ----------------
+# 用户的设置：Ctrl 攻击、Alt 跳、方向键（只会用到左右）、8/9/0 喝药、Z 拾取。
+# 这里存虚拟键码（VK），扫描码运行时用 MapVirtualKeyW 换，免得手抄扫描码抄错。
+VK = {
+    "attack": 0x11,   # Ctrl
+    "jump": 0x12,     # Alt
+    "left": 0x25,
+    "right": 0x27,
+    "pick": 0x5A,     # Z
+    "pot8": 0x38,
+    "pot9": 0x39,
+    "pot0": 0x30,
+}
+# 方向键是「扩展键」，不加 KEYEVENTF_EXTENDEDKEY 的话游戏收到的是小键盘那一套
+EXTENDED = {"left", "right"}
+POT_KEYS = ("pot8", "pot9", "pot0")
+POT_LABEL = {"pot8": "8", "pot9": "9", "pot0": "0"}
+
+KEYEVENTF_EXTENDEDKEY = 0x0001
+KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_SCANCODE = 0x0008
+
+_u32 = ctypes.WinDLL("user32", use_last_error=True)
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class _HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD),
+                ("wParamH", wintypes.WORD)]
+
+
+class _INPUTUNION(ctypes.Union):
+    _fields_ = [("ki", _KEYBDINPUT), ("mi", _MOUSEINPUT), ("hi", _HARDWAREINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _anonymous_ = ("u",)
+    _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
+
+
+def _scan_of(name):
+    vk = VK[name]
+    sc = _u32.MapVirtualKeyW(vk, 0)      # MAPVK_VK_TO_VSC
+    return int(vk), int(sc)
+
+
+_SCAN = {name: _scan_of(name) for name in VK}
+
+
+def send_key(name, down):
+    """发一次按键（down=True 按下，False 抬起）。名字见 VK。
+
+    返回 SendInput 的返回值：<1 表示系统没接受这次注入（比如被 UIPI 拦了）。
+    """
+    _, sc = _SCAN[name]
+    flags = KEYEVENTF_SCANCODE | (0 if down else KEYEVENTF_KEYUP)
+    if name in EXTENDED:
+        flags |= KEYEVENTF_EXTENDEDKEY
+    inp = _INPUT(type=1, u=_INPUTUNION(ki=_KEYBDINPUT(0, sc, flags, 0, 0)))
+    return _u32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+
+
+# ---------------- 配置 ----------------
+DEFAULTS = {
+    "on": False,
+    "hp_pct": 60.0,      # 血低于这个百分比就喝药
+    "pot_sec": 3.0,      # 两次喝药的最小间隔（秒）
+    "pot_key": "pot8",   # 用哪个键喝药：pot8 / pot9 / pot0
+    "range_px": 160.0,   # 攻击距离：人物中心到怪物中心的水平像素
+    "atk_ms": 420,       # 两次攻击的最小间隔（毫秒）
+    "pick": True,        # 全程按 Z 拾取
+    "pick_ms": 130,      # 拾取按键间隔（毫秒）
+    "patrol": True,      # 视野里没怪时左右来回走
+    "patrol_sec": 2.5,   # 巡逻换向间隔（秒）
+    "move": True,        # 怪在攻击距离外时走过去
+    "dy_tol": 150,       # 纵向容差：同一条平台上的怪才算目标（像素）
+}
+
+CLAMP = {
+    "hp_pct": (10.0, 95.0),
+    "pot_sec": (0.5, 30.0),
+    "range_px": (40.0, 600.0),
+    "atk_ms": (120, 3000),
+    "pick_ms": (60, 2000),
+    "patrol_sec": (0.5, 20.0),
+    "dy_tol": (40, 400),
+}
+
+
+def clamp_cfg(raw):
+    """整理一份配置：非法值退回默认，数值钳到合理区间。"""
+    out = dict(DEFAULTS)
+    for k, dv in DEFAULTS.items():
+        if k not in raw:
+            continue
+        v = raw[k]
+        if isinstance(dv, bool):
+            out[k] = bool(v)
+        elif isinstance(dv, str):
+            out[k] = v if v in POT_KEYS else dv
+        else:
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                continue
+            if v != v:                      # NaN
+                continue
+            lo, hi = CLAMP.get(k, (dv, dv))
+            out[k] = round(min(hi, max(lo, v)), 2)
+    for k in ("atk_ms", "pick_ms", "dy_tol"):   # 毫秒/像素：整数更好读
+        out[k] = int(out[k])
+    return out
+
+
+def load_cfg():
+    if CONF_FILE.exists():
+        try:
+            return clamp_cfg(json.loads(CONF_FILE.read_text(encoding="utf-8")))
+        except Exception as e:  # noqa: BLE001
+            print(f"[bot] 读取 {CONF_FILE.name} 失败，用默认值: {e}")
+    return dict(DEFAULTS)
+
+
+def save_cfg(cfg):
+    try:
+        CONF_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        print(f"[bot] 写 {CONF_FILE.name} 失败: {e}")
+
+
+# ---------------- 决策 ----------------
+def _cx(box):
+    return (float(box[0]) + float(box[2])) / 2
+
+
+def _cy(box):
+    return (float(box[1]) + float(box[3])) / 2
+
+
+def pick_target(char_box, monsters, range_px, dy_tol):
+    """挑一个目标：先在纵向容差内按水平距离排序，同等距离时取分数高的。
+
+    纵向容差是为了不隔着平台打怪——只按左右走位，上下层的怪根本够不着，
+    把它们算成目标只会让角色在原地朝一堵墙挥刀。
+    """
+    if not char_box or not monsters:
+        return None
+    cx, cy = _cx(char_box), _cy(char_box)
+    best, best_d = None, None
+    for m in monsters:
+        box = m.get("box")
+        if not box or len(box) != 4:
+            continue
+        dy = abs(_cy(box) - cy)
+        if dy > dy_tol:
+            continue
+        d = abs(_cx(box) - cx)
+        score = (d, -float(m.get("conf", 0)))
+        if best_d is None or score < best_d:
+            best, best_d = m, score
+    return best
+
+
+class Bot:
+    """一个线程 + 一份配置 + 一份状态。
+
+    get_state() 由 server.py 提供，返回：
+        {"fg": bool,            # 游戏窗口是否在前台
+         "hp": float | None,    # 血量百分比 0~100，读不到就是 None
+         "char": [x1,y1,x2,y2] | None,      # 人物名字牌框（全分辨率像素）
+         "monsters": [{"name","box","conf"}]}
+    按键通过 self.sender(name, down) 发，测试时可以换成记录器。
+    """
+
+    TICK = 0.02          # 主循环节拍
+    TAP_MS = 55          # 「点一下」的按住时长：够游戏识别成一次按键，又不至于走出一步
+
+    def __init__(self, get_state, sender=None):
+        self.get_state = get_state
+        self.sender = sender or send_key
+        self.cfg = load_cfg()
+        self._lock = threading.Lock()
+        self._status = {"act": "空闲", "target": "", "hp": None,
+                        "atk": 0, "pot": 0, "pick": 0, "err": ""}
+        self._thread = None
+        self._held = 0            # 当前按住的左右方向：-1 / 0 / 1
+        self._down = set()        # 当前真的按住没松的键（别对没按的键发抬起）
+        self._face = 0            # 上一次转向的方向（攻击朝这一侧）
+        self._t_pot = 0.0
+        self._t_atk = 0.0
+        self._t_pick = 0.0
+        self._t_patrol = 0.0
+        self._patrol_dir = 1
+
+    # ---- 对外 ----
+    def snapshot(self):
+        with self._lock:
+            return dict(self.cfg), dict(self._status)
+
+    def update_cfg(self, patch, save=True):
+        with self._lock:
+            merged = dict(self.cfg)
+            merged.update(patch or {})
+            self.cfg = clamp_cfg(merged)
+            cfg = dict(self.cfg)
+        if save:
+            save_cfg(cfg)
+        return cfg
+
+    def set_on(self, on, save=True):
+        on = bool(on)
+        self.update_cfg({"on": on}, save=save)
+        if on:
+            self._ensure_thread()
+        else:
+            self.release_all()
+        return on
+
+    def _ensure_thread(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._loop, name="bot", daemon=True)
+        self._thread.start()
+
+    # ---- 按键封装 ----
+    def _press(self, name):
+        self.sender(name, True)
+        self._down.add(name)
+
+    def _release(self, name):
+        # 只抬真的按着的键：失焦时每轮都会调一次 release_all，无脑发抬起会有两个坏处
+        # ——每 20ms 空转 8 次 SendInput，更糟的是你在别的窗口按着 Ctrl，会被它按掉。
+        if name in self._down:
+            self._down.discard(name)
+            self.sender(name, False)
+
+    def _tap(self, name, ms=None):
+        self._press(name)
+        time.sleep((ms or self.TAP_MS) / 1000.0)
+        self._release(name)
+
+    def _set_dir(self, want):
+        """把「按住的左右」调整到 want（-1 左 / 0 松 / 1 右）。"""
+        if want == self._held:
+            return
+        if self._held == -1:
+            self._release("left")
+        elif self._held == 1:
+            self._release("right")
+        self._held = 0
+        if want == -1:
+            self._press("left")
+        elif want == 1:
+            self._press("right")
+        self._held = want
+
+    def release_all(self):
+        for name in list(self._down):
+            self.sender(name, False)
+            self._down.discard(name)
+        self._held = 0
+
+    # ---- 状态 ----
+    def _set_status(self, **kw):
+        with self._lock:
+            self._status.update(kw)
+
+    def _count(self, key):
+        with self._lock:
+            self._status[key] += 1
+
+    # ---- 主循环 ----
+    def _loop(self):
+        while True:
+            with self._lock:
+                cfg = dict(self.cfg)
+            if not cfg["on"]:
+                self.release_all()
+                self._set_status(act="已停止")
+                time.sleep(0.1)
+                continue
+            try:
+                self._step(cfg)
+            except Exception as e:  # noqa: BLE001
+                # 单帧出错不能让整个线程死掉：松键、记下来、下一轮继续
+                self.release_all()
+                self._set_status(act="出错", err=f"{type(e).__name__}: {e}")
+            time.sleep(self.TICK)
+
+    def _step(self, cfg):
+        st = self.get_state() or {}
+        hp = st.get("hp")
+        self._set_status(hp=hp)
+
+        # 失焦：绝对不能发按键（会打进别的窗口），同时把按住的键松开
+        if not st.get("fg"):
+            self.release_all()
+            self._set_status(act="游戏不在前台", target="", err="")
+            return
+
+        now = time.time()
+
+        # 1) 喝药：读不到血量就不动，别蒙着眼睛按
+        if hp is not None and hp < cfg["hp_pct"] and now - self._t_pot >= cfg["pot_sec"]:
+            self._tap(cfg["pot_key"])
+            self._t_pot = now
+            self._count("pot")
+            self._set_status(act=f"喝药 {POT_LABEL[cfg['pot_key']]}", err="")
+
+        # 2) 拾取：无脑一直按，跟其它动作不冲突（不同键）
+        if cfg["pick"] and (now - self._t_pick) * 1000.0 >= cfg["pick_ms"]:
+            self._tap("pick", 25)
+            self._t_pick = now
+            self._count("pick")
+
+        char = st.get("char")
+        if not char:
+            self._set_dir(0)
+            self._set_status(act="找不到人物", target="")
+            return
+
+        tgt = pick_target(char, st.get("monsters") or [], cfg["range_px"], cfg["dy_tol"])
+        if not tgt:
+            self._set_status(target="")
+            if cfg["patrol"]:
+                if now - self._t_patrol >= cfg["patrol_sec"]:
+                    self._patrol_dir = -self._patrol_dir
+                    self._t_patrol = now
+                self._set_dir(self._patrol_dir)
+                self._face = self._patrol_dir
+                self._set_status(act="巡逻找怪")
+            else:
+                self._set_dir(0)
+                self._set_status(act="守株待兔")
+            return
+
+        name = tgt.get("name", "?")
+        dx = _cx(tgt["box"]) - _cx(char)
+        side = 1 if dx >= 0 else -1
+        dist = abs(dx)
+        self._set_status(target=f"{name} {int(dist)}px")
+
+        if dist > cfg["range_px"]:
+            if cfg["move"]:
+                self._set_dir(side)
+                self._face = side
+                self._set_status(act="走向目标")
+            else:
+                self._set_dir(0)
+                self._set_status(act="目标太远")
+            return
+
+        # 进范围了：先站住，再转向目标，然后按节奏攻击
+        self._set_dir(0)
+        if self._face != side:
+            # 这个游戏只能靠按方向键转身。轻点一下，位置基本不动，但朝向会变。
+            self._tap("right" if side > 0 else "left", 45)
+            self._face = side
+        if (now - self._t_atk) * 1000.0 >= cfg["atk_ms"]:
+            self._tap("attack")
+            self._t_atk = now
+            self._count("atk")
+            self._set_status(act="攻击", err="")
+        else:
+            self._set_status(act="等冷却")

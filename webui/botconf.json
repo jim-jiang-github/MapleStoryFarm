@@ -1,0 +1,14 @@
+{
+  "on": false,
+  "hp_pct": 60.0,
+  "pot_sec": 3.0,
+  "pot_key": "pot8",
+  "range_px": 160.0,
+  "atk_ms": 420,
+  "pick": true,
+  "pick_ms": 130,
+  "patrol": true,
+  "patrol_sec": 2.5,
+  "move": true,
+  "dy_tol": 150
+}

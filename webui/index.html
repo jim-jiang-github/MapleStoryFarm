@@ -443,6 +443,36 @@
               </span>
             </div>
             <div class="row"><span class="k">条位置</span><span class="v small" id="barsrc">—</span></div>
+
+            <div class="row"><span class="k">挂机</span><span class="v small" id="botAct">—</span></div>
+            <div class="row conf">
+              <span class="k">血线</span>
+              <span class="v"><input id="hpRange" class="rng" type="range" min="10" max="95" step="5" value="60" title="血量低于这个百分比就喝药；读不到血量（血条没标定）时不会瞎按"><b id="hpVal">60%</b></span>
+            </div>
+            <div class="row conf">
+              <span class="k">喝药间隔</span>
+              <span class="v"><input id="potRange" class="rng" type="range" min="1" max="10" step="0.5" value="3" title="两次喝药的最小间隔，防止血线附近来回按把药喝光"><b id="potVal">3.0s</b></span>
+            </div>
+            <div class="row conf">
+              <span class="k">攻击距离</span>
+              <span class="v"><input id="rngRange" class="rng" type="range" min="60" max="500" step="10" value="160" title="人物中心到怪物中心的水平距离。画面上会实时画出这条范围带，对着调就行"><b id="rngVal">160px</b></span>
+            </div>
+            <div class="row conf">
+              <span class="k">攻击间隔</span>
+              <span class="v"><input id="atkRange" class="rng" type="range" min="150" max="1200" step="10" value="420" title="两次攻击的最小间隔（毫秒）。太小会一直按着打不出伤害，太大浪费输出"><b id="atkVal">420ms</b></span>
+            </div>
+            <div class="row conf">
+              <span class="k">喝药用键</span>
+              <span class="v"><select id="potSel" title="血低了按哪个键喝药（三个键都在你手上就选一个）"><option value="pot8">8</option><option value="pot9">9</option><option value="pot0">0</option></select></span>
+            </div>
+            <div class="row conf">
+              <span class="k">拾取 Z</span>
+              <span class="v"><button id="pickBtn" class="mini on" title="全程无脑按 Z 捡东西，跟打怪互不影响">开</button><b class="sub">130ms 一次</b></span>
+            </div>
+            <div class="row conf">
+              <span class="k">巡逻找怪</span>
+              <span class="v"><button id="patrolBtn" class="mini on" title="视野里没有怪时左右来回走；关掉就站在原地等">开</button><b class="sub">2.5s 换向</b></span>
+            </div>
           </div>
         </div>
         <div class="trend">
@@ -456,6 +486,7 @@
           <button id="toggle">暂停</button>
           <button id="detect">识别: 关</button>
           <button id="modeBtn">模式: 速度</button>
+          <button id="botBtn" title="自动打怪：血低喝药、打范围内的怪、全程按 Z 拾取。只有游戏窗口在前台时才会发按键">挂机: 关</button>
           <button id="focusBtn" title="把游戏窗口抬到最前并给焦点（截图前必做）">前置游戏</button>
           <input type="file" id="charFile" accept="image/*" hidden>
           <!-- 标定/自动定位平时用不上：auto 定位在后台自己跑，坐标存在 webui/bars.json。
@@ -1802,6 +1833,121 @@
       fpsSel.disabled = false;
     }
   });
+
+  /* ================= 挂机（自动打怪） =================
+     后端 /api/bot 拿参数和状态；滑块拖动只改显示，停手才发请求。
+     状态行（挂机 · 攻击 Stump 140px）每 500ms 刷一次，节拍比 /api/stats 快一档，
+     因为打怪动作变得比统计信息频繁得多。 */
+  const botUI = {
+    hp: [$("hpRange"), $("hpVal"), "hp_pct", (v) => `${Math.round(v)}%`],
+    pot: [$("potRange"), $("potVal"), "pot_sec", (v) => `${Number(v).toFixed(1)}s`],
+    rng: [$("rngRange"), $("rngVal"), "range_px", (v) => `${Math.round(v)}px`],
+    atk: [$("atkRange"), $("atkVal"), "atk_ms", (v) => `${Math.round(v)}ms`],
+  };
+  let botLockUntil = 0;
+
+  function paintBotVals() {
+    for (const k in botUI) {
+      const [inp, out, , fmt] = botUI[k];
+      out.textContent = fmt(inp.value);
+    }
+  }
+
+  async function setBot(patch) {
+    botLockUntil = Date.now() + 900;        // 这段时间内别让轮询把控件拽回去
+    const r = await (await fetch("/api/bot/set", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch), cache: "no-store" })).json();
+    return r.cfg;
+  }
+
+  for (const k in botUI) {
+    const [inp, , key] = botUI[k];
+    let timer = null;
+    const send = () => { setBot({ [key]: Number(inp.value) }).catch(() => {}); };
+    inp.addEventListener("input", () => {
+      paintBotVals();
+      botLockUntil = Date.now() + 900;
+      clearTimeout(timer);
+      timer = setTimeout(send, 150);
+    });
+    inp.addEventListener("change", () => { clearTimeout(timer); send(); });
+  }
+
+  $("potSel").addEventListener("change", () => { setBot({ pot_key: $("potSel").value }); });
+
+  async function toggleBotFlag(key, btn) {
+    btn.disabled = true;
+    try {
+      const on = !btn.classList.contains("on");
+      await setBot({ [key]: on });
+      btn.classList.toggle("on", on);
+      btn.textContent = on ? "开" : "关";
+    } catch (e) {
+      toast("设置失败：" + e);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  $("pickBtn").addEventListener("click", () => toggleBotFlag("pick", $("pickBtn")));
+  $("patrolBtn").addEventListener("click", () => toggleBotFlag("patrol", $("patrolBtn")));
+
+  function paintBotBtn(cfg) {
+    $("botBtn").textContent = cfg.on ? "挂机: 开" : "挂机: 关";
+    $("botBtn").className = cfg.on ? "on" : "";
+  }
+
+  function paintBotCfg(cfg) {
+    if (Date.now() > botLockUntil) {        // 正在拖滑块的这一下不覆盖
+      $("hpRange").value = cfg.hp_pct;
+      $("potRange").value = cfg.pot_sec;
+      $("rngRange").value = cfg.range_px;
+      $("atkRange").value = cfg.atk_ms;
+      $("potSel").value = cfg.pot_key;
+      paintBotVals();
+    }
+    $("pickBtn").classList.toggle("on", !!cfg.pick);
+    $("pickBtn").textContent = cfg.pick ? "开" : "关";
+    $("patrolBtn").classList.toggle("on", !!cfg.patrol);
+    $("patrolBtn").textContent = cfg.patrol ? "开" : "关";
+    paintBotBtn(cfg);
+  }
+
+  $("botBtn").addEventListener("click", async () => {
+    $("botBtn").disabled = true;
+    try {
+      const r = await (await fetch("/api/bot/toggle", { method: "POST", cache: "no-store" })).json();
+      paintBotBtn(r.cfg);
+      toast(r.on ? "挂机已开启：血低喝药 · 打范围内的怪 · 全程按 Z（记得把游戏切回前台）"
+                 : "挂机已关闭，按键已全部松开");
+    } catch (e) {
+      toast("切换失败：" + e);
+    } finally {
+      $("botBtn").disabled = false;
+    }
+  });
+
+  async function pollBot() {
+    try {
+      const r = await (await fetch("/api/bot", { cache: "no-store" })).json();
+      paintBotCfg(r.cfg);
+      const st = r.status || {};
+      let txt = st.act || "—";
+      if (st.target) txt += ` · ${st.target}`;
+      if (st.pot || st.atk) txt += `（药${st.pot} 攻${st.atk}）`;
+      $("botAct").textContent = txt;
+      // 失焦是「脚本在跑但碰不到键盘」，属于要提醒的状态，跟出错一样标红
+      const warn = !!st.err || (r.cfg.on && st.act === "游戏不在前台");
+      $("botAct").className = "v small" + (warn ? " warn" : "");
+      $("botAct").title = st.err
+        || (r.detect_on ? "" : "识别没开，脚本看不到怪（只会巡逻）")
+        || (r.cfg.on && !r.foreground ? "只有游戏窗口在前台时才能发按键：切回游戏就会自己继续" : "");
+    } catch (e) {
+      /* 页面断开时保持上一次显示 */
+    }
+  }
+  pollBot();
+  setInterval(pollBot, 500);
 
   /* 面板上两个实时参数：识别阈值（浮点）和稳定帧数（整数）。共用一套绑定：
      拖动时先改数字（立刻有反馈），停手 120ms 再发请求，避免每一像素都打一次后端。 */

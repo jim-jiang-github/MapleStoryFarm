@@ -32,6 +32,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 # 用 -m 方式启动时补一下，免得为了一个 import 去改运行方式
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from track import Tracker  # noqa: E402  （见 webui/track.py：卡尔曼 + 匈牙利 + ByteTrack）
+import bot as botmod  # noqa: E402  （见 webui/bot.py：挂机按键与决策）
 
 
 ctypes.windll.user32.SetProcessDPIAware()
@@ -955,6 +956,7 @@ det_state = {
     "show_conf": SHOW_CONF_DEFAULT,   # 显示门限：低于它的目标不画框/不计数
     "show_hits": SHOW_HITS_DEFAULT,   # 稳定帧数：累计命中这么多帧才允许第一次出现
     "shown": {},         # tid -> {"first": 首次出现时间, "last": 最近显示时间}，用于最短显示时长
+    "vis": [],           # 这一帧真正画出来的轨迹（给挂机脚本挑目标用）
     "error": "",
 }
 det_lock = threading.Lock()
@@ -1805,6 +1807,96 @@ def char_loop():
 CHAR_COLOR = (255, 200, 0)      # BGR 天蓝，和识别框（绿/红/怪种色）都区分得开
 
 
+# ---------------- 自动打怪（挂机） ----------------
+# 决策全在 webui/bot.py（什么时候按哪个键）。这里只做三件事：
+#   1) 给它喂一份状态快照（人物框 / 血 / 这一帧画出来的怪 / 游戏在不在前台）
+#   2) 把攻击范围画到画面上，方便对着画面调距离
+#   3) 提供开关和参数接口
+BOT_RANGE_ON = (0, 190, 255)    # BGR 橙黄：挂机在跑
+BOT_RANGE_OFF = (110, 110, 110)  # 灰：挂机关着也画，不然没法调「多远算够得着」
+
+
+def _game_foreground():
+    """游戏窗口是不是当前前台窗口。
+
+    这是挂机脚本最要紧的一道闸：不是前台就绝不发按键，否则等于往你正在用的
+    窗口里打字、按方向键。
+    """
+    hwnd = find_window()
+    if not hwnd:
+        return False
+    return ctypes.windll.user32.GetForegroundWindow() == hwnd
+
+
+def _bot_state():
+    with char_lock:
+        cbox = char_state["box"]
+        cts = char_state["ts"]
+    if cbox is not None and (cts <= 0 or time.time() - cts > CHAR_LOST_AFTER):
+        cbox = None                      # 人物已经丢了，别拿旧位置继续打
+    with bar_lock:
+        hp = bar_state["values"].get("hp")
+    with det_lock:
+        mons = list(det_state["vis"])
+    return {"fg": _game_foreground(), "hp": hp, "char": cbox, "monsters": mons}
+
+
+game_bot = botmod.Bot(_bot_state)
+# 上次关着/开着都不自动续跑：重启服务器就自己开始按键盘太吓人了。
+# 参数（血线、距离…）照旧从 botconf.json 读，只有开关强制回关。
+game_bot.update_cfg({"on": False}, save=False)
+
+
+def _dash(img, p1, p2, color, thick=1, seg=9):
+    """画虚线：cv2 没有现成的虚线，按长度切段画。"""
+    x1, y1 = p1
+    x2, y2 = p2
+    n = int(max(abs(x2 - x1), abs(y2 - y1)) / (seg * 2)) + 1
+    for i in range(n):
+        t0 = 2 * i / (2 * n)
+        t1 = (2 * i + 1) / (2 * n)
+        cv2.line(img, (int(x1 + (x2 - x1) * t0), int(y1 + (y2 - y1) * t0)),
+                 (int(x1 + (x2 - x1) * t1), int(y1 + (y2 - y1) * t1)),
+                 color, thick, cv2.LINE_AA)
+
+
+def draw_attack_range(img, box):
+    """在人物框旁边画出攻击范围：以人物为原点、左右各 R 像素的一条带。
+
+    画的是「水平够得着多远」，不是命中盒——这个游戏只能左右走，攻击也只朝正面，
+    所以纵向给个示意高度就够，别让人误以为上下层也能打。
+    """
+    cfg, _ = game_bot.snapshot()
+    r = int(cfg["range_px"])
+    if r <= 0:
+        return img
+    on = cfg["on"]
+    color = BOT_RANGE_ON if on else BOT_RANGE_OFF
+    thick = 2 if on else 1
+    h, w = img.shape[:2]
+    cx = (int(box[0]) + int(box[2])) // 2
+    # 名字牌在头顶，身体在它下面：带宽中心往下挪一点，看着才像「打到身前」
+    cy = int(box[3]) + 26
+    half = 34
+    left, right = max(2, cx - r), min(w - 3, cx + r)
+    top, bot = max(2, cy - half), min(h - 3, cy + half)
+    _dash(img, (left, top), (right, top), color, thick)
+    _dash(img, (left, bot), (right, bot), color, thick)
+    # 两端竖线用实线，一眼能看出边界在哪
+    cv2.line(img, (left, top - 6), (left, bot + 6), color, thick, cv2.LINE_AA)
+    cv2.line(img, (right, top - 6), (right, bot + 6), color, thick, cv2.LINE_AA)
+    cv2.line(img, (cx, cy - 5), (cx, cy + 5), color, thick, cv2.LINE_AA)
+    tag = f"ATK {r}px" if on else f"ATK {r}px (关)"
+    (tw_, th_), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+    # 标签贴在范围带左端、竖直居中：离人物框不远，又不压名字牌和 ME 标记
+    tx = min(left + 4, w - tw_ - 6)
+    ty = min(bot - 2, max(th_ + 3, cy + th_ // 2))
+    cv2.rectangle(img, (tx - 3, ty - th_ - 3), (tx + tw_ + 3, ty + 2), TXT_BG, -1)
+    cv2.putText(img, tag, (tx, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                color, 1, cv2.LINE_AA)
+    return img
+
+
 def overlay_char(img):
     """把人物标记画到画面上（原地修改并返回）。名字牌下面那条竖线指向人物本体。"""
     with char_lock:
@@ -1842,6 +1934,11 @@ def overlay_char(img):
     cv2.rectangle(img, (x1 - 4, ty - th_ - 4), (x1 - 4 + tw_ + 4, ty + 2), TXT_BG, -1)
     cv2.putText(img, tag, (x1 - 2, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                 CHAR_COLOR, 1, cv2.LINE_AA)
+    # 攻击范围：挂在人物标记上一起画，所以手机上看到的就是后台真正用的那个距离
+    try:
+        draw_attack_range(img, box)
+    except Exception:  # noqa: BLE001
+        pass                     # 画不画得出来都不该影响推流
     return img
 
 
@@ -1994,6 +2091,11 @@ def detect_loop():
             det_state["infer_ms"] = (time.perf_counter() - tick) * 1000
             det_state["counts"] = counts
             det_state["shown"] = shown
+            # 挂机脚本要看「这一帧画出来的怪在哪」。只留框/名字/分数，别把整个
+            # 轨迹 dict 塞进来（里面有卡尔曼状态，每帧拷贝没必要）
+            det_state["vis"] = [{"tid": tr["tid"], "name": tr["name"],
+                                 "box": [round(float(v), 1) for v in tr["box"]],
+                                 "conf": round(float(tr["conf"]), 3)} for tr in vis]
             det_state["lock"] = lock_info
             if lock_box is not None:   # 锁上了才更新；丢了保留最后位置，便于下次接回同一只
                 det_state["lock_box"] = lock_box
@@ -2119,6 +2221,7 @@ async def stats():
         "show_conf": det_state["show_conf"],
         "show_hits": det_state["show_hits"],
         "max_fps": det_state["max_fps"],
+        "bot_on": game_bot.snapshot()[0]["on"],
         "pending": tracker.pending,
         "top_classes": [f"{k}×{v}" for k, v in top],
         "detect_error": det_state["error"],
@@ -2289,6 +2392,45 @@ async def detect_fps(v: int = -1):
             det_state["next_infer"] = 0.0    # 立刻按新节拍重新排程，不用等上一档走完
         _save_det_conf()
     return JSONResponse({"max_fps": det_state["max_fps"], "det_fps": round(det_state["det_fps"], 1)})
+
+
+# ---------------- 挂机（自动打怪）接口 ----------------
+@app.get("/api/bot")
+async def bot_get():
+    """当前挂机参数 + 这一轮在干什么（面板上「状态」那一行就是这里来的）。"""
+    cfg, st = game_bot.snapshot()
+    with char_lock:
+        has_char = char_state["tpl"] is not None
+    with bar_lock:
+        hp = bar_state["values"].get("hp")
+    return JSONResponse({
+        "cfg": cfg, "status": st, "hp": hp,
+        "foreground": _game_foreground(),
+        "has_char": has_char,
+        "detect_on": det_state["enabled"],
+        "window_found": grabber.window_found,
+    })
+
+
+@app.post("/api/bot/set")
+async def bot_set(payload: dict = Body(...)):
+    """改挂机参数（可只传一部分）。传了 on 就走开关那条路，保证线程起停一致。"""
+    data = dict(payload or {})
+    on = data.pop("on", None)
+    cfg = game_bot.update_cfg(data)
+    if on is not None:
+        cfg["on"] = game_bot.set_on(on)
+    return JSONResponse({"cfg": cfg})
+
+
+@app.post("/api/bot/toggle")
+async def bot_toggle():
+    cfg, _ = game_bot.snapshot()
+    on = game_bot.set_on(not cfg["on"])
+    if not on:
+        game_bot.release_all()      # 关掉时把按住的键全部松开，别让角色一直跑
+    cfg, st = game_bot.snapshot()
+    return JSONResponse({"on": on, "cfg": cfg, "status": st})
 
 
 # ---------- 排除区配置（WebUI 框选 / 选择 / 删除 / 持久化） ----------
