@@ -84,6 +84,12 @@ def banner(url, tool):
     print()
     print(f"  {full}")
     print()
+    # /m 是给手机的"看一眼"页面：640px 缩略图 + 大字状态，2 秒一张才 50kbps，
+    # 隧道再慢也看得动；主页面那条 H.264 需要 900k 以上，留给电脑。
+    m = f"{url}/m" + (f"?k={TOKEN}" if TOKEN else "")
+    print(f"  手机在外面看一眼（省流量，建议加到主屏幕）:")
+    print(f"  {m}")
+    print()
     if TOKEN:
         print(f"  口令: {TOKEN}    （不带 ?k= 打不开，7 天内免重复输入）")
     else:

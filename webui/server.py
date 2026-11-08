@@ -5,6 +5,7 @@ Run:  python webui/server.py
 Open: http://127.0.0.1:8765
 """
 import asyncio
+import collections
 import ctypes
 import json
 import os
@@ -843,6 +844,58 @@ def ensure_bars_thread():
 ensure_bars_thread()
 
 
+# ---------------- 画面运动（判断挂机还在不在打怪） ----------------
+"""远端只能看到一张张低清快照时，"画面在不在动"比帧率更有用：
+人眼很难从两张相差 2 秒的静图看出角色是不是卡住了，但差分分数一眼就知道。
+代价是 1 秒一次缩略图差分，占不到 1% CPU。"""
+motion_state = {
+    "score": 0.0, "moving": False, "idle_sec": 0.0,
+    "last_move": 0.0, "hist": collections.deque(maxlen=60), "ready": False,
+}
+_move_lock = threading.Lock()
+
+
+def motion_loop():
+    prev = None
+    warm = 2          # 头两帧不算：启动瞬间是"占位图→真实画面"，会被误判成剧烈运动
+    while True:
+        try:
+            frame = grabber.snapshot()
+            if frame is None or getattr(frame, "size", 0) == 0:
+                time.sleep(1.0)
+                continue
+            small = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (160, 90),
+                               interpolation=cv2.INTER_AREA)
+            score = 0.0
+            if prev is not None and prev.shape == small.shape and warm <= 0:
+                score = float(np.abs(small.astype(np.int16) - prev.astype(np.int16)).mean()) / 255.0
+            warm -= 1
+            prev = small
+            now = time.time()
+            with _move_lock:
+                motion_state["score"] = round(score, 5)
+                motion_state["ready"] = True
+                # 0.4% 的像素级差异就算"在动"：挂机时人物/伤害数字的变化远大于这个
+                if score >= 0.004:
+                    motion_state["moving"] = True
+                    motion_state["last_move"] = now
+                    motion_state["idle_sec"] = 0.0
+                else:
+                    motion_state["moving"] = False
+                    motion_state["idle_sec"] = round(now - motion_state["last_move"], 1) \
+                        if motion_state["last_move"] else 0.0
+                motion_state["hist"].append(round(score, 4))
+        except Exception as e:      # 抓屏失败不该拖死整个服务
+            motion_state["ready"] = False
+            motion_state["error"] = str(e)[:120]
+        time.sleep(1.0)
+
+
+threading.Thread(target=motion_loop, daemon=True, name="motion").start()
+
+
+
+
 # ---------------- 检测（OpenVINO） ----------------
 det_state = {
     "enabled": False,
@@ -1431,6 +1484,33 @@ async def index():
         INDEX.read_text(encoding="utf-8"),
         headers={"Cache-Control": "no-store, max-age=0"},
     )
+
+
+# 手机监控页：只取 640px 缩略图 + 几十字节状态，2 秒一次约 50 kbps。
+# 免费隧道只剩 200 kbps 时主页面（H.264）会很勉强，这一页却完全够用。
+MOBILE = Path(__file__).with_name("m.html")
+
+
+@app.get("/m", response_class=HTMLResponse)
+async def mobile():
+    try:
+        html = MOBILE.read_text(encoding="utf-8")
+    except OSError:
+        return HTMLResponse("<h1>m.html 不见了</h1>", status_code=500)
+    return HTMLResponse(html, headers={"Cache-Control": "no-store, max-age=0"})
+
+
+@app.get("/api/motion")
+async def api_motion():
+    with _move_lock:
+        return JSONResponse({
+            "score": motion_state["score"],
+            "moving": motion_state["moving"],
+            "idle_sec": motion_state["idle_sec"],
+            "hist": list(motion_state["hist"]),
+            "ready": motion_state["ready"],
+        })
+
 
 
 @app.get("/api/px")

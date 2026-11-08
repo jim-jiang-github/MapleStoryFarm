@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1216">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>挂机监控</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: #0f1216; color: #e8edf3;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  body { padding: 10px 10px calc(14px + env(safe-area-inset-bottom)); max-width: 720px; margin: 0 auto; }
+
+  .bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 12px;
+    background: #171c23; font-size: 15px; font-weight: 600; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #5b6672; flex: none; }
+  .dot.on { background: #35d07f; box-shadow: 0 0 0 4px rgba(53,208,127,.16); }
+  .dot.warn { background: #f0b429; box-shadow: 0 0 0 4px rgba(240,180,41,.16); }
+  .dot.bad { background: #ef4b5c; box-shadow: 0 0 0 4px rgba(239,75,92,.16); }
+  .bar .sub { margin-left: auto; font-size: 12px; font-weight: 400; color: #8693a3;
+    font-variant-numeric: tabular-nums; }
+
+  .shot { position: relative; margin-top: 10px; border-radius: 12px; overflow: hidden;
+    background: #171c23; line-height: 0; }
+  .shot img { width: 100%; display: block; transition: opacity .18s; }
+  .shot img.loading { opacity: .45; }
+  .shot .stamp { position: absolute; right: 8px; bottom: 8px; padding: 3px 8px; border-radius: 8px;
+    background: rgba(0,0,0,.55); font-size: 11px; line-height: 1.4; color: #cfd8e3;
+    font-variant-numeric: tabular-nums; }
+
+  .bars { margin-top: 10px; display: grid; gap: 8px; }
+  .row { display: grid; grid-template-columns: 42px 1fr 62px; align-items: center; gap: 10px;
+    padding: 9px 12px; border-radius: 12px; background: #171c23; }
+  .row .k { font-size: 13px; font-weight: 700; color: #9aa7b6; letter-spacing: .5px; }
+  .row .v { font-size: 17px; font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+  .track { height: 8px; border-radius: 99px; background: #232b34; overflow: hidden; }
+  .fill { height: 100%; width: 0%; border-radius: 99px; transition: width .4s ease; }
+  .fill.hp { background: linear-gradient(90deg,#e0453f,#ff7a6b); }
+  .fill.mp { background: linear-gradient(90deg,#2c6fd1,#59a6ff); }
+  .fill.exp { background: linear-gradient(90deg,#c98b17,#f5c451); }
+
+  .spark { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: #171c23; }
+  .spark .cap { font-size: 11px; color: #7d8a99; margin-bottom: 6px; }
+  .spark canvas { width: 100%; height: 44px; display: block; }
+
+  .foot { margin-top: 12px; display: flex; gap: 8px; }
+  .btn { flex: 1; padding: 12px; border: 0; border-radius: 12px; background: #1e252e;
+    color: #cfd8e3; font-size: 14px; font-weight: 600; font-family: inherit; }
+  .btn:active { background: #2a333e; }
+  .btn.on { background: #2a4a6f; color: #cfe4ff; }
+  .err { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: #3a1d22;
+    color: #ff9aa5; font-size: 13px; display: none; }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <span class="dot" id="dot"></span>
+  <span id="status">连接中…</span>
+  <span class="sub" id="clock">—</span>
+</div>
+
+<div class="shot">
+  <img id="shot" alt="画面" class="loading">
+  <span class="stamp" id="stamp">—</span>
+</div>
+
+<div class="bars">
+  <div class="row"><span class="k">HP</span><div class="track"><div class="fill hp" id="hpFill"></div></div><span class="v" id="hp">—</span></div>
+  <div class="row"><span class="k">MP</span><div class="track"><div class="fill mp" id="mpFill"></div></div><span class="v" id="mp">—</span></div>
+  <div class="row"><span class="k">EXP</span><div class="track"><div class="fill exp" id="expFill"></div></div><span class="v" id="exp">—</span></div>
+</div>
+
+<div class="spark">
+  <div class="cap">画面动静（最近 60 秒，高=在打怪）</div>
+  <canvas id="spark" width="600" height="88"></canvas>
+</div>
+
+<div class="err" id="err"></div>
+
+<div class="foot">
+  <button class="btn" id="sizeBtn">清晰度：省流</button>
+  <button class="btn" id="pauseBtn">暂停</button>
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const SHOT = $("shot"), DOT = $("dot"), STATUS = $("status");
+
+  /* 两种画质：省流 640/q60（约 12KB），清晰 1100/q75（约 55KB）。
+     手机上"挂机看一眼"根本不需要大图，默认省流，2 秒一张才 50kbps。 */
+  const SIZES = {
+    // interval 是"下载完到发下一张"的等待，一张本身还要 1~2 秒，
+    // 所以这里给 800ms，实际约 2~3 秒一张
+    low:  { w: 640,  q: 60, label: "省流", interval: 800 },
+    high: { w: 1100, q: 75, label: "清晰", interval: 1200 },
+  };
+  let sizeKey = localStorage.getItem("msfarm.m.size") || "low";
+  if (!SIZES[sizeKey]) sizeKey = "low";
+  let paused = false;
+  let fails = 0;
+  let lastOk = 0;
+
+  function setErr(msg) {
+    const el = $("err");
+    if (!msg) { el.style.display = "none"; return; }
+    el.style.display = "block";
+    el.textContent = msg;
+  }
+
+  // ---- 截图：拿完一张再排下一张，绝不用 setInterval 打断未完成的下载 ----
+  let shotTimer = null;
+  function loadShot() {
+    if (paused) return;
+    const s = SIZES[sizeKey];
+    SHOT.classList.add("loading");
+    SHOT.src = "/api/snapshot?w=" + s.w + "&q=" + s.q + "&t=" + Date.now();
+  }
+  SHOT.addEventListener("load", () => {
+    SHOT.classList.remove("loading");
+    lastOk = Date.now();
+    fails = 0;
+    setErr("");
+    $("stamp").textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    clearTimeout(shotTimer);
+    shotTimer = setTimeout(loadShot, SIZES[sizeKey].interval);
+  });
+  SHOT.addEventListener("error", () => {
+    SHOT.classList.remove("loading");
+    fails++;
+    clearTimeout(shotTimer);
+    // 连续失败才提示，偶发一次不用吓人
+    if (fails >= 3) setErr("画面连续 " + fails + " 次没取到，检查服务或隧道");
+    shotTimer = setTimeout(loadShot, 1500 + fails * 500);
+  });
+
+  // ---- 状态 + 血条 + 运动 ----
+  let stats = null, motion = null;
+
+  async function poll() {
+    try {
+      const [a, b] = await Promise.all([
+        fetch("/api/stats", { cache: "no-store" }).then((r) => r.json()),
+        fetch("/api/motion", { cache: "no-store" }).then((r) => r.json()).catch(() => null),
+      ]);
+      stats = a; motion = b;
+      render();
+    } catch (e) {
+      STATUS.textContent = "服务连不上";
+      DOT.className = "dot bad";
+    }
+    setTimeout(poll, paused ? 4000 : 2000);
+  }
+
+  function pct(v) { return Math.max(0, Math.min(100, Math.round((v || 0) * 1000) / 10)); }
+
+  function render() {
+    if (!stats) return;
+    const st = stats;
+    const age = Date.now() - (lastOk || Date.now());
+
+    // 顶部状态：窗口丢失 > 静止 > 在动
+    let cls = "dot on", text = "挂机中，画面在动";
+    if (!st.window_found) { cls = "dot bad"; text = "游戏窗口不在了"; }
+    else if (motion && motion.ready && !motion.moving) {
+      const idle = motion.idle_sec || 0;
+      cls = idle > 60 ? "dot bad" : "dot warn";
+      text = idle > 0 ? "画面静止 " + fmtSec(idle) : "画面静止";
+      if (idle > 60) text += "（可能卡住/掉线）";
+    } else if (age > 12000) {
+      cls = "dot warn"; text = "画面更新很慢";
+    }
+    DOT.className = cls;
+    STATUS.textContent = text;
+    $("clock").textContent = st.capture_fps ? Math.round(st.capture_fps) + " fps" : "—";
+
+    // 血条
+    const bars = (st.bars && typeof st.bars === "object") ? st.bars : {};
+    const val = (k) => {
+      const v = bars[k];
+      if (v && typeof v === "object") return v.value != null ? v.value : 0;
+      return v || 0;
+    };
+    [["hp", "hpFill", "hp"], ["mp", "mpFill", "mp"], ["exp", "expFill", "exp"]].forEach(([k, fill, out]) => {
+      const p = pct(val(k));
+      $(fill).style.width = p + "%";
+      $(out).textContent = p.toFixed(1) + "%";
+    });
+
+    drawSpark(motion && motion.hist ? motion.hist : []);
+  }
+
+  function fmtSec(s) {
+    s = Math.round(s);
+    if (s < 60) return s + " 秒";
+    if (s < 3600) return Math.floor(s / 60) + " 分 " + (s % 60) + " 秒";
+    return Math.floor(s / 3600) + " 小时 " + Math.floor((s % 3600) / 60) + " 分";
+  }
+
+  // 动静折线：60 个点（每秒一个），纵向按当前最大值自适应
+  function drawSpark(hist) {
+    const cv = $("spark"), ctx = cv.getContext("2d");
+    const W = cv.width, H = cv.height;
+    ctx.clearRect(0, 0, W, H);
+    const n = 60;
+    const data = hist.slice(-n);
+    if (!data.length) return;
+    const peak = Math.max(0.01, ...data);
+    const step = W / (n - 1);
+    const y = (v) => H - 6 - (v / peak) * (H - 12);
+
+    // 基线
+    ctx.strokeStyle = "rgba(255,255,255,.07)";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, H - 6); ctx.lineTo(W, H - 6); ctx.stroke();
+
+    ctx.beginPath();
+    data.forEach((v, i) => {
+      const xx = (n - data.length + i) * step;
+      i ? ctx.lineTo(xx, y(v)) : ctx.moveTo(xx, y(v));
+    });
+    ctx.strokeStyle = "#35d07f";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.lineTo(W, H - 6);
+    ctx.lineTo((n - data.length) * step, H - 6);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, "rgba(53,208,127,.28)");
+    g.addColorStop(1, "rgba(53,208,127,0)");
+    ctx.fillStyle = g;
+    ctx.fill();
+  }
+
+  // ---- 按钮 ----
+  function renderSizeBtn() {
+    $("sizeBtn").textContent = "清晰度：" + SIZES[sizeKey].label;
+    $("sizeBtn").className = "btn" + (sizeKey === "high" ? " on" : "");
+  }
+  $("sizeBtn").addEventListener("click", () => {
+    sizeKey = sizeKey === "low" ? "high" : "low";
+    localStorage.setItem("msfarm.m.size", sizeKey);
+    renderSizeBtn();
+    clearTimeout(shotTimer);
+    loadShot();
+  });
+
+  $("pauseBtn").addEventListener("click", () => {
+    paused = !paused;
+    $("pauseBtn").textContent = paused ? "继续" : "暂停";
+    $("pauseBtn").className = "btn" + (paused ? " on" : "");
+    if (paused) { clearTimeout(shotTimer); DOT.className = "dot"; STATUS.textContent = "已暂停（省流量）"; }
+    else { loadShot(); poll(); }
+  });
+
+  // 切到后台就停，回来再继续 —— 手机锁屏时不烧流量
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) { clearTimeout(shotTimer); }
+    else if (!paused) { loadShot(); }
+  });
+
+  renderSizeBtn();
+  loadShot();
+  poll();
+})();
+</script>
+</body>
+</html>
