@@ -1206,11 +1206,13 @@ char_state = {
     "tpl_w": None,        # 裁紧 + 平滑后的白字掩码：实际参与匹配的就是它
     "size": (0, 0),
     "box": None,          # 最近一次命中的框 [x1,y1,x2,y2]（全分辨率）
-    "dir": "below",       # 人物在模板的下方(below)还是上方(above)，决定箭头方向
+    "dir": "above",       # 箭头恒朝上（名字牌在脚下）。原来的「朝下/朝上」选项已去掉。
     "scale": 1.0,         # 匹配用的缩放（上传的图和实际画面像素尺度不一致时自动标定）
     "score": 0.0,
     "ts": 0.0,
     "misses": 0,
+    "pending": None,      # 嫌疑跳变候选 (box, hits)：攒够帧数才切过去
+    "guard": 0,           # 当前 pending 的命中帧数（0 = 正常跟踪）
     "error": "",
 }
 # 找人的线程句柄。以前用一个 [False] 布尔记「起过了」，一旦线程因为异常挂了，
@@ -1231,7 +1233,7 @@ def _save_char_conf():
     try:
         CHAR_CONF_FILE.write_text(json.dumps(
             {"enabled": char_state["enabled"], "thresh": char_state["thresh"],
-             "dir": char_state["dir"], "scale": char_state["scale"]}
+             "scale": char_state["scale"]}
         ), encoding="utf-8")
     except Exception:
         pass
@@ -1244,7 +1246,7 @@ def _load_char_conf():
         raw = {}
     char_state["enabled"] = bool(raw.get("enabled", True))
     char_state["thresh"] = _clamp_thresh(raw.get("thresh", CHAR_THRESH_DEFAULT))
-    char_state["dir"] = "above" if raw.get("dir") == "above" else "below"
+    char_state["dir"] = "above"      # 箭头固定朝上：旧配置文件里的 dir 一律忽略
     try:
         char_state["scale"] = min(1.6, max(0.25, float(raw.get("scale", 1.0))))
     except (TypeError, ValueError):
@@ -1269,6 +1271,16 @@ CHAR_HUD_PENALTY = 0.12
 CHAR_HUD_BOTTOM = 0.93     # y > 93%H
 CHAR_HUD_TOP = 0.05        # y < 5%H
 CHAR_HUD_SIDE = 0.09       # x < 9%W 或 x > 91%W（左侧小地图 / 右侧任务栏）
+
+# ---- 人物框的防抖 / 防跳变 ----
+# 局部搜索已经把位置约束在上一帧附近，但「附近」在 ±200px 宽搜时足够装下另一行
+# 同名白字（小地图里的自己、队伍栏、聊天窗冒出的同名字）；一次误匹配就会把框甩到
+# 那边去，下一帧又甩回来，看着像「标记被别的东西引走了」。所以对框本身再加三道闸：
+CHAR_DEADZONE_PX = 2.5     # 位移小于这个当没动（匹配峰在原地 ±1px 抖，别让框跟着颤）
+CHAR_SMOOTH_PX = 12.0      # 这么小的位移做 EMA，把抖动吃掉；更大的直接跟手
+CHAR_SMOOTH_ALPHA = 0.60   # EMA 系数：越小越稳、越滞后（0.6 时 7px/帧 的慢走滞后约 5px）
+CHAR_JUMP_PX = 90.0        # 单帧位移超过它就算「跳变」：正常跑动一帧只走 10~40px
+CHAR_JUMP_CONFIRM = 4      # 跳变位置要连续这么多帧落在同一处，才承认是真瞬移（约 0.27s）
 
 
 def _white_map(gray, thr=None):
@@ -1365,6 +1377,8 @@ def _set_char_tpl(gray, scale=1.0):
         char_state["box"] = None
         char_state["score"] = 0.0
         char_state["misses"] = 0
+        char_state["pending"] = None
+        char_state["guard"] = 0
         char_state["error"] = ""
 
 
@@ -1466,8 +1480,8 @@ def _local_search(g, tpl_w, box, radius):
     """在 box 周围 ±radius 里搜一次，返回 (box, score) 或 None（峰压在边界上）。"""
     th, tw = tpl_w.shape[:2]
     H, W = g.shape[:2]
-    x1, y1 = max(0, box[0] - radius), max(0, box[1] - radius)
-    x2, y2 = min(W, box[2] + radius), min(H, box[3] + radius)
+    x1, y1 = max(0, int(box[0]) - radius), max(0, int(box[1]) - radius)
+    x2, y2 = min(W, int(box[2]) + radius), min(H, int(box[3]) + radius)
     roi = _white_map(g[y1:y2, x1:x2])
     if roi.shape[0] < th or roi.shape[1] < tw:
         return None
@@ -1552,6 +1566,68 @@ def find_char(frame):
     return [x, y, x + tw, y + th], float(sc)
 
 
+def _bbox_center(b):
+    return ((b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5)
+
+
+def _bbox_dist(a, b):
+    ax, ay = _bbox_center(a)
+    bx, by = _bbox_center(b)
+    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+
+def _bbox_int(b):
+    """框一律存整数像素。
+
+    EMA 平滑出来的是浮点，float 的框写回 char_state 之后，下一帧 _local_search 会拿它
+    做 g[y1:y2] 切片 —— TypeError: slice indices must be integers。异常被 char_loop
+    的 try 吞掉，表现为「人物标记突然不动了、error 一直刷」。
+    """
+    return [int(round(float(v))) for v in b]
+
+
+def _bbox_blend(cur, new, k):
+    return _bbox_int([cur[i] + (new[i] - cur[i]) * k for i in range(4)])
+
+
+def chase_char_box(cur, new, pending):
+    """给人物框加防抖 / 防跳变。返回 (这一帧显示的框, 新 pending, 事件)。
+
+    cur     上一帧显示的框（None = 还没锁定）
+    new     这一帧匹配到的框
+    pending 正在等确认的跳变候选 (box, hits)，没有就是 None
+
+    事件只用于日志和面板提示：
+      first  首次锁定（拿到模板后第一次命中）
+      track  正常跟随（含小位移平滑）
+      hold   疑似跳到别处，这一帧不认，继续按住旧框
+      switch 跳变候选连续确认够了，承认是真瞬移/被击退
+
+    三道闸：
+      1) 死区：位移 < CHAR_DEADZONE_PX 当作没动。匹配峰本来就在原地 ±1px 抖，
+         不设死区的话框会一直微颤。
+      2) 小位移 EMA：位移 < CHAR_SMOOTH_PX 时按 CHAR_SMOOTH_ALPHA 融合。慢速走动
+         时框走得比匹配结果稳，快速移动时（> 12px/帧）直接跟手，不拖后腿。
+      3) 跳变确认：位移 > CHAR_JUMP_PX 一律先按住旧框，同一处再连续出现
+         CHAR_JUMP_CONFIRM 帧才切过去。这一步就是「别被别处的同名白字引走」——
+         一次误匹配只会让框停在原地，不会甩出去再甩回来。
+    """
+    if cur is None:
+        return _bbox_int(new), None, "first"
+    d = _bbox_dist(cur, new)
+    if d <= CHAR_DEADZONE_PX:
+        return _bbox_int(cur), None, "track"
+    if d <= CHAR_JUMP_PX:
+        k = CHAR_SMOOTH_ALPHA if d <= CHAR_SMOOTH_PX else 1.0
+        return _bbox_blend(cur, new, k), None, "track"
+    hits = 1
+    if pending is not None and _bbox_dist(pending[0], new) <= CHAR_JUMP_PX:
+        hits = pending[1] + 1          # 连续落在同一处：可能是真瞬移
+    if hits >= CHAR_JUMP_CONFIRM:
+        return _bbox_int(new), None, "switch"
+    return _bbox_int(cur), (_bbox_int(new), hits), "hold"
+
+
 def _auto_recalibrate(frame):
     """长时间跟丢时重标一次尺度（用户改了窗口大小/分辨率会这样）。
 
@@ -1592,14 +1668,24 @@ def char_loop():
                 char_state["error"] = f"{type(e).__name__}: {e}"
             time.sleep(0.5)
             continue
+        now = time.time()
         with char_lock:
             char_state["error"] = ""
             char_state["score"] = round(score, 3)
-            if score >= char_state["thresh"]:
-                char_state["box"] = box
-                char_state["ts"] = time.time()
+            if box is not None and score >= char_state["thresh"]:
+                shown, pend, ev = chase_char_box(
+                    char_state["box"], box, char_state["pending"])
+                char_state["box"] = shown
+                char_state["pending"] = pend
+                char_state["guard"] = pend[1] if pend else 0
                 char_state["misses"] = 0
+                # hold 不续命：一直按着旧框说明这次匹配没被采信，CHAR_LOST_AFTER
+                # 到点就把标记收掉，别在旧位置留一个「幽灵 ME」。
+                if ev != "hold":
+                    char_state["ts"] = now
             else:
+                char_state["pending"] = None
+                char_state["guard"] = 0
                 char_state["misses"] += 1
                 if char_state["misses"] > CHAR_REACQ_MISS:   # 连续没命中就当丢了
                     char_state["box"] = None
@@ -1934,6 +2020,7 @@ async def stats():
             "size": list(char_state["size"]),
             "dir": char_state["dir"],
             "scale": char_state["scale"],
+            "guard": char_state["guard"],   # >0：疑似跳变，正在攒帧确认
         },
     })
 
@@ -2207,6 +2294,7 @@ async def char_status():
             "size": list(char_state["size"]),
             "dir": char_state["dir"],
             "scale": char_state["scale"],
+            "guard": char_state["guard"],
             "error": char_state["error"],
             "thread": _char_thread_alive(),   # 找人线程是否活着（排查「标记不动了」）
         })
@@ -2304,6 +2392,8 @@ async def char_del_template():
         char_state["score"] = 0.0
         char_state["ts"] = 0.0
         char_state["misses"] = 0
+        char_state["pending"] = None
+        char_state["guard"] = 0
         char_state["error"] = ""
     ensure_char_thread()     # 线程要是已经挂了，这里顺手拉回来
     return JSONResponse({"ok": True, "thread": _char_thread_alive()})
@@ -2319,12 +2409,11 @@ async def char_tpl_png():
 
 @app.get("/api/char/conf")
 async def char_conf(v: float = 0, enabled: int = -1, dir: str = ""):
-    """人物匹配阈值 / 开关 / 箭头方向。
+    """人物匹配阈值 / 开关。
 
     v    阈值（0.30~0.95）
     enabled  0/1 才改开关
-    dir  below = 人物在模板下方（名字牌在头顶时的常规情况）；above = 人物在上方
-         （有的客户端把名字画在脚下，这时候箭头要朝上）
+    dir  已废弃：箭头固定朝上。参数留着是为了老页面不会 422。
     """
     changed = False
     if v:
@@ -2333,9 +2422,7 @@ async def char_conf(v: float = 0, enabled: int = -1, dir: str = ""):
     if enabled in (0, 1):
         char_state["enabled"] = bool(enabled)
         changed = True
-    if dir in ("above", "below"):
-        char_state["dir"] = dir
-        changed = True
+    char_state["dir"] = "above"
     if changed:
         _save_char_conf()
         with char_lock:

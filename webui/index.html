@@ -332,6 +332,7 @@
   }
   .cneed:hover { background: #fef3c7; border-color: #d97706; }
   .cneed.busy { color: var(--muted); border-color: var(--border); background: #f5f5f4; }
+  .hold { color: #b45309; }        /* 「校准中」：疑似跳变，正在攒帧确认 */
   .filterrow { margin-top: 10px; }
   .filterrow input {
     width: 100%;
@@ -419,12 +420,6 @@
             <div class="row"><span class="k">锁定目标</span><span class="v small" id="lock">—</span></div>
             <div class="row"><span class="k">人物</span>
               <span class="v small"><span id="charInfo">未设置</span></span>
-            </div>
-            <div class="row"><span class="k">箭头</span>
-              <span class="v small"><select id="charDir" title="人物相对框的位置：名字牌在头顶 → 朝下指；名字画在脚下 → 朝上指">
-                <option value="below">朝下</option>
-                <option value="above">朝上</option>
-              </select></span>
             </div>
             <div class="row"><span class="k">条位置</span><span class="v small" id="barsrc">—</span></div>
           </div>
@@ -935,7 +930,6 @@
   function paintChar(c) {
     if (!c) return;
     if (!!c.has_tpl !== charHasTpl) showCharTpl(!!c.has_tpl);
-    if (c.dir && $("charDir").value !== c.dir) $("charDir").value = c.dir;
     if (!charHasTpl) {
       $("charInfo").textContent = "未设置";
       $("charInfo").className = "";
@@ -946,8 +940,15 @@
     const size = c.size && c.size[0] ? ` ${c.size[0]}×${c.size[1]}` : "";
     const sc = (typeof c.scale === "number" && Math.abs(c.scale - 1) > 0.01)
       ? ` ×${c.scale.toFixed(2)}` : "";
-    $("charInfo").textContent = `${c.score.toFixed(2)} · ${live ? "已定位" : "未找到"}${size}${sc}`;
-    $("charInfo").className = "small" + (live ? "" : " warn");
+    // guard > 0：这一帧匹配到的地方离上一帧太远（>90px），后端先按住旧框、攒帧确认，
+    // 不直接把标记甩过去。文字换成「校准中」，别让人以为框卡住了。
+    const hold = live && c.guard > 0;
+    $("charInfo").textContent =
+      `${c.score.toFixed(2)} · ${live ? (hold ? "校准中" : "已定位") : "未找到"}${size}${sc}`;
+    $("charInfo").className = "small" + (live ? (hold ? " hold" : "") : " warn");
+    $("charInfo").title = hold
+      ? "匹配位置离上一帧超过 90px，先按住旧框，连续几帧都落在同一处才切过去（防被别处的同名文字引走）"
+      : "";
     if (Date.now() > charLockUntil) {
       const inp = $("charRange");
       if (typeof c.thresh === "number" && Math.abs(parseFloat(inp.value) - c.thresh) > 0.001) {
@@ -1093,15 +1094,6 @@
     if (!f) return;
     e.preventDefault();
     useCharImage(f);
-  });
-
-  $("charDir").addEventListener("change", async (e) => {
-    try {
-      const r = await (await fetch("/api/char/conf?dir=" + e.target.value, { cache: "no-store" })).json();
-      toast(r.dir === "above" ? "箭头改为朝上指（人物在框上方）" : "箭头改为朝下指（人物在框下方）");
-    } catch (err) {
-      toast("切换失败", true);
-    }
   });
 
   /* 缩略图右上角那个红叉：删掉模板。标记、分数、框全部归零，找人线程留在原地
