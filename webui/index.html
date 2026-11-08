@@ -22,6 +22,9 @@
     --card-pad: 16px;
   }
   * { box-sizing: border-box; }
+  /* hidden 属性会被自己写的 display 覆盖（.cneed/.ctpl 都是 inline-flex），
+     这里统一兜一层，免得「藏起来了还显示」。 */
+  [hidden] { display: none !important; }
   body {
     margin: 0;
     min-height: 100vh;
@@ -294,6 +297,34 @@
   .paste-hint { margin-top: 9px; font-size: 11px; color: var(--hint); line-height: 1.6; }
   .paste-btns { margin-top: 12px; display: flex; justify-content: flex-end; }
   .paste-btns button { flex: none; padding: 6px 14px; }
+  /* ---- 人物模板：有图显示缩略图（右上角红叉删），没图给一块显眼的虚线提示 ---- */
+  .cwrap { display: flex; align-items: center; justify-content: flex-end; gap: 7px; overflow: visible; }
+  .ctpl { position: relative; display: inline-flex; flex: 0 0 auto; cursor: pointer; }
+  .ctpl img {
+    height: 24px; width: auto; max-width: 160px; display: block;
+    border: 1px solid var(--border); border-radius: 5px; background: #0c0a09;
+    image-rendering: pixelated;   /* 名字牌是小图，放大后别糊成一团 */
+  }
+  .ctpl:hover img { border-color: #a8a29e; }
+  .ctpl .cdel {
+    position: absolute; top: -7px; right: -7px;
+    width: 15px; height: 15px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; line-height: 1; font-weight: 700;
+    color: #fff; background: var(--bad); border: 1.5px solid #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,.25);
+    cursor: pointer; user-select: none;
+  }
+  .ctpl .cdel:hover { background: #b91c1c; }
+  .cneed {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 9px; border-radius: 999px; cursor: pointer;
+    font-size: 11px; font-weight: 600; color: #b45309;
+    background: #fffbeb; border: 1px dashed #f59e0b;
+    white-space: nowrap;
+  }
+  .cneed:hover { background: #fef3c7; border-color: #d97706; }
+  .cneed.busy { color: var(--muted); border-color: var(--border); background: #f5f5f4; }
   .filterrow { margin-top: 10px; }
   .filterrow input {
     width: 100%;
@@ -370,7 +401,16 @@
             <div class="row"><span class="k">推理模式</span><span class="v small" id="mode">—</span></div>
             <div class="row"><span class="k">类别</span><span class="v small" id="classes">—</span></div>
             <div class="row"><span class="k">锁定目标</span><span class="v small" id="lock">—</span></div>
-            <div class="row"><span class="k">人物</span><span class="v small" id="charInfo">未设置</span></div>
+            <div class="row"><span class="k">人物</span>
+              <span class="v small cwrap">
+                <span class="ctpl" id="charTpl" hidden title="当前人物模板：点图换一张">
+                  <img id="charImg" alt="人物模板" />
+                  <b class="cdel" id="charDel" title="删掉当前模板">×</b>
+                </span>
+                <b class="cneed" id="charNeed" title="点这里截图上传；也支持 Ctrl+V 粘贴 / 把图拖进来">⚠ 点这里上传名字牌截图</b>
+                <span id="charInfo"></span>
+              </span>
+            </div>
             <div class="row"><span class="k">箭头</span>
               <span class="v small"><select id="charDir" title="人物相对框的位置：名字牌在头顶 → 朝下指；名字画在脚下 → 朝上指">
                 <option value="below">朝下</option>
@@ -392,9 +432,6 @@
           <button id="detect">识别: 关</button>
           <button id="modeBtn">模式: 速度</button>
           <button id="focusBtn" title="把游戏窗口抬到最前并给焦点（截图前必做）">前置游戏</button>
-          <button id="charUpBtn" title="上传 / Ctrl+V 粘贴 / 把图片拖进页面：用一张名字牌的小图当模板，后台按它在画面里找人物">上传人物图</button>
-          <button id="charBtn" title="不想上传的话，也可以直接在画面上框一下名字牌">框选</button>
-          <button id="charClear" hidden title="删掉名字牌模板，人物标记随之消失">清除人物</button>
           <input type="file" id="charFile" accept="image/*" hidden>
           <!-- 标定/自动定位平时用不上：auto 定位在后台自己跑，坐标存在 webui/bars.json。
                真要手动框的时候在地址后面加 ?cal=1 把这两个按钮放出来。 -->
@@ -519,12 +556,8 @@
   let barsCfg = {};               // kind -> {x1,y1,x2,y2,hue}
   let barCal = null;              // 正在标定的条 kind，null 表示不在标定
   let barQueue = [];              // 待标定的剩余条（按 hp -> mp -> exp 顺序）
-  /* 人物定位：框一次名字牌，后端拿这块图做模板匹配（见 server.py 的 find_char）。
-     框选复用画布拖拽，只是另开一个模式，跟标定条互斥。 */
-  let charCal = false;            // 正在框人物名字牌
   let charHasTpl = false;         // 后端已经有模板
   let charLockUntil = 0;          // 拖人物阈值滑块期间，别让轮询把值拽回去
-  const CHAR_LINE = "#0ea5e9";    // 跟后端画的 ME 标记同色系（天蓝）
   let grabberReady = false;       // 抓到画面后才知道画面比例，标定前先确认
   const L = { w: 0, h: 0, ox: 0, oy: 0 }; // 内容区尺寸 + 内容区在 canvas 内的偏移
   // 遮罩 canvas 盖住 tile 并四周外扩 PAD(px)：贴边选区(x2=1.0 等)的把手
@@ -656,13 +689,12 @@
       }
     });
 
-    if (drag && (drag.mode === "new" || drag.mode === "bar" || drag.mode === "char")) {
+    if (drag && (drag.mode === "new" || drag.mode === "bar")) {
       const r = normRect(drag.start.x, drag.start.y, drag.cur.x, drag.cur.y);
-      const isChar = drag.mode === "char";
-      mctx.fillStyle = isChar ? "rgba(14,165,233,.18)" : "rgba(37,99,235,.16)";
+      mctx.fillStyle = "rgba(37,99,235,.16)";
       mctx.fillRect(X(r.x1), Y(r.y1), (r.x2 - r.x1) * L.w, (r.y2 - r.y1) * L.h);
       mctx.setLineDash([5, 4]);
-      mctx.strokeStyle = isChar ? CHAR_LINE : BLUE_LINE;
+      mctx.strokeStyle = BLUE_LINE;
       mctx.lineWidth = 1.5;
       mctx.strokeRect(X(r.x1), Y(r.y1), (r.x2 - r.x1) * L.w, (r.y2 - r.y1) * L.h);
       mctx.setLineDash([]);
@@ -871,50 +903,6 @@
     }
   }
 
-  /* ---------- 人物定位：框一次名字牌当模板 ----------
-     框出来的是"人物头顶那行名字"，后端拿它做模板匹配（TM_CCOEFF_NORMED）。
-     框大一点把名字完整包住就行，但别带太多周围景色——留白越多分数越低。 */
-  function startCharCal() {
-    if (!grabberReady) { toast("还没抓到画面，先让游戏窗口在前台", true); return; }
-    if (barCal) cancelBarCal(true);
-    charCal = true;
-    $("charBtn").className = "on";
-    $("charBtn").textContent = "框选: 拖名字牌";
-    toast("沿人物名字拖一个框（刚好包住名字，别带太多背景），松手即生效");
-    drawMasks();
-  }
-
-  function cancelCharCal(quiet) {
-    charCal = false;
-    $("charBtn").className = "";
-    $("charBtn").textContent = "框选";
-    if (!quiet) toast("已取消");
-    drawMasks();
-  }
-
-  async function commitChar(d) {
-    const r = normRect(d.start.x, d.start.y, d.cur.x, d.cur.y);
-    cancelCharCal(true);
-    if (r.x2 - r.x1 < 0.015 || r.y2 - r.y1 < 0.006) {
-      toast("框太小了，把整行名字包住再松手", true);
-      drawMasks();
-      return;
-    }
-    try {
-      const res = await postJSON("/api/char/template", r);
-      if (!res.ok) throw new Error(res.msg || "保存失败");
-      charHasTpl = true;
-      $("charClear").hidden = false;
-      const ok = res.score >= res.thresh;
-      toast(`名字牌模板 ${res.size[0]}×${res.size[1]}，当前匹配分 ${res.score.toFixed(2)}`
-            + (ok ? "" : `（低于门限 ${res.thresh.toFixed(2)}，可把「人物匹配」调低）`), !ok);
-      refreshChar();
-    } catch (err) {
-      toast(err.message || "保存失败", true);
-    }
-    drawMasks();
-  }
-
   async function refreshChar() {
     try {
       const c = await (await fetch("/api/char", { cache: "no-store" })).json();
@@ -922,15 +910,26 @@
     } catch (e) { /* 服务未就绪 */ }
   }
 
+  let charTplVer = 0;             // 缩略图 URL 的版本号，换模板后强刷缓存
+  function showCharTpl(has) {
+    charHasTpl = has;
+    $("charTpl").hidden = !has;
+    $("charNeed").hidden = has;
+    if (has) {
+      charTplVer++;
+      $("charImg").src = `/api/char/template.png?v=${charTplVer}`;
+    } else {
+      $("charImg").removeAttribute("src");
+    }
+  }
+
   function paintChar(c) {
     if (!c) return;
-    charHasTpl = !!c.has_tpl;
-    $("charClear").hidden = !charHasTpl;
-    if (!charCal) $("charBtn").textContent = "框选";
+    if (!!c.has_tpl !== charHasTpl) showCharTpl(!!c.has_tpl);
     if (c.dir && $("charDir").value !== c.dir) $("charDir").value = c.dir;
     if (!charHasTpl) {
-      $("charInfo").textContent = "未设置 · 可 Ctrl+V 粘贴";
-      $("charInfo").className = "v small";
+      $("charInfo").textContent = "";
+      $("charInfo").className = "small";
       return;
     }
     const age = c.age;
@@ -939,7 +938,7 @@
     const sc = (typeof c.scale === "number" && Math.abs(c.scale - 1) > 0.01)
       ? ` ×${c.scale.toFixed(2)}` : "";
     $("charInfo").textContent = `${c.score.toFixed(2)} · ${live ? "已定位" : "未找到"}${size}${sc}`;
-    $("charInfo").className = "v small" + (live ? "" : " warn");
+    $("charInfo").className = "small" + (live ? "" : " warn");
     if (Date.now() > charLockUntil) {
       const inp = $("charRange");
       if (typeof c.thresh === "number" && Math.abs(parseFloat(inp.value) - c.thresh) > 0.001) {
@@ -948,11 +947,6 @@
       }
     }
   }
-
-  $("charBtn").addEventListener("click", () => {
-    if (charCal) cancelCharCal();
-    else startCharCal();
-  });
 
   /* 上传名字牌小图：客户端先缩到 600 宽以内再发（base64 比原图小一个量级），
      服务端会在当前画面上扫一遍尺度，把模板重采样到和画面一致的像素尺度。 */
@@ -984,14 +978,15 @@
     if (!f || charBusy) return;
     if (f.type && !/^image\//.test(f.type)) { toast("只支持图片文件", true); return; }
     charBusy = true;
-    $("charUpBtn").disabled = true;
-    $("charUpBtn").textContent = "上传中…";
+    const need = $("charNeed");
+    const needTxt = need.textContent;
+    need.textContent = "上传中…";
+    need.classList.add("busy");
     try {
       const dataUrl = await fileToDataURL(f, 600);
       const res = await postJSON("/api/char/upload", { image: dataUrl });
       if (!res.ok) throw new Error(res.msg || "上传失败");
-      charHasTpl = true;
-      $("charClear").hidden = false;
+      showCharTpl(true);
       closePaste();
       const ok = res.score >= res.thresh;
       toast(`已用这张图 ${res.size[0]}×${res.size[1]} 当模板，匹配分 ${res.score.toFixed(2)}`
@@ -1003,8 +998,8 @@
       toast(err.message || "上传失败", true);
     } finally {
       charBusy = false;
-      $("charUpBtn").disabled = false;
-      $("charUpBtn").textContent = "上传人物图";
+      need.textContent = needTxt;
+      need.classList.remove("busy");
     }
   }
 
@@ -1019,7 +1014,9 @@
     pasteBox.classList.remove("open");
     pasteZone.classList.remove("over");
   }
-  $("charUpBtn").addEventListener("click", openPaste);
+  /* 入口在「人物」那一行：没图时是虚线提示块，有图时点缩略图换一张。 */
+  $("charNeed").addEventListener("click", openPaste);
+  $("charTpl").addEventListener("click", openPaste);
   $("pasteCancel").addEventListener("click", closePaste);
   pasteBox.addEventListener("mousedown", (e) => { if (e.target === pasteBox) closePaste(); });
   pasteZone.addEventListener("click", () => $("charFile").click());
@@ -1098,22 +1095,21 @@
     }
   });
 
-  /* 清除只删模板：人物标记、匹配分、框全部归零，找人线程留在原地等下一张图。
-     清完不会再自动「恢复」——没有模板就没有可匹配的东西，这是预期的。 */
-  $("charClear").addEventListener("click", async () => {
+  /* 缩略图右上角那个红叉：删掉模板。标记、分数、框全部归零，找人线程留在原地
+     空转；清完再粘/拖一张就接着找，不用重启服务。 */
+  $("charDel").addEventListener("click", async (e) => {
+    e.stopPropagation();            // 别让缩略图的「点图换一张」跟着触发
+    if (!confirm("删掉当前人物模板？")) return;
     try {
       const r = await (await fetch("/api/char/template",
                                    { method: "DELETE", cache: "no-store" })).json();
-      charHasTpl = false;
-      $("charClear").hidden = true;
-      $("charBtn").textContent = "框选";
-      $("charInfo").textContent = "未设置 · 可 Ctrl+V 粘贴";
-      $("charInfo").className = "v small";
+      showCharTpl(false);
+      $("charInfo").textContent = "";
       toast(r && r.thread === false
-            ? "已清除模板；找人线程刚才不在，已重新拉起"
-            : "已清除人物模板：Ctrl+V 粘一张名字牌截图就重新开始");
-    } catch (e) {
-      toast("清除失败", true);
+            ? "已删掉模板；找人线程刚才不在，已重新拉起"
+            : "已删掉人物模板：再截一张名字牌粘进来就重新开始");
+    } catch (err) {
+      toast("删除失败", true);
     }
   });
 
@@ -1390,15 +1386,10 @@
 
   maskLayer.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
-    if (!maskOn && !barCal && !charCal) return;
+    if (!maskOn && !barCal) return;
     e.preventDefault();
     maskLayer.setPointerCapture(e.pointerId);
     const p = toNorm(e);
-    if (charCal) {                       // 框人物名字牌：拖一下就存成模板
-      drag = { mode: "char", start: p, cur: p };
-      drawMasks();
-      return;
-    }
     if (barCal) {                        // 标定模式：任何拖拽都是在画这一条的框
       drag = { mode: "bar", kind: barCal, start: p, cur: p };
       drawMasks();
@@ -1438,11 +1429,11 @@
   });
 
   maskLayer.addEventListener("pointermove", (e) => {
-    if (!maskOn && !barCal && !charCal) return;
+    if (!maskOn && !barCal) return;
     const p = toNorm(e);
-    if (barCal || charCal) {
+    if (barCal) {
       maskLayer.style.cursor = "crosshair";
-      if (!drag) return;                 // 标定/框人物时不参与选区命中判断
+      if (!drag) return;                 // 标定时不参与选区命中判断
     }
     if (!drag) {
       const sel = masks.find((m) => m.id === selId);
@@ -1459,7 +1450,7 @@
       maskLayer.style.cursor = cur;
       return;
     }
-    if (drag.mode === "new" || drag.mode === "bar" || drag.mode === "char") { drag.cur = p; drawMasks(); return; }
+    if (drag.mode === "new" || drag.mode === "bar") { drag.cur = p; drawMasks(); return; }
     const m = masks.find((x) => x.id === drag.id);
     if (!m) return;
     if (drag.mode === "move") {
@@ -1477,10 +1468,6 @@
     if (!drag) return;
     const d = drag;
     drag = null;
-    if (d.mode === "char") {
-      commitChar(d);
-      return;
-    }
     if (d.mode === "bar") {
       commitBar(d);
       return;
@@ -1510,7 +1497,6 @@
     }
     if (e.key === "Escape") {
       if (barCal) { cancelBarCal(); return; }
-      if (charCal) { cancelCharCal(); return; }
       if (ctxMenu.classList.contains("open")) { closeCtx(); return; }
       if (editMode) exitEdit();
       return;
