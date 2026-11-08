@@ -18,6 +18,7 @@ import cv2
 import mss
 import numpy as np
 import uvicorn
+import win32con
 import win32gui
 from fastapi import Body, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -181,6 +182,65 @@ def client_region(hwnd):
     return {"left": x, "top": y, "width": r - l, "height": b - t}
 
 
+def _wait_foreground(hwnd, timeout=0.6):
+    u32 = ctypes.windll.user32
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < timeout:
+        if u32.GetForegroundWindow() == hwnd:
+            return True
+        time.sleep(0.03)
+    return False
+
+
+def bring_to_front():
+    """把游戏窗口抬到最前并获得焦点。
+
+    游戏用 DX 渲染，PrintWindow 抓不到内容（实测返回全黑），被别的窗口挡住时
+    mss 抓到的就是挡在前面的窗口。所以凡是要截图的地方都得先前置。
+
+    Windows 的"前台锁"会静默忽略 SetForegroundWindow（返回值 0，前台不变）。
+    实测这台机器上 AttachThreadInput 跨进程会 Access denied（错误 5），真正管用
+    的是：先模拟按一下 ALT —— 系统认为"用户刚有输入"，随后那次 SetForegroundWindow
+    就放行。所以按"直接切 → ALT 唤醒 → 置顶兜底"三级依次尝试。
+
+    返回 (ok, 说明文字)。
+    """
+    hwnd = find_window()
+    if not hwnd:
+        return False, "未找到游戏窗口"
+    u32 = ctypes.windll.user32
+    SWP = win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW
+    try:
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            time.sleep(0.2)
+        if u32.GetForegroundWindow() == hwnd:
+            return True, "已在前台"
+
+        # 1) 直接切（游戏刚被用过时这一步就够）
+        u32.SetForegroundWindow(hwnd)
+        if _wait_foreground(hwnd, 0.35):
+            return True, "已前置"
+
+        # 2) 模拟一次 ALT：解除前台锁，系统放行紧接着的切换
+        u32.keybd_event(win32con.VK_MENU, 0, 0, 0)
+        u32.keybd_event(win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)
+        time.sleep(0.03)
+        u32.SetForegroundWindow(hwnd)
+        if _wait_foreground(hwnd, 0.45):
+            return True, "已前置"
+
+        # 3) 置顶再取消置顶，最后再切一次
+        u32.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, SWP)
+        u32.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0, SWP)
+        u32.SetForegroundWindow(hwnd)
+        if _wait_foreground(hwnd, 0.45):
+            return True, "已前置"
+        return False, "前置被系统拒绝（游戏是否以管理员身份运行？手动点一下游戏窗口即可）"
+    except Exception as e:  # noqa: BLE001
+        return False, f"{type(e).__name__}: {e}"
+
+
 def placeholder(msg=b"NO WINDOW"):
     img = np.full((360, 640, 3), 24, np.uint8)
     cv2.putText(img, msg.decode(), (40, 190), cv2.FONT_HERSHEY_DUPLEX,
@@ -208,6 +268,19 @@ class Grabber(threading.Thread):
     def snapshot(self):
         with self.lock:
             return self.frame.copy() if self.frame is not None else placeholder()
+
+    def stamp(self):
+        """最新一帧的时间戳。判断"抓到的是不是前置之后的新帧"用。"""
+        return self.last_frame_ts
+
+    def wait_fresh(self, since, timeout=1.5):
+        """等到出现比 since 更新的一帧；超时返回 False。"""
+        t0 = time.perf_counter()
+        while time.perf_counter() - t0 < timeout:
+            if self.last_frame_ts > since:
+                return True
+            time.sleep(0.01)
+        return False
 
     def run(self):
         with SCREENSHOT() as sct:
@@ -254,6 +327,248 @@ class Grabber(threading.Thread):
 
 grabber = Grabber()
 grabber.start()
+
+# ---------------- 状态条识别（HP / MP / EXP） ----------------
+# 三条是固定 UI：位置固定、颜色固定、只沿水平方向变化。所以不走训练/推理，
+# 直接按"色相 + 饱和度"逐列扫描，既准（逐像素）又快（3 个 ~160x15 的 ROI，
+# 亚毫秒级），也完全不受模型召回率影响。
+BAR_FILE = Path(__file__).with_name("bars.json")
+BAR_KINDS = ("hp", "mp", "exp")
+BAR_LABEL = {"hp": "HP", "mp": "MP", "exp": "EXP"}
+BAR_HUE_TOL = 30        # 色相容差（OpenCV 色相 0~180，对应 0~360°）
+BAR_S_MIN, BAR_V_MIN = 90, 90   # 填充色一定"够艳够亮"，空槽是浅灰(S≈0)或深色(V<80)
+
+# 默认坐标：1366×768 怀旧服实测（归一到客户区宽高）。
+# 实测三条：红 466-624 / 蓝 634-799 / 黄绿 810-975，都在 y 747-763，
+# 归一后 x2 分别为 0.4568 / 0.5849 / 0.7138。换分辨率按比例套用；
+# UI 不跟随分辨率缩放时用前端"标定"重画即可。
+DEFAULT_BARS = {
+    "hp": {"x1": 0.3411, "y1": 0.9740, "x2": 0.4568, "y2": 0.9935, "hue": 1},
+    "mp": {"x1": 0.4641, "y1": 0.9740, "x2": 0.5849, "y2": 0.9935, "hue": 103},
+    "exp": {"x1": 0.5930, "y1": 0.9740, "x2": 0.7138, "y2": 0.9935, "hue": 33},
+}
+
+bar_lock = threading.Lock()
+BAR_CFG = {}
+
+
+def _clean_hue(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f:                                  # NaN
+        return None
+    # OpenCV 色相 0~180，允许端点外的值归一回来
+    f = f % 180.0
+    return round(f, 1)
+
+
+def _clean_rect(raw):
+    """把坐标整理成合法归一化矩形；太小或非法返回 None。"""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        x1 = _clamp01(float(raw["x1"]))
+        y1 = _clamp01(float(raw["y1"]))
+        x2 = _clamp01(float(raw["x2"]))
+        y2 = _clamp01(float(raw["y2"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(v != v for v in (x1, y1, x2, y2)):
+        return None
+    x1, x2 = min(x1, x2), max(x1, x2)
+    y1, y2 = min(y1, y2), max(y1, y2)
+    if x2 - x1 < 0.01 or y2 - y1 < 0.003:
+        return None
+    return {"x1": round(x1, 4), "y1": round(y1, 4),
+            "x2": round(x2, 4), "y2": round(y2, 4)}
+
+
+def load_bars():
+    cfg = {k: dict(v) for k, v in DEFAULT_BARS.items()}
+    if BAR_FILE.exists():
+        try:
+            data = json.loads(BAR_FILE.read_text(encoding="utf-8"))
+            raw = data.get("bars", {}) if isinstance(data, dict) else {}
+            for k in BAR_KINDS:
+                item = raw.get(k)
+                if not isinstance(item, dict):
+                    continue
+                rect = _clean_rect(item)
+                if rect is None:
+                    continue
+                cfg[k] = {**rect, "hue": _clean_hue(item.get("hue"))}
+        except Exception as e:  # noqa: BLE001
+            print(f"[bars] 读取 {BAR_FILE.name} 失败，改用默认坐标: {e}")
+    return cfg
+
+
+def save_bars():
+    tmp = BAR_FILE.with_name(BAR_FILE.name + ".tmp")
+    with bar_lock:
+        data = {k: dict(v) for k, v in BAR_CFG.items()}
+    tmp.write_text(json.dumps({"bars": data}, ensure_ascii=False, indent=2),
+                   encoding="utf-8")
+    tmp.replace(BAR_FILE)
+
+
+BAR_CFG = load_bars()
+
+
+def bar_snapshot():
+    with bar_lock:
+        return {k: dict(v) for k, v in BAR_CFG.items()}
+
+
+def _roi_px(rect, w, h):
+    x1 = int(round(rect["x1"] * w))
+    x2 = int(round(rect["x2"] * w))
+    y1 = int(round(rect["y1"] * h))
+    y2 = int(round(rect["y2"] * h))
+    x1 = max(0, min(x1, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    x2 = max(x1 + 1, min(x2, w))
+    y2 = max(y1 + 1, min(y2, h))
+    return x1, y1, x2, y2
+
+
+def sample_bar_hue(frame, rect):
+    """从条内左侧 1/4 采样填充色相。
+
+    三条都是从左往右填充，左侧几乎总有颜色，所以标定那一刻顺手把颜色学下来，
+    之后就不用猜"这个条是红是蓝"。采样不到（空条/框歪了）返回 None，测量时
+    自动退化为纯饱和度+亮度判定。
+    """
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = _roi_px(rect, w, h)
+    x2s = max(x1 + 1, x1 + max(2, (x2 - x1) // 4))
+    sub = frame[y1:y2, x1:x2s]
+    if sub.size == 0:
+        return None
+    hsv = cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)
+    m = (hsv[..., 1] > BAR_S_MIN) & (hsv[..., 2] > BAR_V_MIN)
+    if int(m.sum()) < 8:
+        return None
+    return _clean_hue(np.median(hsv[..., 0][m]))
+
+
+def measure_bar(frame, rect, hue=None):
+    """返回填充比例 0~1；ROI 无效返回 None。
+
+    做法：把条切成一根根"列"，每列看中间 60% 高度的像素——够艳够亮（且色相对得
+    上填充色）的列就算已填充。然后从左边数连续填充列，允许中间断 2 列（条上的
+    数字、斜纹高光会把个别列盖掉），断更多就认为到了没填的部分。
+    """
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = _roi_px(rect, w, h)
+    if x2 - x1 < 8 or y2 - y1 < 2:
+        return None
+    hsv = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+    Hh = hsv[..., 0].astype(np.int16)
+    S = hsv[..., 1].astype(np.int16)
+    V = hsv[..., 2].astype(np.int16)
+
+    hh = Hh.shape[0]
+    a = int(hh * 0.2)
+    b = max(a + 1, int(hh * 0.8))
+    Hh, S, V = Hh[a:b], S[a:b], V[a:b]
+
+    m = (S > BAR_S_MIN) & (V > BAR_V_MIN)
+    if hue is not None:
+        d = np.abs(Hh - int(round(hue)))
+        m &= np.minimum(d, 180 - d) <= BAR_HUE_TOL
+    col = m.mean(axis=0) > 0.5
+
+    n = len(col)
+    if n == 0:
+        return None
+    filled, gap, started = 0, 0, False
+    for v in col:
+        if v:
+            if started:
+                filled += gap          # 断口两侧都是填充 -> 断口本身也算填充
+            started = True
+            filled += 1
+            gap = 0
+        elif started:
+            gap += 1
+            if gap > 2:
+                break
+    return min(1.0, filled / n)
+
+
+def bars_debug_frame(frame):
+    """给前端/自检用：把三个 ROI 和逐列判定结果画出来。"""
+    out = frame.copy()
+    cfg = bar_snapshot()
+    h, w = out.shape[:2]
+    for kind in BAR_KINDS:
+        rect = cfg.get(kind)
+        if not rect:
+            continue
+        x1, y1, x2, y2 = _roi_px(rect, w, h)
+        cv2.rectangle(out, (x1, y1), (x2, y2), (255, 0, 255), 1)
+        cv2.putText(out, kind.upper(), (x1, max(10, y1 - 3)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1, cv2.LINE_AA)
+    return out
+
+
+bar_state = {
+    "enabled": True,
+    "values": {k: None for k in BAR_KINDS},
+    "updated": 0.0,
+    "error": "",
+    "fps": 0.0,
+}
+_bar_thread_started = [False]
+
+
+def bars_loop():
+    prev = {}
+    n, t0 = 0, time.perf_counter()
+    while True:
+        if not bar_state["enabled"] or not grabber.window_found:
+            time.sleep(0.25)
+            continue
+        cfg = bar_snapshot()
+        frame = grabber.snapshot()
+        vals = {}
+        for kind in BAR_KINDS:
+            rect = cfg.get(kind)
+            try:
+                p = measure_bar(frame, rect, rect.get("hue")) if rect else None
+            except Exception as e:  # noqa: BLE001
+                bar_state["error"] = f"{kind}: {type(e).__name__}: {e}"
+                p = None
+            if p is not None:
+                last = prev.get(kind)
+                # 掉血要立刻反映（alpha 大），回血慢慢跟上（alpha 小）
+                alpha = 0.9 if last is None or p < last else 0.35
+                p = p if last is None else last + (p - last) * alpha
+                prev[kind] = p
+                vals[kind] = round(p * 100, 1)
+            else:
+                vals[kind] = None
+        with bar_lock:
+            bar_state["values"] = vals
+            bar_state["updated"] = time.time()
+        n += 1
+        dt = time.perf_counter() - t0
+        if dt >= 2.0:
+            bar_state["fps"], n, t0 = n / dt, 0, time.perf_counter()
+        time.sleep(0.1)
+
+
+def ensure_bars_thread():
+    if _bar_thread_started[0]:
+        return
+    _bar_thread_started[0] = True
+    threading.Thread(target=bars_loop, daemon=True, name="bars").start()
+
+
+ensure_bars_thread()
+
 
 # ---------------- 检测（OpenVINO） ----------------
 det_state = {
@@ -714,7 +1029,60 @@ async def stats():
         "mode": det_state["mode"],
         "mode_label": MODES[det_state["mode"]]["label"],
         "mask": det_state["mask"],
+        "bars": dict(bar_state["values"]),
+        "bars_fps": round(bar_state["fps"], 1),
     })
+
+
+# ---------- 状态条（HP / MP / EXP） ----------
+@app.get("/api/bars")
+async def bars_get():
+    with bar_lock:
+        vals = dict(bar_state["values"])
+    return JSONResponse({
+        "bars": bar_snapshot(),
+        "values": vals,
+        "enabled": bar_state["enabled"],
+        "fps": round(bar_state["fps"], 1),
+        "updated": round(bar_state["updated"], 3),
+        "labels": BAR_LABEL,
+        "error": bar_state["error"],
+    })
+
+
+@app.post("/api/bars/set")
+async def bars_set(payload: dict = Body(...)):
+    """保存某一条的框选范围，并从当前画面自动学一个填充色相。"""
+    kind = str(payload.get("kind", "")).lower()
+    if kind not in BAR_KINDS:
+        return JSONResponse({"ok": False, "msg": f"kind 必须是 {BAR_KINDS}"}, status_code=400)
+    rect = _clean_rect(payload)
+    if rect is None:
+        return JSONResponse({"ok": False, "msg": "框太小或坐标非法"}, status_code=400)
+
+    hue = sample_bar_hue(grabber.snapshot(), rect)
+    if hue is None:                       # 采样不到就沿用原来的色相，别把已有配置搞丢
+        hue = bar_snapshot().get(kind, {}).get("hue")
+    with bar_lock:
+        BAR_CFG[kind] = {**rect, "hue": hue}
+    save_bars()
+    return JSONResponse({"ok": True, "kind": kind, "rect": rect, "hue": hue})
+
+
+@app.post("/api/bars/reset")
+async def bars_reset():
+    with bar_lock:
+        BAR_CFG.clear()
+        BAR_CFG.update({k: dict(v) for k, v in DEFAULT_BARS.items()})
+    save_bars()
+    return JSONResponse({"ok": True, "bars": bar_snapshot()})
+
+
+@app.get("/api/bars/preview")
+async def bars_preview():
+    """把三个 ROI 画在当前画面上，用来核对框得准不准。"""
+    jpg = encode(bars_debug_frame(grabber.snapshot()), width=None, quality=90)
+    return Response(content=jpg, media_type="image/jpeg")
 
 
 @app.get("/api/detect/filter")
@@ -846,11 +1214,33 @@ async def detect_toggle():
     return JSONResponse({"enabled": det_state["enabled"], "loading": det_state["loading"]})
 
 
+@app.get("/api/window/focus")
+async def window_focus():
+    """把游戏窗口抬到前台（前端按钮 / 脚本截图前调用）。"""
+    ok, msg = await asyncio.to_thread(bring_to_front)
+    return JSONResponse({"ok": ok, "msg": msg, "window_found": grabber.window_found})
+
+
 @app.get("/api/snapshot")
-async def snapshot():
+async def snapshot(focus: int = 0, fresh: int = 1):
+    """抓一张当前画面。
+
+    focus=1 先前置游戏窗口，然后等到一帧"前置之后"的新画面再返回——否则拿到的
+    是上一秒的旧帧（挡住时的画面），这是最容易踩的坑。
+    """
+    focus_msg = ""
+    focus_ok = False
+    if focus:
+        stamp = grabber.stamp()
+        focus_ok, focus_msg = await asyncio.to_thread(bring_to_front)
+        if fresh and focus_ok:
+            await asyncio.to_thread(grabber.wait_fresh, stamp, 1.5)
     jpg = encode(grabber.snapshot(), width=None, quality=92)
+    # 响应头只能是 latin-1，所以这里放英文状态；中文说明走 /api/window/focus 的 JSON
+    state = "skip" if not focus else ("ok" if focus_ok else "fail")
     return Response(content=jpg, media_type="image/jpeg",
-                    headers={"Content-Disposition": "inline; filename=snapshot.jpg"})
+                    headers={"Content-Disposition": "inline; filename=snapshot.jpg",
+                             "X-Focus": state})
 
 
 @app.get("/stream")

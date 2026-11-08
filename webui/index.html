@@ -89,6 +89,36 @@
   .dot.on { background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,.22); }
   .dot.off { background: #ef4444; }
   .panel { display: flex; flex-direction: column; gap: 12px; }
+  /* ---- 状态条读数（HP / MP / EXP）---- */
+  .bars { display: flex; flex-direction: column; gap: 6px; }
+  .bar { display: flex; align-items: center; gap: 9px; }
+  .bk {
+    width: 30px; flex: 0 0 auto;
+    font-size: 11px; font-weight: 700; letter-spacing: .04em;
+    color: var(--muted);
+  }
+  .btrack {
+    flex: 1 1 auto; height: 8px; border-radius: 999px;
+    background: #e7e5e4; overflow: hidden;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,.07);
+  }
+  .btrack i {
+    display: block; height: 100%; width: 0;
+    border-radius: 999px;
+    transition: width .22s ease-out, background .2s;
+  }
+  .bar[data-k="hp"] .btrack i { background: linear-gradient(90deg, #fb7185, #dc2626); }
+  .bar[data-k="mp"] .btrack i { background: linear-gradient(90deg, #60c5f0, #2563eb); }
+  .bar[data-k="exp"] .btrack i { background: linear-gradient(90deg, #d9f99d, #65a30d); }
+  .bv {
+    width: 46px; flex: 0 0 auto; text-align: right;
+    font-size: 12px; color: var(--text);
+    font-variant-numeric: tabular-nums;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  .bar.low .btrack i { background: linear-gradient(90deg, #fca5a5, #dc2626); }
+  .bar.low .bv { color: var(--bad); font-weight: 600; }
+  .bar.off .bv { color: var(--hint); }
   .rows {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -198,6 +228,11 @@
     </div>
 
     <div class="panel">
+      <div class="bars" id="bars">
+        <div class="bar" data-k="hp"><span class="bk">HP</span><span class="btrack"><i></i></span><span class="bv">—</span></div>
+        <div class="bar" data-k="mp"><span class="bk">MP</span><span class="btrack"><i></i></span><span class="bv">—</span></div>
+        <div class="bar" data-k="exp"><span class="bk">EXP</span><span class="btrack"><i></i></span><span class="bv">—</span></div>
+      </div>
       <div class="rows">
         <div class="row"><span class="k">客户区</span><span class="v" id="size">—</span></div>
         <div class="row"><span class="k">采集帧率</span><span class="v" id="cfps">—</span></div>
@@ -214,6 +249,8 @@
         <button id="toggle">暂停</button>
         <button id="detect">识别: 关</button>
         <button id="modeBtn">模式: 速度</button>
+        <button id="focusBtn" title="把游戏窗口抬到最前并给焦点（截图前必做）">前置游戏</button>
+        <button id="calBtn" title="依次框出 HP / MP / EXP 条的位置（框整条，含右侧空槽）">标定条</button>
         <button id="snap">存快照</button>
       </div>
       <div class="filterrow">
@@ -222,7 +259,7 @@
     </div>
   </div>
 
-  <p class="note">双击选区进入编辑（拖动移动 · 拉角缩放 · 右上角 ✕ 删除）· 右键画面可添加选区 / 开关排除 · 改动即时保存到 webui/masks.json</p>
+  <p class="note">双击选区进入编辑（拖动移动 · 拉角缩放 · 右上角 ✕ 删除）· 右键画面可添加排除区 · 改动即时保存到 webui/masks.json ·「标定条」按 HP → MP → EXP 顺序沿条拖一个框（框整条，含右侧空槽）</p>
 </div>
 
 <div class="ctx" id="ctxMenu"></div>
@@ -269,6 +306,18 @@
   let ctxHitId = null;            // 右键菜单针对的区域
   let confirmId = null;           // 等待确认删除的区域
   let lastNW = 0, lastNH = 0;     // 缓存画面原始尺寸（暂停时 naturalWidth 会变 0）
+
+  /* ========== 状态条（HP / MP / EXP）==========
+     三条是固定 UI，后端按色相逐列扫描算百分比；前端只负责显示 + 标定。
+     标定 = 在画面上沿条拖一个框（整条，含右侧空槽），一次就够，坐标存 services 端
+     bars.json，换分辨率再标一次。 */
+  const BAR_ORDER = ["hp", "mp", "exp"];
+  const BAR_NAME = { hp: "HP", mp: "MP", exp: "EXP" };
+  const BAR_COLORS = { hp: "#dc2626", mp: "#2563eb", exp: "#65a30d" };
+  let barsCfg = {};               // kind -> {x1,y1,x2,y2,hue}
+  let barCal = null;              // 正在标定的条 kind，null 表示不在标定
+  let barQueue = [];              // 待标定的剩余条（按 hp -> mp -> exp 顺序）
+  let grabberReady = false;       // 抓到画面后才知道画面比例，标定前先确认
   const L = { w: 0, h: 0, ox: 0, oy: 0 }; // 内容区尺寸 + 内容区在 canvas 内的偏移
   // 遮罩 canvas 盖住 tile 并四周外扩 PAD(px)：贴边选区(x2=1.0 等)的把手
   // 在画面边界上，不外扩的话边界像素的事件落不到 canvas，导致边缘把手抓不到、拖了也不保存。
@@ -319,9 +368,28 @@
     drawMasks();
   }
 
+  function drawBarRects() {
+    if (!barCal || !L.w || !L.h) return;     // 只在标定时显示框，平时看下面的读数即可
+    BAR_ORDER.forEach((k) => {
+      const b = barsCfg[k];
+      if (!b) return;
+      const x = X(b.x1), y = Y(b.y1);
+      const w = (b.x2 - b.x1) * L.w, h = (b.y2 - b.y1) * L.h;
+      mctx.setLineDash([]);
+      // 先白后彩：血条本身就是红的，纯红框压在红条上根本看不出来
+      mctx.strokeStyle = "rgba(255,255,255,.92)";
+      mctx.lineWidth = 3;
+      mctx.strokeRect(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
+      mctx.strokeStyle = BAR_COLORS[k];
+      mctx.lineWidth = 1.4;
+      mctx.strokeRect(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
+    });
+  }
+
   function drawMasks() {
     if (!L.w || !L.h) return;
     mctx.clearRect(0, 0, maskLayer.clientWidth, maskLayer.clientHeight);
+    drawBarRects();
     if (!maskOn) return;
 
     masks.forEach((m, i) => {
@@ -374,7 +442,7 @@
       }
     });
 
-    if (drag && drag.mode === "new") {
+    if (drag && (drag.mode === "new" || drag.mode === "bar")) {
       const r = normRect(drag.start.x, drag.start.y, drag.cur.x, drag.cur.y);
       mctx.fillStyle = "rgba(37,99,235,.16)";
       mctx.fillRect(X(r.x1), Y(r.y1), (r.x2 - r.x1) * L.w, (r.y2 - r.y1) * L.h);
@@ -533,6 +601,92 @@
     drawMasks();
   }
 
+  /* ---------- 状态条：标定 / 读数 ---------- */
+  function startBarCal() {
+    if (!grabberReady) { toast("还没抓到画面，先让游戏窗口在前台", true); return; }
+    barQueue = BAR_ORDER.slice();
+    nextBarCal();
+  }
+
+  function nextBarCal() {
+    if (!barQueue.length) {
+      barCal = null;
+      $("calBtn").className = "";
+      $("calBtn").textContent = "标定条";
+      toast("三条都标定好了");
+      drawMasks();
+      return;
+    }
+    barCal = barQueue.shift();
+    $("calBtn").className = "on";
+    $("calBtn").textContent = "标定: " + BAR_NAME[barCal];
+    toast(`沿 ${BAR_NAME[barCal]} 条从左到右拖一个框：要框住整条（含右侧空槽），高度贴着条`);
+    drawMasks();
+  }
+
+  function cancelBarCal(quiet) {
+    barCal = null;
+    barQueue = [];
+    $("calBtn").className = "";
+    $("calBtn").textContent = "标定条";
+    if (!quiet) toast("已取消标定");
+    drawMasks();
+  }
+
+  async function commitBar(d) {
+    const kind = d.kind;
+    const r = normRect(d.start.x, d.start.y, d.cur.x, d.cur.y);
+    if (r.x2 - r.x1 < 0.008 || r.y2 - r.y1 < 0.003) {
+      toast("框太小了，重画一次", true);
+      drawMasks();
+      return;
+    }
+    try {
+      const res = await postJSON("/api/bars/set", { kind, ...r });
+      if (!res.ok) throw new Error(res.msg || "保存失败");
+      barsCfg[kind] = { ...r, hue: res.hue };
+      toast(`${BAR_NAME[kind]} 标定完成`);
+      nextBarCal();
+    } catch (err) {
+      toast(err.message || "保存失败", true);
+      drawMasks();
+    }
+  }
+
+  function renderBars(vals) {
+    document.querySelectorAll(".bar").forEach((el) => {
+      const k = el.dataset.k;
+      const v = vals ? vals[k] : null;
+      const fillEl = el.querySelector(".btrack i");
+      const txt = el.querySelector(".bv");
+      if (v === null || v === undefined) {
+        fillEl.style.width = "0%";
+        txt.textContent = "—";
+        el.classList.add("off");
+        el.classList.remove("low");
+        return;
+      }
+      el.classList.remove("off");
+      const p = Math.min(100, Math.max(0, v));
+      fillEl.style.width = p.toFixed(1) + "%";
+      txt.textContent = p.toFixed(1) + "%";
+      el.classList.toggle("low", (k === "hp" || k === "mp") && p < 30);
+    });
+  }
+
+  async function pollBars() {
+    try {
+      const r = await (await fetch("/api/bars", { cache: "no-store" })).json();
+      barsCfg = r.bars || {};
+      renderBars(r.values);
+    } catch (e) { /* 服务未就绪：保持上次读数 */ }
+  }
+
+  $("calBtn").addEventListener("click", () => {
+    if (barCal) cancelBarCal();
+    else startBarCal();
+  });
+
   /* ---------- 删除二次确认弹窗 ---------- */
   function askDelete(id) {
     const m = masks.find((x) => x.id === id);
@@ -637,10 +791,16 @@
   });
 
   maskLayer.addEventListener("pointerdown", (e) => {
-    if (!maskOn || e.button !== 0) return;
+    if (e.button !== 0) return;
+    if (!maskOn && !barCal) return;
     e.preventDefault();
     maskLayer.setPointerCapture(e.pointerId);
     const p = toNorm(e);
+    if (barCal) {                        // 标定模式：任何拖拽都是在画这一条的框
+      drag = { mode: "bar", kind: barCal, start: p, cur: p };
+      drawMasks();
+      return;
+    }
     if (!editMode) return;               // 默认不可编辑：只能双击选区 / 右键菜单进入
 
     if (addArmed) {                      // 右键"添加"后的一次性画新框
@@ -675,8 +835,12 @@
   });
 
   maskLayer.addEventListener("pointermove", (e) => {
-    if (!maskOn) return;
+    if (!maskOn && !barCal) return;
     const p = toNorm(e);
+    if (barCal) {
+      maskLayer.style.cursor = "crosshair";
+      if (!drag) return;                 // 标定时不参与选区命中判断
+    }
     if (!drag) {
       const sel = masks.find((m) => m.id === selId);
       let cur = "crosshair";
@@ -692,7 +856,7 @@
       maskLayer.style.cursor = cur;
       return;
     }
-    if (drag.mode === "new") { drag.cur = p; drawMasks(); return; }
+    if (drag.mode === "new" || drag.mode === "bar") { drag.cur = p; drawMasks(); return; }
     const m = masks.find((x) => x.id === drag.id);
     if (!m) return;
     if (drag.mode === "move") {
@@ -710,6 +874,10 @@
     if (!drag) return;
     const d = drag;
     drag = null;
+    if (d.mode === "bar") {
+      commitBar(d);
+      return;
+    }
     if (d.mode === "new") {
       const r = normRect(d.start.x, d.start.y, d.cur.x, d.cur.y);
       if (r.x2 - r.x1 < MIN_N || r.y2 - r.y1 < MIN_N) { drawMasks(); return; }  // 误点
@@ -731,6 +899,7 @@
       return;
     }
     if (e.key === "Escape") {
+      if (barCal) { cancelBarCal(); return; }
       if (ctxMenu.classList.contains("open")) { closeCtx(); return; }
       if (editMode) exitEdit();
       return;
@@ -778,6 +947,18 @@
     a.click();
   });
 
+  $("focusBtn").addEventListener("click", async () => {
+    $("focusBtn").disabled = true;
+    try {
+      const r = await (await fetch("/api/window/focus", { cache: "no-store" })).json();
+      toast(r.ok ? "游戏已前置" : (r.msg || "前置失败"), !r.ok);
+    } catch (e) {
+      toast("前置失败：服务未响应", true);
+    } finally {
+      $("focusBtn").disabled = false;
+    }
+  });
+
   let filterTimer = null;
   $("filter").addEventListener("input", (e) => {
     clearTimeout(filterTimer);
@@ -814,6 +995,7 @@
     try {
       const s = await (await fetch("/api/stats", { cache: "no-store" })).json();
       const found = s.window_found;
+      grabberReady = found;
       $("dot").className = "dot " + (found ? "on" : "off");
       if (!paused) $("badge").textContent = found ? "实时" : "无信号";
       // 窗口标题 / 报错信息改成角标上的悬浮提示，页面上不再占一行文字
@@ -859,6 +1041,9 @@
   }
   tick();
   setInterval(tick, 1000);
+
+  pollBars();                       // 血蓝经验条读数：独立轮询，比统计信息快一档
+  setInterval(pollBars, 400);
 
   /* 页面热更新：index.html 一改（mtime/size 变化）就自动刷新，
      避免对着浏览器的旧缓存误以为改动没生效。 */
