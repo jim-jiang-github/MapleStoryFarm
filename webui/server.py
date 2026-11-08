@@ -37,6 +37,7 @@ PREVIEW_W = 320          # 小方格宽度（px）
 STREAM_W = 1024          # 推流分辨率宽度：预览可放大到千px级，1024 仍有清晰余量
 DEFAULT_FPS = 30
 JPEG_QUALITY = 72
+JPEG_STREAM_Q = 85      # 实时流用：比 72 清楚，但按显示尺寸缩放后体积只有原来的 1/3
 # 默认监听所有网卡：手机连同一个 WiFi 时直接走局域网地址最顺畅（往返几毫秒，
 # 对比免费穿透的 1 秒往返是降维打击）。只想给本机用就 set PREVIEW_HOST=127.0.0.1。
 HOST = (os.environ.get("PREVIEW_HOST") or "0.0.0.0").strip() or "0.0.0.0"
@@ -1656,16 +1657,28 @@ async def snapshot(focus: int = 0, fresh: int = 1, bars: int = 0,
 
 
 @app.get("/stream")
-async def stream(bars: int = 0):
+async def stream(bars: int = 0, w: int = 0, q: int = 0):
+    """MJPEG 实时画面（本地 / 局域网用）。
+
+    w / q 由前端按"实际显示尺寸"给：原始画面 1366x768 每帧 200KB 以上，
+    浏览器每帧都要完整解一次，本机同时跑游戏和检测时就会掉帧、看着一顿一顿。
+    按显示尺寸推（一般 1000px 左右）+ q85，体积降到 1/3，速度反而提上来。
+    """
     async def gen():
         count, t0 = 0, time.perf_counter()
+        width = w if 320 <= w <= 4096 else None
+        quality = q if 40 <= q <= 95 else JPEG_STREAM_Q
+        # 按目标时间戳排帧：以前是"编完再睡 1/30"，编码本身的 5~8ms 白搭进去，
+        # 26fps 上不去。改成先算好下一帧该发的时刻，耗时就补差值，能稳在 30。
+        nxt = time.perf_counter()
         while True:
             with det_lock:
                 ann = det_state["annotated"] if det_state["enabled"] else None
             src = ann if ann is not None else grabber.snapshot()
             if bars:
-                src = bars_overlay_frame(src)
-            jpg = encode(src)
+                src = await asyncio.to_thread(bars_overlay_frame, src)
+            # 编解码放线程：cv2 会释放 GIL，别把事件循环堵住（否则血条/统计请求排队）
+            jpg = await asyncio.to_thread(encode, src, width, quality)
             yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
                    + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n")
             grabber.note_sent()
@@ -1673,7 +1686,12 @@ async def stream(bars: int = 0):
             dt = time.perf_counter() - t0
             if dt >= 1.0:
                 grabber.stream_fps, count, t0 = count / dt, 0, time.perf_counter()
-            await asyncio.sleep(1.0 / DEFAULT_FPS)
+            nxt += 1.0 / DEFAULT_FPS
+            delay = nxt - time.perf_counter()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            else:
+                nxt = time.perf_counter()      # 落后了就别补帧，重新对齐
 
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
