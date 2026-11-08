@@ -693,6 +693,40 @@ def bars_valid(frame, cfg=None):
     return True, ""
 
 
+def bars_overlay_frame(frame, thresh=0.5):
+    """把状态条的定位结果画在画面上（只给人看，不参与测量）。
+
+    三种线各说一件事：
+      白框  —— 参与判定的 ROI（bars.json 里存的那个框，实测会再自动外扩成整条槽）
+      洋红框 —— slot_bounds 找出来的"整条槽"，也就是百分比的分母
+      黄竖线 —— 当前算出来的填充终点（位置 = 读数）
+    """
+    out = frame.copy()
+    h, w = out.shape[:2]
+    cfg = bar_snapshot()
+    for kind in BAR_KINDS:
+        rect = cfg.get(kind)
+        if not rect:
+            continue
+        x1, y1, x2, y2 = _roi_px(rect, w, h)
+        try:
+            val = measure_bar(frame, rect, rect.get("hue"))
+        except Exception:  # noqa: BLE001
+            val = None
+        sx1, sx2 = slot_bounds(frame, x1, y1, x2, y2)
+        top, bot = max(0, y1 - 2), min(h - 1, y2 + 2)
+        # 槽（分母）：洋红，画在条上下的空白处，不压条本身
+        cv2.rectangle(out, (sx1, top), (sx2 - 1, bot), (255, 0, 255), 1)
+        # 填充终点：黄竖线
+        if val is not None:
+            fx = int(round(sx1 + 1 + val * max(1, sx2 - sx1 - 2)))
+            cv2.line(out, (fx, max(0, y1 - 5)), (fx, min(h - 1, y2 + 5)), (0, 255, 255), 1)
+        # ROI：白描边（画在框外一圈，因为条本身可能是白的/红的）
+        cv2.rectangle(out, (max(0, x1 - 1), max(0, y1 - 1)),
+                      (min(w - 1, x2 + 1), min(h - 1, y2 + 1)), (255, 255, 255), 1)
+    return out
+
+
 def bars_debug_frame(frame):
     """给前端/自检用：把三个 ROI 和逐列判定结果画出来。"""
     out = frame.copy()
@@ -1488,7 +1522,7 @@ async def window_focus():
 
 
 @app.get("/api/snapshot")
-async def snapshot(focus: int = 0, fresh: int = 1):
+async def snapshot(focus: int = 0, fresh: int = 1, bars: int = 0):
     """抓一张当前画面。
 
     focus=1 先前置游戏窗口，然后等到一帧"前置之后"的新画面再返回——否则拿到的
@@ -1501,7 +1535,10 @@ async def snapshot(focus: int = 0, fresh: int = 1):
         focus_ok, focus_msg = await asyncio.to_thread(bring_to_front)
         if fresh and focus_ok:
             await asyncio.to_thread(grabber.wait_fresh, stamp, 1.5)
-    jpg = encode(grabber.snapshot(), width=None, quality=92)
+    frame = grabber.snapshot()
+    if bars:
+        frame = await asyncio.to_thread(bars_overlay_frame, frame)
+    jpg = encode(frame, width=None, quality=92)
     # 响应头只能是 latin-1，所以这里放英文状态；中文说明走 /api/window/focus 的 JSON
     state = "skip" if not focus else ("ok" if focus_ok else "fail")
     return Response(content=jpg, media_type="image/jpeg",
@@ -1510,13 +1547,15 @@ async def snapshot(focus: int = 0, fresh: int = 1):
 
 
 @app.get("/stream")
-async def stream():
+async def stream(bars: int = 0):
     async def gen():
         count, t0 = 0, time.perf_counter()
         while True:
             with det_lock:
                 ann = det_state["annotated"] if det_state["enabled"] else None
             src = ann if ann is not None else grabber.snapshot()
+            if bars:
+                src = bars_overlay_frame(src)
             jpg = encode(src)
             yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
                    + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n")

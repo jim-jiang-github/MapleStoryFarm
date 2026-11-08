@@ -253,6 +253,7 @@
         <button id="focusBtn" title="把游戏窗口抬到最前并给焦点（截图前必做）">前置游戏</button>
         <button id="calBtn" title="依次框出 HP / MP / EXP 条的位置（沿条拖一下就行，会自动补齐整条槽）">标定条</button>
         <button id="autoBtn" title="在画面底部自动找三条血/蓝/经验条；自动模式下换客户端、换分辨率会自己重新定位，一般不用点">自动定位</button>
+        <button id="ovBtn" title="在画面上画出三条的框：白框=参与判定的 ROI，洋红框=整条槽（百分比的分母），黄竖线=填充终点">标定框: 关</button>
         <button id="snap">存快照</button>
       </div>
       <div class="filterrow">
@@ -283,6 +284,12 @@
   const $ = (id) => document.getElementById(id);
   const view = $("view");
   let paused = false;
+  let overlayOn = false;          // 是否在画面上画出三条状态条的定位框
+
+  function streamURL() {
+    if (paused) return "";
+    return "/stream?t=" + Date.now() + (overlayOn ? "&bars=1" : "");
+  }
 
   /* 预览尺寸不用手动调：宽度完全跟着页面走（上限 1366，见 CSS --page-max），
      高度由画面真实比例算出来，窗口一变就自动等比缩放。 */
@@ -693,6 +700,15 @@
     } catch (e) { /* 服务未就绪：保持上次读数 */ }
   }
 
+  $("ovBtn").addEventListener("click", (e) => {
+    overlayOn = !overlayOn;
+    const btn = e.currentTarget;
+    btn.textContent = "标定框: " + (overlayOn ? "开" : "关");
+    btn.classList.toggle("on", overlayOn);
+    view.src = streamURL();
+    if (!paused) $("badge").textContent = overlayOn ? "实时 · 含定位框" : "实时";
+  });
+
   $("calBtn").addEventListener("click", () => {
     if (barCal) cancelBarCal();
     else startBarCal();
@@ -960,20 +976,20 @@
   loadMasks();
 
   view.addEventListener("load", () => {
-    $("badge").textContent = "实时";
+    $("badge").textContent = overlayOn ? "实时 · 含定位框" : "实时";
     layoutLayer();          // 首帧到达后才知道真实画面比例，重新贴合遮罩层
   });
 
   $("toggle").addEventListener("click", () => {
     paused = !paused;
     $("toggle").textContent = paused ? "继续" : "暂停";
-    view.src = paused ? "" : "/stream?t=" + Date.now();
+    view.src = streamURL();
     if (paused) { $("badge").textContent = "已暂停"; $("dot").className = "dot"; }
   });
 
   $("snap").addEventListener("click", () => {
     const a = document.createElement("a");
-    a.href = "/api/snapshot?t=" + Date.now();
+    a.href = "/api/snapshot?t=" + Date.now() + (overlayOn ? "&bars=1" : "");
     a.download = "snapshot.jpg";
     a.click();
   });
