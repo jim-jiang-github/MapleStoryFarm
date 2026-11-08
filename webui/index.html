@@ -155,24 +155,24 @@
   /* 识别阈值：滑块占满剩余宽度，右边跟一个当前值 */
   .row.conf { align-items: center; }
   .row.conf .v { display: flex; align-items: center; gap: 7px; flex: 1 1 auto; overflow: visible; }
-  #confRange {
+  .rng {
     -webkit-appearance: none; appearance: none;
     flex: 1 1 auto; width: 100%; min-width: 46px;
     height: 3px; margin: 0; border-radius: 999px;
     background: #e0dedb; outline: none; cursor: pointer;
   }
-  #confRange::-webkit-slider-thumb {
+  .rng::-webkit-slider-thumb {
     -webkit-appearance: none; appearance: none;
     width: 11px; height: 11px; border-radius: 50%;
     background: #dc2626; border: 2px solid #fff;
     box-shadow: 0 0 0 1px rgba(0,0,0,.12);
   }
-  #confRange::-moz-range-thumb {
+  .rng::-moz-range-thumb {
     width: 9px; height: 9px; border-radius: 50%;
     background: #dc2626; border: 2px solid #fff;
     box-shadow: 0 0 0 1px rgba(0,0,0,.12);
   }
-  #confVal { flex: 0 0 auto; color: var(--text); }
+  .row.conf b { flex: 0 0 auto; color: var(--text); font-weight: 600; }
   /* EXP 走势：小折线，纵轴按数据自适应（固定 0~100 会因为涨得慢看成一条直线） */
   .trend { padding-top: 8px; border-top: 1px solid var(--border); }
   .trend .cap {
@@ -308,7 +308,11 @@
             <div class="row"><span class="k">检出目标</span><span class="v" id="targets">—</span></div>
             <div class="row conf">
               <span class="k">识别阈值</span>
-              <span class="v"><input id="confRange" type="range" min="0.05" max="0.95" step="0.05" value="0.6" title="低于这个置信度的框不算识别到（不画框、不计数）。拖动即时生效"><b id="confVal">0.60</b></span>
+              <span class="v"><input id="confRange" class="rng" type="range" min="0.05" max="0.95" step="0.05" value="0.6" title="低于这个置信度的框不算识别到（不画框、不计数）。拖动即时生效"><b id="confVal">0.60</b></span>
+            </div>
+            <div class="row conf">
+              <span class="k">稳定帧数</span>
+              <span class="v"><input id="hitRange" class="rng" type="range" min="1" max="12" step="1" value="4" title="累计命中这么多帧才允许第一次出现。调大更干净，调小更快但容易闪出假框"><b id="hitVal">4</b></span>
             </div>
             <div class="row"><span class="k">瞬现过滤</span><span class="v" id="pending">—</span></div>
             <div class="row"><span class="k">推理模式</span><span class="v small" id="mode">—</span></div>
@@ -1241,26 +1245,37 @@
     }
   });
 
-  /* 识别阈值滑块：拖动时先改数字（立刻有反馈），停手 120ms 再发请求，
-     避免拖动过程中每一像素都打一次后端。改完服务端下一帧就按新门限画框。 */
+  /* 面板上两个实时参数：识别阈值（浮点）和稳定帧数（整数）。共用一套绑定：
+     拖动时先改数字（立刻有反馈），停手 120ms 再发请求，避免每一像素都打一次后端。 */
   const confRange = $("confRange"), confVal = $("confVal");
-  let confLockUntil = 0, confTimer = null;
-  function paintConf(v) { confVal.textContent = Number(v).toFixed(2); }
-  function sendConf() {
-    const v = parseFloat(confRange.value);
-    confLockUntil = Date.now() + 500;      // 这段时间内别让轮询把滑块拽回去
-    fetch("/api/detect/conf?v=" + v, { cache: "no-store" })
-      .then((r) => r.json())
-      .then((r) => { if (typeof r.show_conf === "number") paintConf(r.show_conf); })
-      .catch(() => {});
+  const hitRange = $("hitRange"), hitVal = $("hitVal");
+  let confLockUntil = 0;
+  const paintConf = (v) => { confVal.textContent = Number(v).toFixed(2); };
+  const paintHits = (v) => { hitVal.textContent = String(Math.round(v)); };
+
+  function bindRange(input, paint, url) {
+    let timer = null;
+    const send = () => {
+      confLockUntil = Date.now() + 800;    // 这段时间内别让轮询把滑块拽回去
+      fetch(url + "?v=" + input.value, { cache: "no-store" })
+        .then((r) => r.json())
+        .then((r) => {
+          if (typeof r.show_conf !== "number") return;
+          confRange.value = r.show_conf; paintConf(r.show_conf);
+          hitRange.value = r.show_hits; paintHits(r.show_hits);
+        })
+        .catch(() => {});
+    };
+    input.addEventListener("input", () => {
+      paint(input.value);
+      confLockUntil = Date.now() + 900;
+      clearTimeout(timer);
+      timer = setTimeout(send, 120);
+    });
+    input.addEventListener("change", () => { clearTimeout(timer); send(); });
   }
-  confRange.addEventListener("input", () => {
-    paintConf(confRange.value);
-    confLockUntil = Date.now() + 800;
-    clearTimeout(confTimer);
-    confTimer = setTimeout(sendConf, 120);
-  });
-  confRange.addEventListener("change", () => { clearTimeout(confTimer); sendConf(); });
+  bindRange(confRange, paintConf, "/api/detect/conf");
+  bindRange(hitRange, paintHits, "/api/detect/stability");
 
   async function tick() {
     try {
@@ -1283,11 +1298,15 @@
       $("detect").className = s.detect_enabled ? "on" : "";
       $("dms").textContent = s.detect_ready && s.detect_enabled ? `${s.infer_ms} ms` : "—";
       $("targets").textContent = s.detect_enabled ? s.targets : "—";
-      // 阈值以后端为准（可能被别的标签页 / 重启后的存盘改过），但拖动期间不覆盖
-      if (typeof s.show_conf === "number" && Date.now() > confLockUntil) {
-        if (Math.abs(parseFloat(confRange.value) - s.show_conf) > 0.001) {
+      // 两个滑块以后端为准（可能被别的标签页 / 重启后的存盘改过），但拖动期间不覆盖
+      if (Date.now() > confLockUntil) {
+        if (typeof s.show_conf === "number" && Math.abs(parseFloat(confRange.value) - s.show_conf) > 0.001) {
           confRange.value = s.show_conf;
           paintConf(s.show_conf);
+        }
+        if (typeof s.show_hits === "number" && Number(hitRange.value) !== s.show_hits) {
+          hitRange.value = s.show_hits;
+          paintHits(s.show_hits);
         }
       }
       $("pending").textContent = s.detect_enabled

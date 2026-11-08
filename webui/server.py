@@ -58,9 +58,19 @@ LOW_DETECT_CONF = 0.10
 # 阈值调高只是把 0.2/0.3 这种拿不准的框藏起来，不影响已经确认的目标继续被跟踪。
 # 这个值可以在页面上用滑块实时改（/api/detect/conf），存在同目录的 detconf.json。
 SHOW_CONF_DEFAULT = float(os.environ.get("PREVIEW_SHOW_CONF") or 0.60)
+SHOW_HITS_DEFAULT = int(os.environ.get("PREVIEW_MIN_HITS") or 4)
 SHOW_CONF_FILE = Path(__file__).with_name("detconf.json")
 # 已经锁定的目标允许比阈值低一点点继续保留，避免置信度正好卡在边界时反复掉锁
 LOCK_CONF_GRACE = 0.08
+# ---- 显示稳定（解决「冒出来一两帧又消失」）----
+# 置信度高不等于目标真实：误检偶尔也会连着两帧拿到 0.7。原来「连续 2 帧」就确认，
+# 于是这种误检会被画两帧再消失。现在显示端另加三道闸：
+#   1) show_hits：累计命中这么多帧才允许第一次出现（默认 4 帧 ≈ 0.15~0.2 秒）
+#   2) DISPLAY_MIN_SHOW：一旦出现至少留 0.4 秒，压掉 1~2 帧的闪烁
+#   3) DISPLAY_MAX_MISS：连续 2 帧没观测到就不再画，避免幽灵框停在原地
+# 跟踪器内部不受影响，仍然 max_age 帧内保留轨迹，随时可以接回。
+DISPLAY_MIN_SHOW = 0.45
+DISPLAY_MAX_MISS = 2
 # 两种部署配置，实测差异（30 帧真实画面，含 UI 排除+去重，对比 best.pt@960）：
 #   速度: INT8 384x672  ~44ms/22FPS  recall 83.6%  多检 0.8/帧
 #   精度: INT8 544x960  ~96ms/10FPS  recall 89.6%  多检 0.3/帧
@@ -937,6 +947,8 @@ det_state = {
     "mask": True,        # UI 排除区开关：涂掉固定 UI 区域再推理
     "mode": "fast",      # fast(20+FPS) / accurate(精度优先)
     "show_conf": SHOW_CONF_DEFAULT,   # 显示门限：低于它的目标不画框/不计数
+    "show_hits": SHOW_HITS_DEFAULT,   # 稳定帧数：累计命中这么多帧才允许第一次出现
+    "shown": {},         # tid -> {"first": 首次出现时间, "last": 最近显示时间}，用于最短显示时长
     "error": "",
 }
 det_lock = threading.Lock()
@@ -951,22 +963,34 @@ def _clamp_conf(v) -> float:
     return round(min(0.95, max(0.05, v)), 2)
 
 
-def _load_show_conf() -> float:
-    """读取上次调的显示门限；文件坏了/没写过就用默认值。"""
+def _clamp_hits(v) -> int:
     try:
-        return _clamp_conf(json.loads(SHOW_CONF_FILE.read_text("utf-8"))["show_conf"])
+        v = int(round(float(v)))
+    except (TypeError, ValueError):
+        return SHOW_HITS_DEFAULT
+    return min(12, max(1, v))
+
+
+def _load_det_conf() -> dict:
+    """读取上次调的显示参数；文件坏了/没写过就用默认值。"""
+    try:
+        raw = json.loads(SHOW_CONF_FILE.read_text("utf-8"))
     except Exception:
-        return _clamp_conf(SHOW_CONF_DEFAULT)
+        raw = {}
+    return {"show_conf": _clamp_conf(raw.get("show_conf", SHOW_CONF_DEFAULT)),
+            "show_hits": _clamp_hits(raw.get("show_hits", SHOW_HITS_DEFAULT))}
 
 
-def _save_show_conf(v: float) -> None:
+def _save_det_conf() -> None:
     try:
-        SHOW_CONF_FILE.write_text(json.dumps({"show_conf": v}), encoding="utf-8")
+        SHOW_CONF_FILE.write_text(json.dumps(
+            {"show_conf": det_state["show_conf"], "show_hits": det_state["show_hits"]}
+        ), encoding="utf-8")
     except Exception:
         pass          # 落盘失败不影响当前会话，只是重启后回到旧值
 
 
-det_state["show_conf"] = _load_show_conf()
+det_state.update(_load_det_conf())
 # Tracker（见 webui/track.py）实例化延后到导入之后
 
 BOX_COLOR = (96, 220, 64)      # BGR 亮绿
@@ -1104,6 +1128,40 @@ def pick_lock(tracks, prev_tid, prev_box=None):
 tracker = Tracker()
 
 
+def pick_visible(tracks, shown, now, show_conf, show_hits, prev_tid=None):
+    """这一帧该画出来的轨迹，同时就地维护 shown（tid -> {"ok": 最后一次达标, "last": 最后画出}）。
+
+    三条件缺一不可（见 SHOW_HITS_DEFAULT 附近的说明）：
+      1) 首次出现要攒够 show_hits 帧命中 —— 连续两帧的误检攒不够；
+      2) 出现之后 0.45 秒内即使置信度掉到门限下也继续画 —— 压掉「闪一下」；
+      3) 连续 DISPLAY_MAX_MISS 帧没观测到就不再画 —— 不留停在原地的幽灵框。
+    锁定目标额外给 LOCK_CONF_GRACE 的宽限，避免门限边缘反复掉锁。
+    """
+    vis = []
+    for tr in tracks:
+        tid, conf = tr["tid"], tr["conf"]
+        rec = shown.get(tid)
+        weak = conf < show_conf
+        gone = tr["misses"] > DISPLAY_MAX_MISS
+        recent = rec is not None and (now - rec["ok"]) < DISPLAY_MIN_SHOW
+        locked_ok = tid == prev_tid and conf >= show_conf - LOCK_CONF_GRACE
+        if rec is None:
+            ok = (not weak) and (not gone) and tr["hits"] >= show_hits
+        else:
+            ok = (not gone) and ((not weak) or recent or locked_ok)
+        if not ok:
+            shown.pop(tid, None)      # 撤掉记录：下次冒出来要重新攒够帧数
+            continue
+        if weak or gone:
+            rec["last"] = now         # 只刷新「还在画」，不动「最后一次达标」
+        else:
+            shown[tid] = {"ok": now, "last": now}
+        vis.append(tr)
+    for tid in [k for k, v in shown.items() if now - v["last"] > 2.0]:
+        shown.pop(tid, None)          # 轨迹已删除，记录别留着
+    return vis
+
+
 def detect_loop():
     import warnings
     warnings.filterwarnings("ignore")
@@ -1184,24 +1242,18 @@ def detect_loop():
         prev_small = cv2.cvtColor(cv2.resize(frame, (SMALL_W, SMALL_H),
                                              interpolation=cv2.INTER_AREA),
                                   cv2.COLOR_BGR2GRAY).astype(np.float32)
+        now = time.time()
         with det_lock:
             prev = det_state["lock"]["tid"] if det_state["lock"] else None
             prev_box = det_state["lock_box"]
-            stale = time.time() - det_state["lock_ts"] > 3.0
+            stale = now - det_state["lock_ts"] > 3.0
             show_conf = det_state["show_conf"]
+            show_hits = det_state["show_hits"]
+            shown = {k: dict(v) for k, v in det_state["shown"].items()}
         if stale:                      # 锁定已经断了 3 秒，别再拿旧位置去找
             prev_box = None
 
-        # 只保留置信度达标的目标：画框、计数、锁定都基于 vis。
-        # 跟踪器内部照样吃低分框（见 LOW_DETECT_CONF），所以某只怪偶尔掉到
-        # 0.5 只是这一两帧不显示，轨迹没断，分数回来就还是同一个 tid。
-        vis = [tr for tr in tracks if tr["conf"] >= show_conf]
-        if prev is not None:
-            for tr in tracks:          # 已锁定的目标带一点滞回，防在阈值附近反复掉锁
-                if tr["tid"] == prev and tr["conf"] >= show_conf - LOCK_CONF_GRACE:
-                    if not any(v["tid"] == prev for v in vis):
-                        vis.append(tr)
-                    break
+        vis = pick_visible(tracks, shown, now, show_conf, show_hits, prev)
         locked_tid = pick_lock(vis, prev, prev_box)
 
         counts = {}
@@ -1220,6 +1272,7 @@ def detect_loop():
             det_state["annotated"] = annotated
             det_state["infer_ms"] = (time.perf_counter() - tick) * 1000
             det_state["counts"] = counts
+            det_state["shown"] = shown
             det_state["lock"] = lock_info
             if lock_box is not None:   # 锁上了才更新；丢了保留最后位置，便于下次接回同一只
                 det_state["lock_box"] = lock_box
@@ -1343,6 +1396,7 @@ async def stats():
         "det_fps": round(det_state["det_fps"], 1),
         "targets": sum(counts.values()),
         "show_conf": det_state["show_conf"],
+        "show_hits": det_state["show_hits"],
         "pending": tracker.pending,
         "top_classes": [f"{k}×{v}" for k, v in top],
         "detect_error": det_state["error"],
@@ -1458,8 +1512,24 @@ async def detect_conf(v: float = -1):
         val = _clamp_conf(v)
         with det_lock:
             det_state["show_conf"] = val
-        _save_show_conf(val)
-    return JSONResponse({"show_conf": det_state["show_conf"]})
+        _save_det_conf()
+    return JSONResponse({"show_conf": det_state["show_conf"], "show_hits": det_state["show_hits"]})
+
+
+@app.get("/api/detect/stability")
+async def detect_stability(v: int = -1):
+    """稳定帧数（1~12）：累计命中这么多帧才允许第一次出现在画面上。
+
+    调大 → 误检更少，但真目标出现得稍晚；调小 → 更快，但更容易闪过一两个假框。
+    不传 v 只读当前值。
+    """
+    if v >= 0:
+        val = _clamp_hits(v)
+        with det_lock:
+            det_state["show_hits"] = val
+            det_state["shown"] = {}       # 规则变了，重新攒
+        _save_det_conf()
+    return JSONResponse({"show_conf": det_state["show_conf"], "show_hits": det_state["show_hits"]})
 
 
 @app.get("/api/detect/mask")
@@ -1582,6 +1652,7 @@ async def detect_toggle():
             det_state["lock"] = None
             det_state["lock_box"] = None
             det_state["lock_ts"] = 0.0
+            det_state["shown"] = {}
         tracker.reset()
     return JSONResponse({"enabled": det_state["enabled"], "loading": det_state["loading"]})
 
