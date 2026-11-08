@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<base href="http://127.0.0.1:8765/" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231c1917'/%3E%3Ccircle cx='8' cy='8' r='3.2' fill='%2322c55e'/%3E%3C/svg%3E" />
+<title>Capture 预览</title>
+<style>
+  :root {
+    --bg: #f7f7f6;
+    --surface: #ffffff;
+    --border: #e7e5e4;
+    --text: #1c1917;
+    --muted: #78716c;
+    --hint: #a8a29e;
+    --ok: #16a34a;
+    --bad: #dc2626;
+    /* 预览最大 1366（= 游戏客户区宽度）；外面留出卡片的 padding/border */
+    --page-max: 1400px;
+    --card-pad: 16px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 20px;
+    background: var(--bg);
+    color: var(--text);
+    overflow-x: hidden;      /* 画面宽度是算出来的，绝不出现横向滚动条 */
+    font: 14px/1.6 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { width: 100%; max-width: var(--page-max); margin: 0 auto; }
+  header { margin-bottom: 14px; }
+  h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .01em; }
+  .sub { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+  .card {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 14px;
+    padding: var(--card-pad);
+    width: 100%;
+    max-width: 100%;
+    margin: 0 auto;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+  .tile {
+    width: 100%;
+    aspect-ratio: 16 / 9;      /* 首帧到达后由 JS 改成真实画面比例 */
+    border-radius: 8px;
+    overflow: hidden;
+    background: #0c0a09;
+    position: relative;
+  }
+  .tile img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .masklay {
+    position: absolute; left: 0; top: 0;
+    cursor: crosshair;
+    touch-action: none;
+  }
+  /* 四周留出 PAD 的余量给遮罩层（贴边选区的把手在画面边界上，需要多一圈命中区）。
+     负 margin 把这圈余量抵掉，画面宽度仍然等于卡片内容宽度。 */
+  .tileWrap {
+    position: relative;
+    align-self: stretch;
+    margin: 0 -10px;
+    padding: 10px;
+  }
+  .tileWrap.editing .tile { outline: 1px solid #2563eb; outline-offset: 2px; }
+  .tileWrap.editing .tile::after {
+    content: "编辑模式 · 双击空白或 Esc 退出";
+    position: absolute; left: 50%; top: 8px; transform: translateX(-50%);
+    padding: 2px 9px; border-radius: 999px;
+    font-size: 11px; color: #fff; white-space: nowrap;
+    background: rgba(37,99,235,.92);
+  }
+  .badge {
+    position: absolute; left: 8px; top: 8px;
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 7px; border-radius: 999px;
+    background: rgba(12,10,9,.62);
+    font-size: 11px; color: #f5f5f4;
+    backdrop-filter: blur(2px);
+  }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--hint); }
+  .dot.on { background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,.22); }
+  .dot.off { background: #ef4444; }
+  .panel { display: flex; flex-direction: column; gap: 12px; }
+  .rows {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 4px 22px;
+  }
+  .row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .k { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .v {
+    font-size: 13px; font-variant-numeric: tabular-nums;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  .v.warn { color: var(--bad); }
+  .v.small { font-size: 11px; }
+  button:disabled { opacity: .55; cursor: default; }
+  button.on { background: #eaf3de; border-color: #b5cf8f; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  button {
+    flex: 1;
+    padding: 7px 10px;
+    font: inherit; font-size: 12.5px;
+    color: var(--text);
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    cursor: pointer;
+    transition: background .12s, border-color .12s;
+  }
+  button:hover { background: #f5f5f4; border-color: #d6d3d1; }
+  button:active { background: #ececea; }
+  .note { margin: 12px 2px 0; font-size: 11.5px; color: var(--hint); }
+  /* ---- 遮罩编辑：右键菜单 / 删除确认 / toast ---- */
+  .ctx {
+    position: fixed; z-index: 60; min-width: 158px;
+    padding: 5px; display: none; flex-direction: column; gap: 1px;
+    background: #fff; border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.14);
+  }
+  .ctx.open { display: flex; }
+  .ctx button {
+    flex: none; text-align: left; padding: 7px 10px;
+    border: 0; border-radius: 6px; background: transparent;
+    font: inherit; font-size: 12.5px; color: var(--text);
+  }
+  .ctx button:hover { background: #f5f5f4; }
+  .ctx button.danger { color: var(--bad); }
+  .ctx button.danger:hover { background: #fef2f2; }
+  .ctx hr { border: 0; border-top: 1px solid var(--border); margin: 4px 2px; }
+  .cbox {
+    position: fixed; inset: 0; z-index: 70;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(28,25,23,.35);
+  }
+  .cbox.open { display: flex; }
+  .cbox-card {
+    width: 300px; padding: 18px; border-radius: 12px;
+    background: #fff; box-shadow: 0 18px 44px rgba(0,0,0,.2);
+  }
+  .cbox-t { font-size: 14px; font-weight: 600; }
+  .cbox-d { margin-top: 6px; font-size: 12px; color: var(--muted); line-height: 1.55; }
+  .cbox-btns { margin-top: 15px; display: flex; gap: 8px; justify-content: flex-end; }
+  .cbox-btns button { flex: none; padding: 7px 15px; }
+  .cbox-btns .danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+  .cbox-btns .danger:hover { background: #b91c1c; border-color: #b91c1c; }
+  .toast {
+    position: fixed; left: 50%; bottom: 36px; z-index: 80;
+    transform: translateX(-50%) translateY(10px);
+    padding: 8px 15px; border-radius: 999px;
+    background: rgba(28,25,23,.9); color: #fafaf9;
+    font-size: 12.5px; opacity: 0; pointer-events: none;
+    transition: opacity .18s, transform .18s;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .filterrow { margin-top: 10px; }
+  .filterrow input {
+    width: 100%;
+    padding: 6px 9px;
+    font: inherit; font-size: 12px;
+    color: var(--text);
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    outline: none;
+  }
+  .filterrow input:focus { border-color: #a8a29e; }
+  /* 宽屏时按钮/输入框别拉成一整条，贴着左边排成一行更清爽 */
+  @media (min-width: 720px) {
+    .actions button { flex: 0 0 auto; min-width: 104px; padding: 7px 16px; }
+    .filterrow { max-width: 420px; }
+  }
+  @media (max-width: 560px) {
+    body { padding: 16px 10px; }
+    .wrap { --card-pad: 12px; }
+    .rows { grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 2px 14px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Capture 预览</h1>
+    <p class="sub" id="sub">正在连接采集服务…</p>
+  </header>
+
+  <div class="card">
+    <div class="tileWrap" id="tileWrap">
+      <div class="tile" id="tile">
+        <img id="view" alt="游戏画面预览" src="/stream" />
+        <div class="badge"><span class="dot" id="dot"></span><span id="badge">等待画面</span></div>
+      </div>
+      <!-- 遮罩层放在 tile 外面：tile 有 overflow:hidden 会把贴边的把手裁掉 -->
+      <canvas id="maskLayer" class="masklay"></canvas>
+    </div>
+
+    <div class="panel">
+      <div class="rows">
+        <div class="row"><span class="k">客户区</span><span class="v" id="size">—</span></div>
+        <div class="row"><span class="k">采集帧率</span><span class="v" id="cfps">—</span></div>
+        <div class="row"><span class="k">推送帧率</span><span class="v" id="sfps">—</span></div>
+        <div class="row"><span class="k">帧延迟</span><span class="v" id="age">—</span></div>
+        <div class="row"><span class="k">检测耗时</span><span class="v" id="dms">—</span></div>
+        <div class="row"><span class="k">检出目标</span><span class="v" id="targets">—</span></div>
+        <div class="row"><span class="k">瞬现过滤</span><span class="v" id="pending">—</span></div>
+        <div class="row"><span class="k">类别</span><span class="v small" id="classes">—</span></div>
+        <div class="row"><span class="k">锁定目标</span><span class="v small" id="lock">—</span></div>
+        <div class="row"><span class="k">推理模式</span><span class="v small" id="mode">—</span></div>
+      </div>
+      <div class="actions">
+        <button id="toggle">暂停</button>
+        <button id="detect">识别: 关</button>
+        <button id="modeBtn">模式: 速度</button>
+        <button id="snap">存快照</button>
+      </div>
+      <div class="filterrow">
+        <input id="filter" placeholder="只识别某类，如 Stump（留空 = 全部）" spellcheck="false" />
+      </div>
+    </div>
+  </div>
+
+  <p class="note">双击选区进入编辑（拖动移动 · 拉角缩放 · 右上角 ✕ 删除）· 右键画面可添加选区 / 开关排除 · 改动即时保存到 webui/masks.json</p>
+</div>
+
+<div class="ctx" id="ctxMenu"></div>
+
+<div class="cbox" id="confirmBox">
+  <div class="cbox-card">
+    <div class="cbox-t">删除这个排除区域？</div>
+    <div class="cbox-d" id="cDesc"></div>
+    <div class="cbox-btns">
+      <button id="cCancel">取消</button>
+      <button id="cOk" class="danger">删除</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const view = $("view");
+  let paused = false;
+
+  /* 预览尺寸不用手动调：宽度完全跟着页面走（上限 1366，见 CSS --page-max），
+     高度由画面真实比例算出来，窗口一变就自动等比缩放。 */
+
+  /* ========== 排除区域：半透明遮罩 · 双击编辑 · 右键菜单 · 角上删除 ========== */
+  const tile = $("tile");
+  const tileWrap = $("tileWrap");
+  const maskLayer = $("maskLayer");
+  const mctx = maskLayer.getContext("2d");
+  const ctxMenu = $("ctxMenu");
+
+  const RED_FILL = "rgba(239,68,68,.20)", RED_LINE = "rgba(239,68,68,.95)";
+  const BLUE_FILL = "rgba(37,99,235,.20)", BLUE_LINE = "#2563eb";
+  const MIN_N = 0.012;            // 新框最小边长（归一化），小于此值视为误点
+  const DEL_SIZE = 20;            // 选区右上角删除按钮边长（px）
+
+  let masks = [];                 // [{id,x1,y1,x2,y2}] 归一化
+  let maskOn = true;              // 与后端 det_state["mask"] 同步
+  let editMode = false;           // 编辑模式：可拖动 / 缩放 / 删除选区
+  let selId = null;               // 当前选中的区域
+  let drag = null;                // {mode:"new"|"move"|"resize", ...}
+  let addArmed = false;           // 右键"添加"后置位：下一次拖拽强制画新框
+  let ctxHitId = null;            // 右键菜单针对的区域
+  let confirmId = null;           // 等待确认删除的区域
+  let lastNW = 0, lastNH = 0;     // 缓存画面原始尺寸（暂停时 naturalWidth 会变 0）
+  const L = { w: 0, h: 0, ox: 0, oy: 0 }; // 内容区尺寸 + 内容区在 canvas 内的偏移
+  // 遮罩 canvas 盖住 tile 并四周外扩 PAD(px)：贴边选区(x2=1.0 等)的把手
+  // 在画面边界上，不外扩的话边界像素的事件落不到 canvas，导致边缘把手抓不到、拖了也不保存。
+  // canvas 放在 tileWrap 里（tile 有 overflow:hidden 会裁掉外扩部分）
+  const PAD = 10;
+  const X = (n) => L.ox + n * L.w;   // 归一化 x -> canvas 像素
+  const Y = (n) => L.oy + n * L.h;   // 归一化 y -> canvas 像素
+
+  const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+  const pct = (v) => Math.round(v * 100) + "%";
+
+  function normRect(x1, y1, x2, y2) {
+    return { x1: clamp01(Math.min(x1, x2)), y1: clamp01(Math.min(y1, y2)),
+             x2: clamp01(Math.max(x1, x2)), y2: clamp01(Math.max(y1, y2)) };
+  }
+
+  // 把遮罩层对齐到 object-fit:contain 之后的真实画面区域（去掉黑边）
+  function layoutLayer() {
+    if (view.naturalWidth && view.naturalHeight) {
+      lastNW = view.naturalWidth; lastNH = view.naturalHeight;
+      // 画面比例变了（游戏改分辨率 / 窗口被拉伸）→ 容器比例跟着换，不留黑边
+      const ar = lastNW + " / " + lastNH;
+      if (tile.style.aspectRatio !== ar) tile.style.aspectRatio = ar;
+    }
+    const nw = lastNW || 16, nh = lastNH || 9;
+    const bw = tile.clientWidth, bh = tile.clientHeight;
+    if (!bw || !bh) return;
+    const scale = Math.min(bw / nw, bh / nh);
+    const w = Math.max(1, Math.round(nw * scale));
+    const h = Math.max(1, Math.round(nh * scale));
+    L.w = w; L.h = h;
+    L.ox = PAD + Math.round((bw - w) / 2);
+    L.oy = PAD + Math.round((bh - h) / 2);
+    // canvas 比 tile 四周各大一圈 PAD，tileWrap 有空余不裁剪，贴边把手也能收到事件
+    const cw = bw + 2 * PAD, ch = bh + 2 * PAD;
+    maskLayer.style.width = cw + "px";
+    maskLayer.style.height = ch + "px";
+    // 用实测矩形定位（tileWrap 有 padding + 负 margin，offsetLeft 不再可靠）
+    const tr = tile.getBoundingClientRect(), wr = tileWrap.getBoundingClientRect();
+    maskLayer.style.left = (tr.left - wr.left - PAD) + "px";
+    maskLayer.style.top = (tr.top - wr.top - PAD) + "px";
+    const dpr = window.devicePixelRatio || 1;
+    const pxw = Math.round(cw * dpr), pxh = Math.round(ch * dpr);
+    if (maskLayer.width !== pxw || maskLayer.height !== pxh) {
+      maskLayer.width = pxw; maskLayer.height = pxh;
+    }
+    mctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawMasks();
+  }
+
+  function drawMasks() {
+    if (!L.w || !L.h) return;
+    mctx.clearRect(0, 0, maskLayer.clientWidth, maskLayer.clientHeight);
+    if (!maskOn) return;
+
+    masks.forEach((m, i) => {
+      const x = X(m.x1), y = Y(m.y1);
+      const w = (m.x2 - m.x1) * L.w, h = (m.y2 - m.y1) * L.h;
+      const sel = m.id === selId;
+      mctx.fillStyle = sel ? BLUE_FILL : RED_FILL;
+      mctx.fillRect(x, y, w, h);
+      mctx.lineWidth = sel ? 2 : 1.25;
+      mctx.setLineDash(sel ? [] : [6, 4]);
+      mctx.strokeStyle = sel ? BLUE_LINE : RED_LINE;
+      mctx.strokeRect(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
+      mctx.setLineDash([]);
+      // 编号标识
+      if (w > 18 && h > 16) {
+        mctx.font = "600 11px ui-monospace, Menlo, Consolas, monospace";
+        mctx.fillStyle = sel ? "#1d4ed8" : "#991b1b";
+        mctx.fillText(String(i + 1), x + 5, y + 14);
+      }
+      if (sel && editMode) {
+        // 3x3 九点控制柄：够大时画全部，太挤就只画四角
+        const pts = handlePts(m).map(([hx, hy]) => [X(hx), Y(hy)]);
+        const showAll = w >= 30 && h >= 30;
+        pts.forEach(([hx, hy], i) => {
+          if (!showAll && i !== 0 && i !== 2 && i !== 6 && i !== 8) return;
+          mctx.beginPath();
+          if (i === 4) mctx.arc(hx, hy, 3.5, 0, Math.PI * 2);   // 中心点用圆点
+          else mctx.rect(hx - 3.5, hy - 3.5, 7, 7);
+          mctx.fillStyle = i === 4 ? BLUE_LINE : "#fff";
+          mctx.fill();
+          mctx.strokeStyle = BLUE_LINE;
+          mctx.lineWidth = 1.25;
+          mctx.stroke();
+        });
+        // 右上角删除按钮
+        const b = delBtnRect(m);
+        mctx.fillStyle = "rgba(220,38,38,.95)";
+        mctx.beginPath();
+        if (mctx.roundRect) mctx.roundRect(b.x, b.y, b.w, b.h, 5);
+        else mctx.rect(b.x, b.y, b.w, b.h);
+        mctx.fill();
+        mctx.strokeStyle = "#fff";
+        mctx.lineWidth = 1.6;
+        mctx.beginPath();
+        mctx.moveTo(b.x + 6.5, b.y + 6.5);
+        mctx.lineTo(b.x + b.w - 6.5, b.y + b.h - 6.5);
+        mctx.moveTo(b.x + b.w - 6.5, b.y + 6.5);
+        mctx.lineTo(b.x + 6.5, b.y + b.h - 6.5);
+        mctx.stroke();
+      }
+    });
+
+    if (drag && drag.mode === "new") {
+      const r = normRect(drag.start.x, drag.start.y, drag.cur.x, drag.cur.y);
+      mctx.fillStyle = "rgba(37,99,235,.16)";
+      mctx.fillRect(X(r.x1), Y(r.y1), (r.x2 - r.x1) * L.w, (r.y2 - r.y1) * L.h);
+      mctx.setLineDash([5, 4]);
+      mctx.strokeStyle = BLUE_LINE;
+      mctx.lineWidth = 1.5;
+      mctx.strokeRect(X(r.x1), Y(r.y1), (r.x2 - r.x1) * L.w, (r.y2 - r.y1) * L.h);
+      mctx.setLineDash([]);
+    }
+  }
+
+  function toNorm(e) {
+    const r = maskLayer.getBoundingClientRect();
+    if (!L.w || !L.h) return { x: 0, y: 0 };
+    // canvas 四周多出 PAD（外加 tile 内可能的黑边），坐标换算要扣掉
+    return { x: clamp01((e.clientX - r.left - L.ox) / L.w),
+             y: clamp01((e.clientY - r.top - L.oy) / L.h) };
+  }
+
+  const inside = (m, p) => p.x >= m.x1 && p.x <= m.x2 && p.y >= m.y1 && p.y <= m.y2;
+
+  // 九点控制柄：0左上 1上中 2右上 3左中 4中心 5右中 6左下 7下中 8右下
+  const HANDLE_CURSORS = ["nwse-resize", "ns-resize", "nesw-resize",
+                          "ew-resize", "move", "ew-resize",
+                          "nesw-resize", "ns-resize", "nwse-resize"];
+
+  function handlePts(m) {
+    const xm = (m.x1 + m.x2) / 2, ym = (m.y1 + m.y2) / 2;
+    return [[m.x1, m.y1], [xm, m.y1], [m.x2, m.y1],
+            [m.x1, ym], [xm, ym], [m.x2, ym],
+            [m.x1, m.y2], [xm, m.y2], [m.x2, m.y2]];
+  }
+
+  function hitHandle(m, p) {
+    // 角/边容差 9px；中心点小一些(6px)，避免和"拖动整框"打架
+    const txA = Math.max(0.008, 9 / (L.w || 1));
+    const tyA = Math.max(0.008, 9 / (L.h || 1));
+    const txC = Math.max(0.008, 6 / (L.w || 1));
+    const tyC = Math.max(0.008, 6 / (L.h || 1));
+    const pts = handlePts(m);
+    for (let i = 0; i < 9; i++) {
+      if (i === 4) continue;                        // 中心点最后判
+      if (Math.abs(p.x - pts[i][0]) <= txA && Math.abs(p.y - pts[i][1]) <= tyA) return i;
+    }
+    if (Math.abs(p.x - pts[4][0]) <= txC && Math.abs(p.y - pts[4][1]) <= tyC) return 4;
+    return -1;
+  }
+
+  function resizeRect(o, handle, p) {
+    let { x1, y1, x2, y2 } = o;
+    if (handle === 0) { x1 = p.x; y1 = p.y; }
+    else if (handle === 1) { y1 = p.y; }
+    else if (handle === 2) { x2 = p.x; y1 = p.y; }
+    else if (handle === 3) { x1 = p.x; }
+    else if (handle === 5) { x2 = p.x; }
+    else if (handle === 6) { x1 = p.x; y2 = p.y; }
+    else if (handle === 7) { y2 = p.y; }
+    else if (handle === 8) { x2 = p.x; y2 = p.y; }
+    return normRect(x1, y1, x2, y2);
+  }
+
+  function delBtnRect(m) {
+    return { x: X(m.x2) - DEL_SIZE - 4, y: Y(m.y1) + 4, w: DEL_SIZE, h: DEL_SIZE };
+  }
+
+  function hitDelBtn(m, p) {
+    if (!editMode) return false;
+    const px = X(p.x), py = Y(p.y), b = delBtnRect(m);
+    return px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h;
+  }
+
+  /* ---------- 与后端交互 ---------- */
+  async function postJSON(url, body) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+      cache: "no-store"
+    });
+    const data = await res.json().catch(() => ({}));
+    if (Array.isArray(data.masks)) masks = data.masks;
+    if (!res.ok || data.error) throw new Error(data.error || ("HTTP " + res.status));
+    return data;
+  }
+
+  let toastTimer = null;
+  function toast(txt, bad) {
+    const el = $("toast");
+    el.textContent = txt;
+    el.style.background = bad ? "rgba(185,28,28,.92)" : "rgba(28,25,23,.9)";
+    el.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("show"), 1800);
+  }
+
+  function updateMaskUI() {
+    tileWrap.classList.toggle("editing", maskOn && editMode);
+    drawMasks();
+  }
+
+  async function setMaskOn(on) {
+    try {
+      const r = await (await fetch("/api/detect/mask?on=" + (on ? 1 : 0),
+                                   { cache: "no-store" })).json();
+      maskOn = !!r.mask;
+    } catch (e) { /* 网络异常就保持原状 */ }
+    updateMaskUI();
+  }
+
+  function enterEdit(id) {
+    addArmed = false;
+    editMode = true;
+    selId = id;
+    updateMaskUI();
+  }
+
+  function exitEdit() {
+    editMode = false;
+    selId = null;
+    drag = null;
+    addArmed = false;
+    updateMaskUI();
+  }
+
+  async function deleteMask(id) {
+    try {
+      await postJSON("/api/masks/delete", { id });
+      if (selId === id) selId = null;
+      toast("已删除并保存");
+    } catch (err) {
+      toast(err.message || "删除失败", true);
+    }
+    drawMasks();
+  }
+
+  async function commitAdd(r) {
+    try {
+      const data = await postJSON("/api/masks/add", r);
+      selId = data.id || null;
+      editMode = true;                    // 画完直接进入编辑态，方便微调
+      toast("已添加并保存");
+    } catch (err) {
+      toast(err.message || "保存失败", true);
+    }
+    updateMaskUI();
+  }
+
+  async function commitUpdate(m) {
+    try {
+      await postJSON("/api/masks/update",
+                     { id: m.id, x1: m.x1, y1: m.y1, x2: m.x2, y2: m.y2 });
+      toast("已保存");
+    } catch (err) {
+      toast(err.message || "保存失败", true);
+    }
+    drawMasks();
+  }
+
+  /* ---------- 删除二次确认弹窗 ---------- */
+  function askDelete(id) {
+    const m = masks.find((x) => x.id === id);
+    if (!m) return;
+    $("cDesc").textContent =
+      `区域 ${pct(m.x1)}, ${pct(m.y1)} → ${pct(m.x2)}, ${pct(m.y2)}，删除后立即生效并写入 masks.json。`;
+    confirmId = id;
+    $("confirmBox").classList.add("open");
+  }
+
+  function closeConfirm() {
+    confirmId = null;
+    $("confirmBox").classList.remove("open");
+  }
+
+  $("cCancel").addEventListener("click", closeConfirm);
+  $("confirmBox").addEventListener("click", (e) => {
+    if (e.target === $("confirmBox")) closeConfirm();
+  });
+  $("cOk").addEventListener("click", async () => {
+    const id = confirmId;
+    closeConfirm();
+    if (id) await deleteMask(id);
+  });
+
+  /* ---------- 右键菜单 ---------- */
+  function closeCtx() {
+    ctxMenu.classList.remove("open");
+    ctxHitId = null;
+  }
+
+  function openCtx(x, y, hitId) {
+    ctxHitId = hitId;
+    const items = [
+      { act: "add", label: "添加排除区域" },
+      ...(hitId ? [
+        { act: "edit", label: "编辑此选区" },
+        { act: "del", label: "删除此选区", danger: true },
+      ] : []),
+      { sep: true },
+      { act: "toggle", label: `排除检测：${maskOn ? "开" : "关"}` },
+      { act: "reset", label: "恢复默认区域" },
+    ];
+    ctxMenu.innerHTML = items.map((it) => it.sep ? "<hr/>"
+      : `<button data-act="${it.act}"${it.danger ? ' class="danger"' : ""}>${it.label}</button>`).join("");
+    ctxMenu.classList.add("open");
+    const r = ctxMenu.getBoundingClientRect();
+    ctxMenu.style.left = Math.max(6, Math.min(x, innerWidth - r.width - 8)) + "px";
+    ctxMenu.style.top = Math.max(6, Math.min(y, innerHeight - r.height - 8)) + "px";
+  }
+
+  ctxMenu.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-act]");
+    if (!btn) return;
+    const act = btn.dataset.act, hitId = ctxHitId;
+    closeCtx();
+    if (act === "add") {
+      addArmed = true;
+      if (!maskOn) await setMaskOn(true);
+      if (!editMode) { editMode = true; updateMaskUI(); }
+      toast("在画面上按住拖拽，画出一块新区域");
+    } else if (act === "edit" && hitId) {
+      enterEdit(hitId);
+    } else if (act === "del" && hitId) {
+      askDelete(hitId);
+    } else if (act === "toggle") {
+      await setMaskOn(!maskOn);
+      toast(maskOn ? "排除检测已开启" : "排除检测已关闭（全画面识别）");
+    } else if (act === "reset") {
+      try {
+        await postJSON("/api/masks/reset");
+        selId = null;
+        editMode = false;
+        toast("已恢复默认区域");
+      } catch (err) {
+        toast(err.message || "恢复失败", true);
+      }
+      updateMaskUI();
+    }
+  });
+
+  document.addEventListener("pointerdown", (e) => {
+    if (ctxMenu.classList.contains("open") && !ctxMenu.contains(e.target)) closeCtx();
+  }, true);
+  window.addEventListener("blur", closeCtx);
+
+  /* ---------- 画布交互 ---------- */
+  maskLayer.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    if (!maskOn) return;
+    const p = toNorm(e);
+    const hit = masks.slice().reverse().find((m) => inside(m, p));
+    openCtx(e.clientX, e.clientY, hit ? hit.id : null);
+  });
+
+  maskLayer.addEventListener("dblclick", (e) => {
+    if (!maskOn) return;
+    const p = toNorm(e);
+    const hit = masks.slice().reverse().find((m) => inside(m, p));
+    if (hit) enterEdit(hit.id);          // 双击选区 -> 进入编辑模式
+    else if (editMode) exitEdit();       // 双击空白 -> 退出编辑模式
+  });
+
+  maskLayer.addEventListener("pointerdown", (e) => {
+    if (!maskOn || e.button !== 0) return;
+    e.preventDefault();
+    maskLayer.setPointerCapture(e.pointerId);
+    const p = toNorm(e);
+    if (!editMode) return;               // 默认不可编辑：只能双击选区 / 右键菜单进入
+
+    if (addArmed) {                      // 右键"添加"后的一次性画新框
+      addArmed = false;
+      selId = null;
+      drag = { mode: "new", start: p, cur: p };
+      drawMasks();
+      return;
+    }
+
+    const sel = masks.find((m) => m.id === selId);
+    if (sel && hitDelBtn(sel, p)) { askDelete(sel.id); return; }
+    if (sel) {
+      const h = hitHandle(sel, p);
+      if (h >= 0 && h !== 4) {
+        drag = { mode: "resize", id: sel.id, handle: h, orig: { ...sel }, start: p };
+        return;
+      }
+      if (h === 4 || inside(sel, p)) {   // 中心点 / 框内 = 拖动整框
+        drag = { mode: "move", id: sel.id, orig: { ...sel }, start: p };
+        drawMasks();
+        return;
+      }
+    }
+    // 点到别的选区：切换编辑目标；点空白：什么都不做（不画新框）
+    const hit = masks.slice().reverse().find((m) => inside(m, p));
+    if (hit) {
+      selId = hit.id;
+      drag = { mode: "move", id: hit.id, orig: { ...hit }, start: p };
+      drawMasks();
+    }
+  });
+
+  maskLayer.addEventListener("pointermove", (e) => {
+    if (!maskOn) return;
+    const p = toNorm(e);
+    if (!drag) {
+      const sel = masks.find((m) => m.id === selId);
+      let cur = "crosshair";
+      if (editMode && sel && hitDelBtn(sel, p)) cur = "pointer";
+      else if (editMode && sel) {
+        const h = hitHandle(sel, p);
+        cur = h >= 0 ? HANDLE_CURSORS[h]
+          : inside(sel, p) ? "move" : "crosshair";
+      }
+      if (cur === "crosshair" && masks.some((m) => inside(m, p))) {
+        cur = editMode ? "move" : "pointer";
+      }
+      maskLayer.style.cursor = cur;
+      return;
+    }
+    if (drag.mode === "new") { drag.cur = p; drawMasks(); return; }
+    const m = masks.find((x) => x.id === drag.id);
+    if (!m) return;
+    if (drag.mode === "move") {
+      const dx = Math.min(Math.max(p.x - drag.start.x, -drag.orig.x1), 1 - drag.orig.x2);
+      const dy = Math.min(Math.max(p.y - drag.start.y, -drag.orig.y1), 1 - drag.orig.y2);
+      m.x1 = drag.orig.x1 + dx; m.x2 = drag.orig.x2 + dx;
+      m.y1 = drag.orig.y1 + dy; m.y2 = drag.orig.y2 + dy;
+    } else {
+      Object.assign(m, resizeRect(drag.orig, drag.handle, p));
+    }
+    drawMasks();
+  });
+
+  maskLayer.addEventListener("pointerup", () => {
+    if (!drag) return;
+    const d = drag;
+    drag = null;
+    if (d.mode === "new") {
+      const r = normRect(d.start.x, d.start.y, d.cur.x, d.cur.y);
+      if (r.x2 - r.x1 < MIN_N || r.y2 - r.y1 < MIN_N) { drawMasks(); return; }  // 误点
+      commitAdd(r);
+    } else {
+      const m = masks.find((x) => x.id === d.id);
+      if (!m) { drawMasks(); return; }
+      const o = d.orig;
+      const same = ["x1", "y1", "x2", "y2"].every((k) => Math.abs(m[k] - o[k]) < 1e-4);
+      if (same) { drawMasks(); return; } // 只是点选了一下，没有真的拖动
+      commitUpdate(m);
+    }
+  });
+  maskLayer.addEventListener("pointercancel", () => { drag = null; drawMasks(); });
+
+  document.addEventListener("keydown", (e) => {
+    if ($("confirmBox").classList.contains("open")) {
+      if (e.key === "Escape") closeConfirm();
+      return;
+    }
+    if (e.key === "Escape") {
+      if (ctxMenu.classList.contains("open")) { closeCtx(); return; }
+      if (editMode) exitEdit();
+      return;
+    }
+    if (!editMode || !selId) return;
+    const tag = (e.target.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea") return;
+    if (e.key === "Delete" || e.key === "Backspace") {
+      e.preventDefault();
+      askDelete(selId);                  // 键盘删除同样走二次确认
+    }
+  });
+
+  async function loadMasks() {
+    try {
+      const r = await (await fetch("/api/masks", { cache: "no-store" })).json();
+      masks = r.masks || [];
+      maskOn = r.on !== false;
+    } catch (e) { /* 服务未就绪时保持空 */ }
+    selId = null;
+    editMode = false;
+    updateMaskUI(); layoutLayer();
+  }
+
+  if (window.ResizeObserver) new ResizeObserver(layoutLayer).observe(tile);
+  window.addEventListener("resize", layoutLayer);
+  loadMasks();
+
+  view.addEventListener("load", () => {
+    $("badge").textContent = "实时";
+    layoutLayer();          // 首帧到达后才知道真实画面比例，重新贴合遮罩层
+  });
+
+  $("toggle").addEventListener("click", () => {
+    paused = !paused;
+    $("toggle").textContent = paused ? "继续" : "暂停";
+    view.src = paused ? "" : "/stream?t=" + Date.now();
+    if (paused) { $("badge").textContent = "已暂停"; $("dot").className = "dot"; }
+  });
+
+  $("snap").addEventListener("click", () => {
+    const a = document.createElement("a");
+    a.href = "/api/snapshot?t=" + Date.now();
+    a.download = "snapshot.jpg";
+    a.click();
+  });
+
+  let filterTimer = null;
+  $("filter").addEventListener("input", (e) => {
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(() => {
+      fetch("/api/detect/filter?name=" + encodeURIComponent(e.target.value.trim()),
+            { cache: "no-store" });
+    }, 250);
+  });
+
+  $("detect").addEventListener("click", async () => {
+    $("detect").disabled = true;
+    try {
+      const r = await (await fetch("/api/detect/toggle", { cache: "no-store" })).json();
+      $("detect").textContent = r.enabled ? "识别: 开" : "识别: 关";
+      $("detect").className = r.enabled ? "on" : "";
+    } finally {
+      $("detect").disabled = false;
+    }
+  });
+
+  $("modeBtn").addEventListener("click", async () => {
+    $("modeBtn").disabled = true;
+    try {
+      const cur = $("modeBtn").textContent.includes("速度") ? "accurate" : "fast";
+      const r = await (await fetch("/api/detect/mode?m=" + cur, { cache: "no-store" })).json();
+      $("modeBtn").textContent = "模式: " + r.label;
+      $("modeBtn").className = r.mode === "accurate" ? "on" : "";
+    } finally {
+      $("modeBtn").disabled = false;
+    }
+  });
+
+  async function tick() {
+    try {
+      const s = await (await fetch("/api/stats", { cache: "no-store" })).json();
+      const found = s.window_found;
+      $("dot").className = "dot " + (found ? "on" : "off");
+      if (!paused) $("badge").textContent = found ? "实时" : "无信号";
+      $("sub").textContent = found
+        ? `窗口「${s.window_title}」`
+        : (s.error || "未找到游戏窗口");
+      $("size").textContent = s.client_size[0] ? `${s.client_size[0]}×${s.client_size[1]}` : "—";
+      $("cfps").textContent = found ? s.capture_fps.toFixed(1) : "—";
+      $("sfps").textContent = found ? s.stream_fps.toFixed(1) : "—";
+      const age = s.frame_age_ms;
+      $("age").textContent = age >= 0 ? `${Math.round(age)} ms` : "—";
+      $("age").className = "v" + (age > 800 ? " warn" : "");
+      $("detect").textContent = s.detect_enabled ? "识别: 开" : "识别: 关";
+      $("detect").className = s.detect_enabled ? "on" : "";
+      $("dms").textContent = s.detect_ready && s.detect_enabled ? `${s.infer_ms} ms` : "—";
+      $("targets").textContent = s.detect_enabled ? s.targets : "—";
+      $("pending").textContent = s.detect_enabled
+        ? (s.pending ? `${s.pending} 个待确认` : "0")
+        : "—";
+      $("classes").textContent = s.detect_enabled
+        ? (s.detect_loading ? "模型加载中…" : (s.detect_error || s.top_classes.join("　") || "无"))
+        : "—";
+      const lk = s.lock;
+      $("lock").textContent = s.detect_enabled
+        ? (s.detect_loading ? "—" : (lk ? `#${lk.tid} ${lk.name} ${lk.conf}` : "无"))
+        : "—";
+      $("mode").textContent = s.mode === "accurate" ? "精度 544×960" : "速度 384×672";
+      $("modeBtn").textContent = "模式: " + s.mode_label;
+      $("modeBtn").className = s.mode === "accurate" ? "on" : "";
+      if (maskOn !== s.mask) { maskOn = s.mask; updateMaskUI(); }   // 与后端保持一致
+      // 游戏窗口改尺寸 / 改分辨率后，画面比例跟着变，遮罩层要重新贴合
+      if (view.naturalWidth && (view.naturalWidth !== lastNW || view.naturalHeight !== lastNH)) {
+        layoutLayer();
+      }
+      if (!paused) {
+        $("badge").textContent = s.detect_loading ? "模型加载中"
+          : (s.detect_enabled ? "识别中" : (found ? "实时" : "无信号"));
+      }
+    } catch (e) {
+      $("dot").className = "dot off";
+      $("sub").textContent = "服务已断开";
+    }
+  }
+  tick();
+  setInterval(tick, 1000);
+
+  /* 页面热更新：index.html 一改（mtime/size 变化）就自动刷新，
+     避免对着浏览器的旧缓存误以为改动没生效。 */
+  let pageVer = null;
+  async function watchVersion() {
+    try {
+      const r = await (await fetch("/api/ver", { cache: "no-store" })).json();
+      if (!r.ver) return;
+      if (pageVer === null) pageVer = r.ver;
+      else if (r.ver !== pageVer) { location.reload(); return; }
+    } catch (e) { /* 服务重启中，忽略 */ }
+  }
+  watchVersion();
+  setInterval(watchVersion, 1500);
+</script>
+</body>
+</html>

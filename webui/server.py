@@ -1,0 +1,896 @@
+# -*- coding: utf-8 -*-
+"""Game window capture -> MJPEG web preview.
+
+Run:  python webui/server.py
+Open: http://127.0.0.1:8765
+"""
+import asyncio
+import ctypes
+import json
+import socket
+import sys
+import threading
+import time
+import webbrowser
+from pathlib import Path
+
+import cv2
+import mss
+import numpy as np
+import uvicorn
+import win32gui
+from fastapi import Body, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+
+ctypes.windll.user32.SetProcessDPIAware()
+
+SCREENSHOT = getattr(mss, "MSS", None) or getattr(mss, "mss")
+
+WINDOW_TITLE = "冒险岛怀旧服"
+PREVIEW_W = 320          # 小方格宽度（px）
+STREAM_W = 1024          # 推流分辨率宽度：预览可放大到千px级，1024 仍有清晰余量
+DEFAULT_FPS = 30
+JPEG_QUALITY = 72
+HOST, PORT = "127.0.0.1", 8765
+DETECT_CONF = 0.35
+# 两种部署配置，实测差异（30 帧真实画面，含 UI 排除+去重，对比 best.pt@960）：
+#   速度: INT8 384x672  ~44ms/22FPS  recall 83.6%  多检 0.8/帧
+#   精度: INT8 544x960  ~96ms/10FPS  recall 89.6%  多检 0.3/帧
+MODES = {
+    "fast": {"dir": "model_int8_fast_openvino_model", "imgsz": (384, 672),
+             "conf": DETECT_CONF, "label": "速度"},
+    "accurate": {"dir": "model_int8_openvino_model", "imgsz": (544, 960),
+                 "conf": DETECT_CONF, "label": "精度"},
+}
+OV_MODEL_DIR = MODES["fast"]["dir"]
+DETECT_IMGSZ = MODES["fast"]["imgsz"]
+
+# ---------------- UI 排除区（可在 WebUI 框选 / 保存） ----------------
+# 归一化坐标（占客户区宽高的比例，与分辨率无关），存在同目录 masks.json 里。
+MASK_FILE = Path(__file__).with_name("masks.json")
+MASK_GRAY = 114                 # 与 YOLO letterbox 填充值一致，对模型最"无感"
+MIN_MASK_SIZE = 0.01            # 最小边长（归一化），防止手抖画出零面积小框
+DEFAULT_MASKS = [
+    {"id": "m1", "x1": 0.00, "y1": 0.00, "x2": 0.17, "y2": 0.26},   # 左上小地图
+    {"id": "m2", "x1": 0.00, "y1": 0.40, "x2": 0.07, "y2": 0.70},   # 左侧任务灯泡 / 向导列
+    {"id": "m3", "x1": 0.00, "y1": 0.86, "x2": 1.00, "y2": 1.00},   # 底部状态栏 + 聊天条
+    {"id": "m4", "x1": 0.66, "y1": 0.68, "x2": 1.00, "y2": 0.91},   # 右下快捷栏 / 商城
+    {"id": "m5", "x1": 0.66, "y1": 0.00, "x2": 1.00, "y2": 0.12},   # 右上任务提示
+]
+
+mask_lock = threading.Lock()    # 保护 UI_MASKS 的读改写 + 落盘
+UI_MASKS = []                   # [{"id","x1","y1","x2","y2"}]
+
+
+def _clamp01(v):
+    return 0.0 if v < 0 else (1.0 if v > 1 else v)
+
+
+def _clean_mask(raw, fallback_id=""):
+    """把任意输入整理成一个合法区域；太小或坐标非法返回 None。"""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        x1 = _clamp01(float(raw["x1"]))
+        y1 = _clamp01(float(raw["y1"]))
+        x2 = _clamp01(float(raw["x2"]))
+        y2 = _clamp01(float(raw["y2"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(v != v for v in (x1, y1, x2, y2)):        # NaN
+        return None
+    x1, x2 = min(x1, x2), max(x1, x2)
+    y1, y2 = min(y1, y2), max(y1, y2)
+    if x2 - x1 < MIN_MASK_SIZE or y2 - y1 < MIN_MASK_SIZE:
+        return None
+    return {"id": str(raw.get("id") or fallback_id),
+            "x1": round(x1, 4), "y1": round(y1, 4),
+            "x2": round(x2, 4), "y2": round(y2, 4)}
+
+
+def load_masks():
+    if MASK_FILE.exists():
+        try:
+            data = json.loads(MASK_FILE.read_text(encoding="utf-8"))
+            items = data.get("masks", []) if isinstance(data, dict) else data
+            out, seen = [], set()
+            for i, raw in enumerate(items):
+                m = _clean_mask(raw, f"m{i + 1}")
+                if m is None or m["id"] in seen:
+                    continue
+                seen.add(m["id"])
+                out.append(m)
+            return out
+        except Exception as e:  # noqa: BLE001
+            print(f"[mask] 读取 {MASK_FILE.name} 失败，改用默认区域: {e}")
+    return [dict(m) for m in DEFAULT_MASKS]
+
+
+def save_masks(masks):
+    """先写临时文件再原子替换，避免写一半断电留下坏 JSON。"""
+    tmp = MASK_FILE.with_name(MASK_FILE.name + ".tmp")
+    tmp.write_text(json.dumps({"masks": masks}, ensure_ascii=False, indent=2),
+                   encoding="utf-8")
+    tmp.replace(MASK_FILE)
+
+
+def mask_snapshot():
+    with mask_lock:
+        return [dict(m) for m in UI_MASKS]
+
+
+def mask_rects():
+    """给推理热路径用的 (x1,y1,x2,y2) 快照，加锁一次取出。"""
+    with mask_lock:
+        return [(m["x1"], m["y1"], m["x2"], m["y2"]) for m in UI_MASKS]
+
+
+def _next_mask_id():
+    existing = {m["id"] for m in UI_MASKS}
+    n = 1
+    while f"m{n}" in existing:
+        n += 1
+    return f"m{n}"
+
+
+UI_MASKS = load_masks()
+
+
+def apply_ui_mask(frame, rects=None):
+    """把这些区域涂成中性灰：模型根本看不到固定 UI，从根上消灭"灯泡变蝙蝠"。"""
+    h, w = frame.shape[:2]
+    for fx1, fy1, fx2, fy2 in (rects if rects is not None else mask_rects()):
+        frame[int(fy1 * h):int(fy2 * h), int(fx1 * w):int(fx2 * w)] = MASK_GRAY
+    return frame
+
+
+def in_ui_mask(box, w, h, rects=None):
+    """检测框中心落在排除区内则丢弃（涂灰之外的双保险）。"""
+    cx = (box[0] + box[2]) / 2 / w
+    cy = (box[1] + box[3]) / 2 / h
+    for fx1, fy1, fx2, fy2 in (rects if rects is not None else mask_rects()):
+        if fx1 <= cx <= fx2 and fy1 <= cy <= fy2:
+            return True
+    return False
+
+
+def find_window():
+    hwnd = win32gui.FindWindow(None, WINDOW_TITLE)
+    if hwnd and win32gui.IsWindowVisible(hwnd):
+        return hwnd
+    hits = []
+
+    def cb(h, _):
+        if win32gui.IsWindowVisible(h):
+            t = win32gui.GetWindowText(h)
+            if t and (WINDOW_TITLE in t or "冒险岛" in t):
+                hits.append(h)
+
+    win32gui.EnumWindows(cb, None)
+    return hits[0] if hits else None
+
+
+def client_region(hwnd):
+    if win32gui.IsIconic(hwnd):
+        return None
+    l, t, r, b = win32gui.GetClientRect(hwnd)
+    if r - l < 64 or b - t < 64:
+        return None
+    x, y = win32gui.ClientToScreen(hwnd, (0, 0))
+    return {"left": x, "top": y, "width": r - l, "height": b - t}
+
+
+def placeholder(msg=b"NO WINDOW"):
+    img = np.full((360, 640, 3), 24, np.uint8)
+    cv2.putText(img, msg.decode(), (40, 190), cv2.FONT_HERSHEY_DUPLEX,
+                1.0, (120, 120, 120), 1, cv2.LINE_AA)
+    return img
+
+
+class Grabber(threading.Thread):
+    """持续抓取游戏客户区，保留最新一帧供 Web 层取用。"""
+
+    def __init__(self, target_fps=90):
+        super().__init__(daemon=True)
+        self.interval = 1.0 / target_fps
+        self.lock = threading.Lock()
+        self.frame = placeholder()
+        self.window_found = False
+        self.client_size = (0, 0)
+        self.capture_fps = 0.0
+        self.stream_fps = 0.0
+        self.frames_sent = 0
+        self.last_frame_ts = 0.0
+        self.error = ""
+        self.running = True
+
+    def snapshot(self):
+        with self.lock:
+            return self.frame.copy() if self.frame is not None else placeholder()
+
+    def run(self):
+        with SCREENSHOT() as sct:
+            count, t0 = 0, time.perf_counter()
+            while self.running:
+                tick = time.perf_counter()
+                hwnd = find_window()
+                region = client_region(hwnd) if hwnd else None
+                if region is None:
+                    self.window_found = False
+                    self.error = "窗口未找到或已最小化" if not hwnd else "客户区尺寸异常"
+                    with self.lock:
+                        self.frame = placeholder()
+                        self.client_size = (0, 0)
+                    time.sleep(0.25)
+                    continue
+
+                try:
+                    raw = sct.grab(region)
+                    frame = np.asarray(raw)[:, :, :3].copy()
+                except Exception as e:  # noqa: BLE001
+                    self.error = f"{type(e).__name__}: {e}"
+                    time.sleep(0.2)
+                    continue
+
+                with self.lock:
+                    self.frame = frame
+                    self.window_found = True
+                    self.client_size = (region["width"], region["height"])
+                    self.last_frame_ts = time.time()
+                    self.error = ""
+                count += 1
+                dt = time.perf_counter() - t0
+                if dt >= 1.0:
+                    self.capture_fps, count, t0 = count / dt, 0, time.perf_counter()
+
+                spare = self.interval - (time.perf_counter() - tick)
+                if spare > 0:
+                    time.sleep(spare)
+
+    def note_sent(self):
+        self.frames_sent += 1
+
+
+grabber = Grabber()
+grabber.start()
+
+# ---------------- 检测（OpenVINO） ----------------
+det_state = {
+    "enabled": False,
+    "loading": False,
+    "ready": False,
+    "annotated": None,
+    "infer_ms": 0.0,
+    "det_fps": 0.0,
+    "counts": {},
+    "filter": "",        # 类别过滤：空串=全部；非空=只画名字包含该词的目标
+    "lock": None,        # 锁定目标 {"tid","name","conf"} 或 None
+    "mask": True,        # UI 排除区开关：涂掉固定 UI 区域再推理
+    "mode": "fast",      # fast(20+FPS) / accurate(精度优先)
+    "error": "",
+}
+det_lock = threading.Lock()
+det_thread_started = [False]     # 检测线程只启动一次（内部按 mode 热切换模型）
+# IoUTracker 等定义在下方，实例化延后到类定义之后
+
+BOX_COLOR = (96, 220, 64)      # BGR 亮绿
+TXT_BG = (40, 40, 40)
+LOCK_COLOR = (36, 96, 255)     # BGR 橙红: 锁定目标
+
+PALETTE = [(96, 220, 64), (64, 160, 255), (255, 160, 64), (255, 96, 224),
+           (64, 224, 224), (160, 96, 255), (64, 255, 160), (224, 224, 64)]
+
+
+def iou(a, b):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+    inter = iw * ih
+    ua = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    return inter / ua if ua > 0 else 0.0
+
+
+def overlap_min(a, b):
+    """交集 / 较小框面积：判断"框套框"的重复检测比 IoU 更有效。"""
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    iw = max(0, min(ax2, bx2) - max(ax1, bx1))
+    ih = max(0, min(ay2, by2) - max(ay1, by1))
+    inter = iw * ih
+    amin = min((ax2 - ax1) * (ay2 - ay1), (bx2 - bx1) * (by2 - by1))
+    return inter / amin if amin > 0 else 0.0
+
+
+def class_color(name):
+    """颜色由类名决定：同一种怪永远同一个颜色，不会随 ID 变化而闪色。"""
+    h = 0
+    for ch in name:
+        h = (h * 31 + ord(ch)) & 0xFFFFFF
+    return PALETTE[h % len(PALETTE)]
+
+
+def dedupe_dets(dets, thr=0.6):
+    """同一类名的重叠框只保留置信度最高者（模型的类 ID 别名会重复检出同一只怪）。"""
+    out = []
+    for d in sorted(dets, key=lambda d: -d[2]):
+        if all(d[1] != o[1] or overlap_min(d[0], o[0]) < thr for o in out):
+            out.append(d)
+    return out
+
+
+class IoUTracker:
+    """轻量 tracking-by-detection：
+    - 同类目标按 IoU 贪心匹配，给每只怪稳定 track_id
+    - min_hits: 连续命中 N 帧才确认为真实目标（只闪 1~2 帧的瞬现目标直接丢弃）
+    - max_age: 丢失 N 帧内保留轨迹（检测偶尔漏一帧不闪断）
+    - 类别投票: 轨迹类别由历史帧投票决定，确认后需明显领先才能改判（防止树→蜗牛→树）
+    - EMA 平滑框坐标（防逐帧抖动）
+    """
+
+    def __init__(self, iou_thr=0.3, min_hits=3, max_age=8, ema=0.6,
+                 shift_gate=0.15, shift_max=320.0, class_margin=6,
+                 resurrect_frames=25):
+        self.iou_thr = iou_thr
+        self.min_hits = min_hits
+        self.max_age = max_age
+        self.ema = ema
+        self.shift_gate = shift_gate   # 相位相关响应低于此值视为无有效平移
+        self.shift_max = shift_max     # 平移量超过此值视为切屏，不补偿
+        self.class_margin = class_margin  # 已确认轨迹改判类别所需的领先票数
+        self.resurrect_frames = resurrect_frames  # 轨迹消失后多久内可复用原 ID
+        self.tracks = {}
+        self.lost = {}                 # tid -> {"name","box","age"} 复活缓存
+        self.next_id = 1
+        self.pending = 0               # 尚未确认的轨迹数（被瞬现过滤掉的候选）
+
+    def update(self, dets, shift=(0.0, 0.0)):
+        """dets: [(box, name, conf)], shift: 画面内容位移(相机补偿)
+
+        统一按“类名”而不是类 ID 匹配：模型里存在多个类 ID 指向同一种怪
+        （如 1210100_Pig / 9300058_Pig），按类 ID 匹配会把同一只怪拆成多条轨迹。
+        """
+        # 相机补偿：整幅画面平移时，先把旧轨迹的框跟着平移再匹配
+        dx, dy = shift
+        if abs(dx) + abs(dy) > 0.01:
+            for tr in self.tracks.values():
+                b = tr["box"]
+                tr["box"] = [b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy]
+        tids = list(self.tracks.keys())
+        used_t, used_d = set(), set()
+
+        # 第一级: 同类 IoU 贪心匹配（静止/慢速目标）
+        pairs = []
+        for t in tids:
+            tr = self.tracks[t]
+            for di, (box, name, conf) in enumerate(dets):
+                if name != tr["name"]:
+                    continue
+                v = iou(tr["box"], box)
+                if v >= self.iou_thr:
+                    pairs.append((v, t, di))
+        pairs.sort(reverse=True)
+        for v, t, di in pairs:
+            if t in used_t or di in used_d:
+                continue
+            used_t.add(t)
+            used_d.add(di)
+            self._apply(t, dets[di])
+
+        # 第二级: 中心点距离兜底（快速移动目标）
+        pairs2 = []
+        for t in tids:
+            if t in used_t:
+                continue
+            tr = self.tracks[t]
+            cx = (tr["box"][0] + tr["box"][2]) / 2
+            cy = (tr["box"][1] + tr["box"][3]) / 2
+            bw, bh = tr["box"][2] - tr["box"][0], tr["box"][3] - tr["box"][1]
+            for di, (box, name, conf) in enumerate(dets):
+                if di in used_d:
+                    continue
+                radius = max(80.0, 1.2 * (bw + bh))
+                dcx = (box[0] + box[2]) / 2 - cx
+                dcy = (box[1] + box[3]) / 2 - cy
+                dist = (dcx * dcx + dcy * dcy) ** 0.5
+                if dist <= radius:
+                    pairs2.append((-dist, t, di))   # 负距离 = 近者优先
+        pairs2.sort()
+        for nd, t, di in pairs2:
+            if t in used_t or di in used_d:
+                continue
+            used_t.add(t)
+            used_d.add(di)
+            self._apply(t, dets[di])
+
+        # 先进先出创建新轨迹；优先复活刚消失的同类轨迹（保持 ID 与颜色不变）
+        for di, (box, name, conf) in enumerate(dets):
+            if di in used_d:
+                continue
+            tid = self._take_lost(box, name)
+            if tid is None:
+                tid = self.next_id
+                self.next_id += 1
+            self.tracks[tid] = {"box": list(box), "name": name,
+                                "conf": conf, "hits": 1, "streak": 1, "misses": 0,
+                                "confirmed": False, "votes": {name: 1}}
+            used_t.add(tid)   # 新建轨迹本帧视为已匹配，否则会被误判为漏检
+
+        dead = []
+        for t, tr in self.tracks.items():
+            if t not in used_t:
+                tr["misses"] += 1
+                tr["streak"] = 0          # 连续命中被打断；已确认状态不撤销
+                if tr["misses"] > self.max_age:
+                    dead.append(t)
+        for t in dead:
+            tr = self.tracks.pop(t)
+            self.lost[t] = {"name": tr["name"], "box": tr["box"], "age": 0}
+        for t in list(self.lost):
+            self.lost[t]["age"] += 1
+            if self.lost[t]["age"] > self.resurrect_frames:
+                del self.lost[t]
+
+        self.pending = sum(1 for tr in self.tracks.values() if not tr["confirmed"])
+        return [dict(tr, tid=t) for t, tr in self.tracks.items() if tr["confirmed"]]
+
+    def _take_lost(self, box, name):
+        """在复活缓存里找同类别、位置接近的已消失轨迹，复用它的 ID。"""
+        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        bw, bh = box[2] - box[0], box[3] - box[1]
+        best, best_d = None, None
+        for tid, tr in self.lost.items():
+            if tr["name"] != name:
+                continue
+            lx = (tr["box"][0] + tr["box"][2]) / 2
+            ly = (tr["box"][1] + tr["box"][3]) / 2
+            d = ((cx - lx) ** 2 + (cy - ly) ** 2) ** 0.5
+            if d <= max(120.0, 1.0 * (bw + bh)) and (best_d is None or d < best_d):
+                best, best_d = tid, d
+        if best is not None:
+            del self.lost[best]
+        return best
+
+    def _apply(self, t, det):
+        box, name, conf = det
+        tr = self.tracks[t]
+        b, e = tr["box"], self.ema
+        tr["box"] = [e * box[k] + (1 - e) * b[k] for k in range(4)]
+        tr["conf"] = e * conf + (1 - e) * tr["conf"]
+        tr["hits"] += 1
+        tr["streak"] += 1
+        tr["misses"] = 0
+        self._vote(tr, name)
+        if tr["streak"] >= self.min_hits:
+            tr["confirmed"] = True
+
+    def _vote(self, tr, name):
+        """类别投票：票数最高的类作为轨迹类别；已确认的轨迹改判需明显领先。"""
+        votes = tr["votes"]
+        votes[name] = votes.get(name, 0) + 1
+        if sum(votes.values()) > 60:      # 滑窗式衰减，避免老票永久主导
+            for k in votes:
+                votes[k] = max(1, votes[k] // 2)
+        best = max(votes, key=votes.get)
+        cur = tr["name"]
+        if best == cur:
+            return
+        if not tr["confirmed"] or votes[best] >= votes.get(cur, 0) + self.class_margin:
+            tr["name"] = best
+
+
+def draw_tracks(frame, tracks, locked_tid=None):
+    img = frame.copy()
+    for tr in tracks:
+        x1, y1, x2, y2 = map(int, tr["box"])
+        locked = locked_tid is not None and tr["tid"] == locked_tid
+        # 颜色按怪种固定：同一只怪的框永远不会因为 ID 变化而换色
+        color = LOCK_COLOR if locked else class_color(tr["name"])
+        th = 3 if locked else 2
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, th)
+        tag = ("LOCK " if locked else "") + f"#{tr['tid']} {tr['name']} {tr['conf']:.2f}"
+        (tw, th2), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        ty = y1 - 5 if y1 - 5 > th2 else y2 + th2 + 5
+        cv2.rectangle(img, (x1, ty - th2 - 4), (x1 + tw + 4, ty + 2), TXT_BG, -1)
+        cv2.putText(img, tag, (x1 + 2, ty - 1), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45, color, 1, cv2.LINE_AA)
+    return img
+
+
+def est_camera_shift(frame, prev_small, sw, sh):
+    """相位相关估计整幅画面的平移（视角滚动补偿）。返回全分辨率坐标系的 (dx, dy)。"""
+    if prev_small is None:
+        return (0.0, 0.0)
+    h, w = frame.shape[:2]
+    if abs(w - sw * 4) > sw or abs(h - sh * 4) > sh:   # 客户区尺寸突变，不补偿
+        return (0.0, 0.0)
+    cur = cv2.cvtColor(cv2.resize(frame, (sw, sh), interpolation=cv2.INTER_AREA),
+                       cv2.COLOR_BGR2GRAY).astype(np.float32)
+    win = cv2.createHanningWindow((sw, sh), cv2.CV_32F)
+    (dx, dy), resp = cv2.phaseCorrelate(prev_small, cur, win)
+    if resp < 0.12:          # 响应弱 = 画面内容剧变（战斗特效/切换场景），不补偿
+        return (0.0, 0.0)
+    dx, dy = dx * (w / sw), dy * (h / sh)   # 缩放回全分辨率坐标
+    if abs(dx) > 400 or abs(dy) > 400:   # 位移过大视为切屏
+        return (0.0, 0.0)
+    return (dx, dy)
+
+
+def pick_lock(tracks, prev_tid):
+    """锁定策略：优先延续上一帧的锁定目标（防横跳）；
+    新锁定要求轨迹成熟（hits>=5）且置信度达标（>=0.45），按面积×置信度选最优。"""
+    if not tracks:
+        return None
+    by_id = {t["tid"]: t for t in tracks}
+    if prev_tid in by_id:
+        return prev_tid
+    best, best_score = None, -1.0
+    for t in tracks:
+        if t["hits"] < 5 or t["conf"] < 0.45:
+            continue
+        x1, y1, x2, y2 = t["box"]
+        score = (x2 - x1) * (y2 - y1) * t["conf"]
+        if score > best_score:
+            best, best_score = t["tid"], score
+    if best is None:   # 没有成熟目标时退而选置信度最高的，保证始终有锁
+        t = max(tracks, key=lambda t: t["conf"])
+        best = t["tid"]
+    return best
+
+
+tracker = IoUTracker()
+
+
+def detect_loop():
+    import warnings
+    warnings.filterwarnings("ignore")
+    from ultralytics import YOLO
+
+    models = {}          # mode -> YOLO（切换回来不用重新加载）
+
+    def get_model(mode):
+        if mode not in models:
+            models[mode] = YOLO(MODES[mode]["dir"], task="detect")
+        return models[mode]
+
+    try:
+        get_model(det_state["mode"])
+    except Exception as e:  # noqa: BLE001
+        det_state["error"] = f"模型加载失败: {type(e).__name__}: {e}"
+        det_state["loading"] = False
+        return
+    det_state["ready"] = True
+    det_state["loading"] = False
+    print(f"detector ready ({MODES[det_state['mode']]['dir']})")
+
+    n, t0 = 0, time.perf_counter()
+    prev_small = None   # 相机补偿用：上一帧缩略灰度图
+    SMALL_W, SMALL_H = 342, 192
+
+    while True:
+        if not det_state["enabled"]:
+            time.sleep(0.2)
+            continue
+        if not grabber.window_found:
+            time.sleep(0.3)
+            continue
+
+        mode = det_state["mode"]
+        cfg = MODES[mode]
+        try:
+            model = get_model(mode)      # 首次切到该模式时才加载
+            det_state["loading"] = False
+        except Exception as e:  # noqa: BLE001
+            det_state["error"] = f"模型加载失败: {type(e).__name__}: {e}"
+            time.sleep(1.0)
+            continue
+
+        frame = grabber.snapshot()
+        tick = time.perf_counter()
+        rects = mask_rects() if det_state["mask"] else None
+        try:
+            # 推理用涂掉 UI 的副本；画框画在原始帧上，画面里 UI 照常可见
+            infer_src = apply_ui_mask(frame.copy(), rects) if rects else frame
+            res = model.predict(infer_src, imgsz=cfg["imgsz"],
+                                conf=cfg["conf"], verbose=False, device="cpu")[0]
+        except Exception as e:  # noqa: BLE001
+            det_state["error"] = f"推理失败: {type(e).__name__}: {e}"
+            time.sleep(0.5)
+            continue
+
+        h, w = frame.shape[:2]
+        flt = det_state["filter"]
+        flt_l = flt.lower()
+        names = res.names
+        raw = []
+        for xyxy, conf, cls in zip(res.boxes.xyxy.tolist(), res.boxes.conf.tolist(),
+                                   res.boxes.cls.tolist()):
+            name = names[int(cls)].split("_", 1)[-1]
+            if flt_l and flt_l not in name.lower():
+                continue
+            box = xyxy
+            if rects and in_ui_mask(box, w, h, rects):          # 双保险
+                continue
+            raw.append((box, name, float(conf)))
+        # 模型的类 ID 别名会让同一只怪被检出多个框，先按类名去重
+        dets = dedupe_dets(raw)
+
+        tracks = tracker.update(dets, shift=est_camera_shift(frame, prev_small,
+                                                             SMALL_W, SMALL_H))
+        prev_small = cv2.cvtColor(cv2.resize(frame, (SMALL_W, SMALL_H),
+                                             interpolation=cv2.INTER_AREA),
+                                  cv2.COLOR_BGR2GRAY).astype(np.float32)
+        with det_lock:
+            prev = det_state["lock"]["tid"] if det_state["lock"] else None
+        locked_tid = pick_lock(tracks, prev)
+
+        counts = {}
+        for tr in tracks:
+            counts[tr["name"]] = counts.get(tr["name"], 0) + 1
+        lock_info = None
+        for tr in tracks:
+            if tr["tid"] == locked_tid:
+                lock_info = {"tid": tr["tid"], "name": tr["name"],
+                             "conf": round(tr["conf"], 2)}
+
+        annotated = draw_tracks(frame, tracks, locked_tid)
+
+        with det_lock:
+            det_state["annotated"] = annotated
+            det_state["infer_ms"] = (time.perf_counter() - tick) * 1000
+            det_state["counts"] = counts
+            det_state["lock"] = lock_info
+            det_state["error"] = ""
+        n += 1
+        dt = time.perf_counter() - t0
+        if dt >= 2.0:
+            det_state["det_fps"], n, t0 = n / dt, 0, time.perf_counter()
+
+
+app = FastAPI(title="Capture Preview")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+INDEX = Path(__file__).with_name("index.html")
+
+
+def encode(frame, width=None, quality=JPEG_QUALITY):
+    h, w = frame.shape[:2]
+    if width and w > width:
+        frame = cv2.resize(frame, (width, int(h * width / w)), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return buf.tobytes() if ok else b""
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    return HTMLResponse(
+        INDEX.read_text(encoding="utf-8"),
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
+@app.get("/api/ver")
+async def html_ver():
+    """index.html 的版本号（mtime+size）。前端轮询它，改完页面自动刷新，
+    免得对着浏览器的旧缓存以为改动没生效。"""
+    try:
+        st = INDEX.stat()
+        return JSONResponse({"ver": f"{int(st.st_mtime)}-{st.st_size}"})
+    except OSError as e:
+        return JSONResponse({"ver": "", "error": str(e)})
+
+
+@app.get("/api/stats")
+async def stats():
+    age = (time.time() - grabber.last_frame_ts) * 1000 if grabber.last_frame_ts else -1
+    with det_lock:
+        counts = dict(det_state["counts"])
+    top = sorted(counts.items(), key=lambda kv: -kv[1])[:4]
+    return JSONResponse({
+        "window_found": grabber.window_found,
+        "window_title": WINDOW_TITLE,
+        "client_size": list(grabber.client_size),
+        "capture_fps": round(grabber.capture_fps, 1),
+        "stream_fps": round(grabber.stream_fps, 1),
+        "frame_age_ms": round(age, 0),
+        "error": grabber.error,
+        "detect_enabled": det_state["enabled"],
+        "detect_loading": det_state["loading"],
+        "detect_ready": det_state["ready"],
+        "infer_ms": round(det_state["infer_ms"], 0),
+        "det_fps": round(det_state["det_fps"], 1),
+        "targets": sum(counts.values()),
+        "pending": tracker.pending,
+        "top_classes": [f"{k}×{v}" for k, v in top],
+        "detect_error": det_state["error"],
+        "filter": det_state["filter"],
+        "lock": det_state["lock"],
+        "mode": det_state["mode"],
+        "mode_label": MODES[det_state["mode"]]["label"],
+        "mask": det_state["mask"],
+    })
+
+
+@app.get("/api/detect/filter")
+async def detect_filter(name: str = ""):
+    """设置类别过滤：name 为空显示全部，否则只画名字包含 name 的目标（不区分大小写）。"""
+    det_state["filter"] = name.strip()
+    return JSONResponse({"filter": det_state["filter"]})
+
+
+@app.get("/api/detect/mask")
+async def detect_mask(on: int = 1):
+    """UI 排除区开关：on=1 涂掉固定 UI 再推理（默认），on=0 全画面检测。"""
+    det_state["mask"] = bool(on)
+    return JSONResponse({"mask": det_state["mask"]})
+
+
+# ---------- 排除区配置（WebUI 框选 / 选择 / 删除 / 持久化） ----------
+@app.get("/api/masks")
+async def masks_get():
+    return JSONResponse({"masks": mask_snapshot(), "on": det_state["mask"]})
+
+
+@app.post("/api/masks/add")
+async def masks_add(payload: dict = Body(...)):
+    m = _clean_mask(payload)
+    if m is None:
+        return JSONResponse({"error": "区域太小或坐标非法", "masks": mask_snapshot()},
+                            status_code=400)
+    with mask_lock:
+        m["id"] = _next_mask_id()
+        UI_MASKS.append(m)
+        snap = [dict(x) for x in UI_MASKS]
+    try:
+        save_masks(snap)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": f"写入 {MASK_FILE.name} 失败: {e}", "masks": snap},
+                            status_code=500)
+    return JSONResponse({"masks": snap, "id": m["id"]})
+
+
+@app.post("/api/masks/update")
+async def masks_update(payload: dict = Body(...)):
+    """移动 / 缩放已有区域。"""
+    mid = str(payload.get("id") or "")
+    m = _clean_mask(payload, mid)
+    if m is None:
+        return JSONResponse({"error": "区域太小或坐标非法", "masks": mask_snapshot()},
+                            status_code=400)
+    with mask_lock:
+        for i, cur in enumerate(UI_MASKS):
+            if cur["id"] == mid:
+                UI_MASKS[i] = m
+                break
+        snap = [dict(x) for x in UI_MASKS]
+    try:
+        save_masks(snap)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": f"写入 {MASK_FILE.name} 失败: {e}", "masks": snap},
+                            status_code=500)
+    return JSONResponse({"masks": snap, "id": mid})
+
+
+@app.post("/api/masks/delete")
+async def masks_delete(payload: dict = Body(...)):
+    mid = str(payload.get("id") or "")
+    with mask_lock:
+        keep = [m for m in UI_MASKS if m["id"] != mid]
+        removed = len(keep) != len(UI_MASKS)
+        UI_MASKS[:] = keep
+        snap = [dict(x) for x in UI_MASKS]
+    if removed:
+        try:
+            save_masks(snap)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"error": f"写入 {MASK_FILE.name} 失败: {e}", "masks": snap},
+                                status_code=500)
+    return JSONResponse({"masks": snap, "removed": removed})
+
+
+@app.post("/api/masks/clear")
+async def masks_clear():
+    with mask_lock:
+        UI_MASKS.clear()
+    try:
+        save_masks([])
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": f"写入 {MASK_FILE.name} 失败: {e}", "masks": []},
+                            status_code=500)
+    return JSONResponse({"masks": []})
+
+
+@app.post("/api/masks/reset")
+async def masks_reset():
+    """恢复内置的一整套默认区域（小地图/灯泡列/底栏/快捷栏/任务提示）。"""
+    with mask_lock:
+        UI_MASKS[:] = [dict(m) for m in DEFAULT_MASKS]
+        snap = [dict(x) for x in UI_MASKS]
+    try:
+        save_masks(snap)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": f"写入 {MASK_FILE.name} 失败: {e}", "masks": snap},
+                            status_code=500)
+    return JSONResponse({"masks": snap})
+
+
+
+@app.get("/api/detect/mode")
+async def detect_mode(m: str = "fast"):
+    """切换部署配置：fast=384x672/20+FPS，accurate=544x960/精度优先。"""
+    if m in MODES:
+        det_state["mode"] = m
+        det_state["loading"] = True      # 首次切到该模式需要加载模型
+    return JSONResponse({"mode": det_state["mode"], **MODES[det_state["mode"]]})
+
+
+@app.get("/api/detect/toggle")
+async def detect_toggle():
+    det_state["enabled"] = not det_state["enabled"]
+    if det_state["enabled"] and not det_thread_started[0]:
+        det_thread_started[0] = True
+        det_state["loading"] = not det_state["ready"]
+        threading.Thread(target=detect_loop, daemon=True).start()
+    if not det_state["enabled"]:
+        with det_lock:
+            det_state["annotated"] = None
+            det_state["counts"] = {}
+            det_state["lock"] = None
+        tracker.tracks.clear()
+    return JSONResponse({"enabled": det_state["enabled"], "loading": det_state["loading"]})
+
+
+@app.get("/api/snapshot")
+async def snapshot():
+    jpg = encode(grabber.snapshot(), width=None, quality=92)
+    return Response(content=jpg, media_type="image/jpeg",
+                    headers={"Content-Disposition": "inline; filename=snapshot.jpg"})
+
+
+@app.get("/stream")
+async def stream():
+    async def gen():
+        count, t0 = 0, time.perf_counter()
+        while True:
+            with det_lock:
+                ann = det_state["annotated"] if det_state["enabled"] else None
+            src = ann if ann is not None else grabber.snapshot()
+            jpg = encode(src)
+            yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                   + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n")
+            grabber.note_sent()
+            count += 1
+            dt = time.perf_counter() - t0
+            if dt >= 1.0:
+                grabber.stream_fps, count, t0 = count / dt, 0, time.perf_counter()
+            await asyncio.sleep(1.0 / DEFAULT_FPS)
+
+    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+def port_busy(host, port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.3)
+        return s.connect_ex((host, port)) == 0
+
+
+if __name__ == "__main__":
+    url = f"http://{HOST}:{PORT}"
+    want_open = "--open" in sys.argv
+
+    if port_busy(HOST, PORT):
+        print(f"already running -> {url}")
+        if want_open:
+            webbrowser.open(url)
+        raise SystemExit(0)
+
+    print(f"preview -> {url}   (Ctrl+C to stop)")
+    if want_open:
+        threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+    uvicorn.run(app, host=HOST, port=PORT, log_level="warning")

@@ -218,3 +218,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+/.image
+
+# ---- 本项目：模型权重只本地保留，不入库（约 190M） ----
+# 需要时用 tools/quantize_int8.py 从 best.pt 重新导出 OpenVINO IR
+*.pt
+*.onnx
+model_*_openvino_model/
+*_openvino_model/
+
+# 运行期产物
+debug.log
+webui/masks.json.tmp
