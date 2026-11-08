@@ -337,15 +337,17 @@ BAR_KINDS = ("hp", "mp", "exp")
 BAR_LABEL = {"hp": "HP", "mp": "MP", "exp": "EXP"}
 BAR_HUE_TOL = 30        # 色相容差（OpenCV 色相 0~180，对应 0~360°）
 BAR_S_MIN, BAR_V_MIN = 90, 90   # 填充色一定"够艳够亮"，空槽是浅灰(S≈0)或深色(V<80)
+BAR_EDGE_V = 110        # 槽内（含右侧浅灰空槽）V>=150，槽外 HUD 底板 V≈68，取中间值
 
 # 默认坐标：1366×768 怀旧服实测（归一到客户区宽高）。
-# 实测三条：红 466-624 / 蓝 634-799 / 黄绿 810-975，都在 y 747-763，
-# 归一后 x2 分别为 0.4568 / 0.5849 / 0.7138。换分辨率按比例套用；
-# UI 不跟随分辨率缩放时用前端"标定"重画即可。
+# 实测三条槽（含左右 1px 边框）：红 465-631 / 蓝 633-799 / 黄绿 809-975，都在 y 747-763。
+# 注意存的必须是"整条槽"而不是彩色填充的范围——满血时填充会一直顶到槽底，
+# 只框填充的话分母会偏小，读数永远 100%（这就是 HP 95.9% 读成 100% 的原因）。
+# measure_bar 里还有一层自动外扩兜底，标定时只框住填充也能自动补齐。
 DEFAULT_BARS = {
-    "hp": {"x1": 0.3411, "y1": 0.9740, "x2": 0.4568, "y2": 0.9935, "hue": 1},
-    "mp": {"x1": 0.4641, "y1": 0.9740, "x2": 0.5849, "y2": 0.9935, "hue": 103},
-    "exp": {"x1": 0.5930, "y1": 0.9740, "x2": 0.7138, "y2": 0.9935, "hue": 33},
+    "hp": {"x1": 0.3404, "y1": 0.9727, "x2": 0.4619, "y2": 0.9935, "hue": 1},
+    "mp": {"x1": 0.4634, "y1": 0.9727, "x2": 0.5849, "y2": 0.9935, "hue": 103},
+    "exp": {"x1": 0.5922, "y1": 0.9727, "x2": 0.7138, "y2": 0.9935, "hue": 33},
 }
 
 bar_lock = threading.Lock()
@@ -433,6 +435,44 @@ def _roi_px(rect, w, h):
     return x1, y1, x2, y2
 
 
+def slot_bounds(frame, x1, y1, x2, y2):
+    """把框自动外扩成"整条槽"的左右边界（像素，含左右边框）。
+
+    条内不管填充色还是右侧浅灰空槽都够亮（V>=150），槽外是 HUD 深色底板（V≈68），
+    中间还夹着 1px 全黑的分隔列。所以按列亮度找"包含框中心的连续亮区"，两端就是槽的边框。
+    这样即使用户只框住左边的彩色填充（满血时最容易这么框），分母也还是整条槽——
+    否则空槽被排除在外，读数会永远卡在 100%（HP 562/586 被读成 100% 就是这个坑）。
+
+    找不到可信的槽（亮区顶到搜索窗边界，说明外面也亮，不可信）就原样返回。
+    """
+    h, w = frame.shape[:2]
+    pad = max(24, int(w * 0.16))
+    wx1 = max(0, x1 - pad)
+    wx2 = min(w, x2 + pad)
+    a = y1 + int((y2 - y1) * 0.2)
+    b = max(a + 1, y2 - int((y2 - y1) * 0.2))
+    if b - a < 2 or wx2 - wx1 < 8:
+        return x1, x2
+    v = cv2.cvtColor(frame[a:b, wx1:wx2], cv2.COLOR_BGR2HSV)[..., 2]
+    colv = np.median(v, axis=0)
+    bright = colv >= BAR_EDGE_V
+    c = min(max((x1 + x2) // 2 - wx1, 0), len(colv) - 1)
+    if not bright[c]:
+        idx = np.flatnonzero(bright)     # 框中心正好压在暗处，取最近的亮列重新起步
+        if idx.size == 0:
+            return x1, x2
+        c = int(idx[np.argmin(np.abs(idx - c))])
+    lo = c
+    while lo > 0 and bright[lo - 1]:
+        lo -= 1
+    hi = c
+    while hi < len(colv) - 1 and bright[hi + 1]:
+        hi += 1
+    if hi - lo < 8 or (lo == 0 and wx1 == 0) or (hi == len(colv) - 1 and wx2 == w):
+        return x1, x2
+    return wx1 + lo, wx1 + hi
+
+
 def sample_bar_hue(frame, rect):
     """从条内左侧 1/4 采样填充色相。
 
@@ -442,6 +482,7 @@ def sample_bar_hue(frame, rect):
     """
     h, w = frame.shape[:2]
     x1, y1, x2, y2 = _roi_px(rect, w, h)
+    x1, x2 = slot_bounds(frame, x1, y1, x2, y2)
     x2s = max(x1 + 1, x1 + max(2, (x2 - x1) // 4))
     sub = frame[y1:y2, x1:x2s]
     if sub.size == 0:
@@ -456,13 +497,18 @@ def sample_bar_hue(frame, rect):
 def measure_bar(frame, rect, hue=None):
     """返回填充比例 0~1；ROI 无效返回 None。
 
-    做法：把条切成一根根"列"，每列看中间 60% 高度的像素——够艳够亮（且色相对得
-    上填充色）的列就算已填充。然后从左边数连续填充列，允许中间断 2 列（条上的
-    数字、斜纹高光会把个别列盖掉），断更多就认为到了没填的部分。
+    先把框自动补齐成整条槽（slot_bounds），再切成一列列：每列看中间 60% 高度的
+    像素，够艳够亮（且色相对得上填充色）就算已填充。然后从左边数连续填充列，
+    允许中间断 2 列（条上的高光/渐变会把个别列盖掉），断更多就认为到了空槽。
+    分母是槽的内部宽度（去掉左右各 1px 边框），不是彩色填充的宽度。
     """
     h, w = frame.shape[:2]
     x1, y1, x2, y2 = _roi_px(rect, w, h)
     if x2 - x1 < 8 or y2 - y1 < 2:
+        return None
+    sx1, sx2 = slot_bounds(frame, x1, y1, x2, y2)
+    x1, x2 = sx1 + 1, sx2                # 去掉左右 1px 边框，numpy 切片末端正好排掉右框
+    if x2 - x1 < 4:
         return None
     hsv = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
     Hh = hsv[..., 0].astype(np.int16)
@@ -1052,7 +1098,10 @@ async def bars_get():
 
 @app.post("/api/bars/set")
 async def bars_set(payload: dict = Body(...)):
-    """保存某一条的框选范围，并从当前画面自动学一个填充色相。"""
+    """保存某一条的框选范围，并从当前画面自动学一个填充色相。
+
+    顺手把框自动补齐成整条槽（用户直觉上会沿着彩色填充拖，满血时那样框会切掉右侧空槽）。
+    """
     kind = str(payload.get("kind", "")).lower()
     if kind not in BAR_KINDS:
         return JSONResponse({"ok": False, "msg": f"kind 必须是 {BAR_KINDS}"}, status_code=400)
@@ -1060,7 +1109,14 @@ async def bars_set(payload: dict = Body(...)):
     if rect is None:
         return JSONResponse({"ok": False, "msg": "框太小或坐标非法"}, status_code=400)
 
-    hue = sample_bar_hue(grabber.snapshot(), rect)
+    frame = grabber.snapshot()
+    h, w = frame.shape[:2]
+    px1, py1, px2, py2 = _roi_px(rect, w, h)
+    sx1, sx2 = slot_bounds(frame, px1, py1, px2, py2)
+    if (sx1, sx2) != (px1, px2):
+        rect = {**rect, "x1": round(sx1 / w, 4), "x2": round(sx2 / w, 4)}
+
+    hue = sample_bar_hue(frame, rect)
     if hue is None:                       # 采样不到就沿用原来的色相，别把已有配置搞丢
         hue = bar_snapshot().get(kind, {}).get("hue")
     with bar_lock:

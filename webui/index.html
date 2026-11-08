@@ -250,7 +250,7 @@
         <button id="detect">识别: 关</button>
         <button id="modeBtn">模式: 速度</button>
         <button id="focusBtn" title="把游戏窗口抬到最前并给焦点（截图前必做）">前置游戏</button>
-        <button id="calBtn" title="依次框出 HP / MP / EXP 条的位置（框整条，含右侧空槽）">标定条</button>
+        <button id="calBtn" title="依次框出 HP / MP / EXP 条的位置（沿条拖一下就行，会自动补齐整条槽）">标定条</button>
         <button id="snap">存快照</button>
       </div>
       <div class="filterrow">
@@ -259,7 +259,7 @@
     </div>
   </div>
 
-  <p class="note">双击选区进入编辑（拖动移动 · 拉角缩放 · 右上角 ✕ 删除）· 右键画面可添加排除区 · 改动即时保存到 webui/masks.json ·「标定条」按 HP → MP → EXP 顺序沿条拖一个框（框整条，含右侧空槽）</p>
+  <p class="note">双击选区进入编辑（拖动移动 · 拉角缩放 · 右上角 ✕ 删除）· 右键画面可添加排除区 · 改动即时保存到 webui/masks.json ·「标定条」按 HP → MP → EXP 顺序沿条拖一个框（只框彩色部分也行，会自动补齐整条槽）</p>
 </div>
 
 <div class="ctx" id="ctxMenu"></div>
@@ -309,7 +309,7 @@
 
   /* ========== 状态条（HP / MP / EXP）==========
      三条是固定 UI，后端按色相逐列扫描算百分比；前端只负责显示 + 标定。
-     标定 = 在画面上沿条拖一个框（整条，含右侧空槽），一次就够，坐标存 services 端
+     标定 = 在画面上沿条拖一个框（只框彩色部分也行，后端会自动补齐整条槽），一次就够
      bars.json，换分辨率再标一次。 */
   const BAR_ORDER = ["hp", "mp", "exp"];
   const BAR_NAME = { hp: "HP", mp: "MP", exp: "EXP" };
@@ -620,7 +620,7 @@
     barCal = barQueue.shift();
     $("calBtn").className = "on";
     $("calBtn").textContent = "标定: " + BAR_NAME[barCal];
-    toast(`沿 ${BAR_NAME[barCal]} 条从左到右拖一个框：要框住整条（含右侧空槽），高度贴着条`);
+    toast(`沿 ${BAR_NAME[barCal]} 条从左到右拖一个框：高度贴着条，右侧空槽会自动补齐`);
     drawMasks();
   }
 
@@ -644,8 +644,11 @@
     try {
       const res = await postJSON("/api/bars/set", { kind, ...r });
       if (!res.ok) throw new Error(res.msg || "保存失败");
-      barsCfg[kind] = { ...r, hue: res.hue };
-      toast(`${BAR_NAME[kind]} 标定完成`);
+      // 后端会把框自动补齐成整条槽，用返回的矩形重画，让用户看到实际生效的范围
+      const saved = res.rect || r;
+      barsCfg[kind] = { ...saved, hue: res.hue };
+      const fixed = Math.abs((saved.x2 - saved.x1) - (r.x2 - r.x1)) > 0.002;
+      toast(`${BAR_NAME[kind]} 标定完成${fixed ? "（已自动补齐整条槽）" : ""}`);
       nextBarCal();
     } catch (err) {
       toast(err.message || "保存失败", true);
