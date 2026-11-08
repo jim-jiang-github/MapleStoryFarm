@@ -1213,6 +1213,7 @@ char_state = {
     "misses": 0,
     "pending": None,      # 嫌疑跳变候选 (box, hits)：攒够帧数才切过去
     "guard": 0,           # 当前 pending 的命中帧数（0 = 正常跟踪）
+    "frame_size": None,   # 标定/上次重标时的画面尺寸 (W, H)：只有它变了才允许改尺度
     "error": "",
 }
 # 找人的线程句柄。以前用一个 [False] 布尔记「起过了」，一旦线程因为异常挂了，
@@ -1369,11 +1370,17 @@ def _decode_data_url(s):
 def _set_char_tpl(gray, scale=1.0):
     """装上模板。gray 存原图（换尺度时重算用），tpl_w 是实际参与匹配的掩码。"""
     tpl_w = _tpl_mask_at(gray, scale)
+    # 缩得太小就别认这个尺度：掩码只剩十几个像素时，画面里随便一小块白边都能刷到
+    # 0.8 以上，框会画到血条边、EXP 条那种地方去。宁可回 1:1。
+    if tpl_w.shape[1] < CHAR_MIN_W or tpl_w.shape[0] < CHAR_MIN_H:
+        scale = 1.0
+        tpl_w = _tpl_mask_at(gray, scale)
     h, w = tpl_w.shape[:2]
     with char_lock:
         char_state["tpl"] = gray
         char_state["tpl_w"] = tpl_w
         char_state["size"] = (w, h)
+        char_state["scale"] = scale
         char_state["box"] = None
         char_state["score"] = 0.0
         char_state["misses"] = 0
@@ -1389,7 +1396,10 @@ def _probe_scale(fw, gray, sc):
     """
     H, W = fw.shape[:2]
     t = _tpl_mask_at(gray, sc)
-    if t.shape[0] < 6 or t.shape[1] < 14 or t.shape[0] >= H or t.shape[1] >= W:
+    # 尺寸下限用 CHAR_MIN_W/CHAR_MIN_H：比这更小的掩码匹配出来的峰毫无意义
+    # （21×6 的小块在血条边缘能刷到 0.83，之前就是这么把框画到血条上去的）
+    if (t.shape[0] < CHAR_MIN_H or t.shape[1] < CHAR_MIN_W
+            or t.shape[0] >= H or t.shape[1] >= W):
         return None
     r = cv2.matchTemplate(fw, t, cv2.TM_CCOEFF_NORMED)
     _, mx, _, _ = cv2.minMaxLoc(r)
@@ -1436,6 +1446,8 @@ def _install_char_tpl(gray):
     _set_char_tpl(gray, scale)
     with char_lock:
         char_state["scale"] = scale
+        # 记住标定时的画面尺寸：以后只有这个尺寸变了，才允许重标尺度
+        char_state["frame_size"] = (fg.shape[1], fg.shape[0])
     _save_char_conf()
     # 立刻在整幅画面上跑一次，命中就把标记点上，前端马上能看到
     box, sc2 = find_char(frame)
@@ -1629,16 +1641,27 @@ def chase_char_box(cur, new, pending):
 
 
 def _auto_recalibrate(frame):
-    """长时间跟丢时重标一次尺度（用户改了窗口大小/分辨率会这样）。
+    """长时间跟丢后重标尺度 —— 只在**窗口尺寸真的变了**时才做。
 
-    只有在新尺度也能拿到 >=0.88 的硬分数时才改 —— 否则说明画面里根本没有这个人，
-    重采样只会把模板改坏。
+    以前只要跟丢 4 秒就重扫一遍，结果人物不在画面里时，扫描在半空里凑出一个 0.88
+    的假峰（比如把 54×15 的模板压到 21×6），把好模板改成坏的：之后不但找不着人，
+    还会在血条边缘画个 ME 0.83。名字牌是 2D UI，像素尺寸只跟窗口大小/分辨率有关，
+    窗口尺寸没变就没有理由改尺度。
     """
     with char_lock:
         tpl = char_state["tpl"]
         old = char_state["scale"]
+        prev_size = char_state["frame_size"]
     if tpl is None:
         return False
+    H, W = frame.shape[:2]
+    if prev_size is None:
+        # 第一次进来只记尺寸，不改模板：此时手里没有「变化」这个证据
+        with char_lock:
+            char_state["frame_size"] = (W, H)
+        return False
+    if prev_size == (W, H):
+        return False                      # 窗口没变过，尺度不可能变
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     score, scale = _char_scale_sweep(tpl, gray)
     if score < CHAR_SCALE_MIN_SCORE or abs(scale - old) <= 0.02:
