@@ -27,16 +27,13 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 32px 20px;
+    padding: 20px 20px;
     background: var(--bg);
     color: var(--text);
     overflow-x: hidden;      /* 画面宽度是算出来的，绝不出现横向滚动条 */
     font: 14px/1.6 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   }
   .wrap { width: 100%; max-width: var(--page-max); margin: 0 auto; }
-  header { margin-bottom: 14px; }
-  h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .01em; }
-  .sub { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
   .card {
     display: flex;
     flex-direction: column;
@@ -190,11 +187,6 @@
 </head>
 <body>
 <div class="wrap">
-  <header>
-    <h1>Capture 预览</h1>
-    <p class="sub" id="sub">正在连接采集服务…</p>
-  </header>
-
   <div class="card">
     <div class="tileWrap" id="tileWrap">
       <div class="tile" id="tile">
@@ -824,7 +816,8 @@
       const found = s.window_found;
       $("dot").className = "dot " + (found ? "on" : "off");
       if (!paused) $("badge").textContent = found ? "实时" : "无信号";
-      $("sub").textContent = found
+      // 窗口标题 / 报错信息改成角标上的悬浮提示，页面上不再占一行文字
+      $("badge").title = found
         ? `窗口「${s.window_title}」`
         : (s.error || "未找到游戏窗口");
       $("size").textContent = s.client_size[0] ? `${s.client_size[0]}×${s.client_size[1]}` : "—";
@@ -861,7 +854,7 @@
       }
     } catch (e) {
       $("dot").className = "dot off";
-      $("sub").textContent = "服务已断开";
+      $("badge").title = "服务已断开";
     }
   }
   tick();
