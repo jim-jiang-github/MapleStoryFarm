@@ -1198,6 +1198,13 @@ CHAR_FPS = 15
 CHAR_SCALE_MIN_SCORE = 0.88
 CHAR_SCALE_COARSE_MIN = 0.80    # 半分辨率粗扫的采信线（会回全图复核）
 
+# 人物只可能出现在画面中部的一条**横向带**里：左右能顶满，上下范围很小（脚下有
+# 平台、上面是小地图/任务栏）。把匹配收窄到这条带：上下 HUD 里那些同名字样天然
+# 被排除，候选数量掉一个量级，误匹配和耗时一起降。存归一化上下边界，跟着窗口走。
+CHAR_ROI_DEFAULT = (0.08, 0.90)
+CHAR_ROI_MIN_H = 0.05          # 带子最窄 5% 画面高，再窄就没意义了
+CHAR_ROI_EDGE_PX = 14          # 前端拖动时的边缘命中像素（只给前端参考，服务端不用）
+
 char_lock = threading.Lock()
 char_state = {
     "enabled": True,
@@ -1214,6 +1221,7 @@ char_state = {
     "pending": None,      # 嫌疑跳变候选 (box, hits)：攒够帧数才切过去
     "guard": 0,           # 当前 pending 的命中帧数（0 = 正常跟踪）
     "frame_size": None,   # 标定/上次重标时的画面尺寸 (W, H)：只有它变了才允许改尺度
+    "roi": CHAR_ROI_DEFAULT,   # 搜索范围的归一化上下边界 (y1, y2)；左右恒为整宽
     "error": "",
 }
 # 找人的线程句柄。以前用一个 [False] 布尔记「起过了」，一旦线程因为异常挂了，
@@ -1230,11 +1238,32 @@ def _clamp_thresh(v) -> float:
     return round(min(0.95, max(0.30, v)), 2)
 
 
+def _clamp_roi(y1, y2):
+    """归一化上下边界 → 合法 (y1, y2)：都在 0~1，且带子至少 CHAR_ROI_MIN_H 高。
+
+    允许传反（用户从上往下拖），这里自动换过来；带子太窄就往外顶到最小高度，
+    别让一次误拖把范围压成一条缝、什么都匹配不到。
+    """
+    try:
+        a, b = float(y1), float(y2)
+    except (TypeError, ValueError):
+        return CHAR_ROI_DEFAULT
+    if a != a or b != b:                 # NaN
+        return CHAR_ROI_DEFAULT
+    a, b = min(0.98, max(0.0, a)), min(1.0, max(0.02, b))
+    if b < a:
+        a, b = b, a
+    if b - a < CHAR_ROI_MIN_H:
+        b = min(1.0, a + CHAR_ROI_MIN_H)
+        a = max(0.0, b - CHAR_ROI_MIN_H)
+    return (round(a, 4), round(b, 4))
+
+
 def _save_char_conf():
     try:
         CHAR_CONF_FILE.write_text(json.dumps(
             {"enabled": char_state["enabled"], "thresh": char_state["thresh"],
-             "scale": char_state["scale"]}
+             "scale": char_state["scale"], "roi": list(char_state["roi"])}
         ), encoding="utf-8")
     except Exception:
         pass
@@ -1252,6 +1281,9 @@ def _load_char_conf():
         char_state["scale"] = min(1.6, max(0.25, float(raw.get("scale", 1.0))))
     except (TypeError, ValueError):
         char_state["scale"] = 1.0
+    roi = raw.get("roi")
+    if isinstance(roi, (list, tuple)) and len(roi) == 2:
+        char_state["roi"] = _clamp_roi(roi[0], roi[1])
 
 
 CHAR_WHITE_THR = 185       # 帧里「白字」的亮度下限
@@ -1418,7 +1450,8 @@ def _char_scale_sweep(gray, frame_gray):
     全图扫 0.40~1.60（步长 4%）约 200ms，只在「上传」和「跟丢 4 秒后重标」时跑，
     不进每帧路径。
     """
-    fw = _white_map(frame_gray)
+    ry1, ry2 = _char_roi(frame_gray.shape)
+    fw = _white_map(frame_gray[ry1:ry2])   # 只在人物可能出现的带子里扫，跟 find_char 一致
     H, W = fw.shape[:2]
     best = None                          # (score, scale, sig)
     for sc in np.arange(0.40, 1.621, 0.04):
@@ -1519,16 +1552,31 @@ def _hud_penalty(box, W, H):
     return pen
 
 
+def _char_roi(shape):
+    """当前搜索范围的像素行区间 (y1, y2)。左右恒为整宽。
+
+    归一化存、按帧换算：换窗口大小后同一份配置还成立。
+    """
+    with char_lock:
+        a, b = char_state["roi"]
+    H = int(shape[0])
+    y1 = max(0, min(H - 2, int(round(float(a) * H))))
+    y2 = max(y1 + 2, min(H, int(round(float(b) * H))))
+    return y1, y2
+
+
 def find_char(frame):
     """在当前画面里找名字牌。返回 (box, score)；box 为全分辨率像素坐标。
 
-    三级策略（前两级都不到 0.2ms，只有真丢了才走全图）：
+    只在「人物可能出现的横向带」（char_state["roi"]，默认 8%~90% 高、整宽）里找：
+    上面是小地图/任务栏、下面是血条，那些地方也印着玩家名字，天然被排除在外。
+    带内再做三级策略（前两级都不到 0.2ms，只有真丢了才走带内全搜）：
       1) 局部 ±60px —— 正常跟踪，逐帧位移一般 < 20px，一定落在里面；
       2) 局部 ±200px —— 跳跃/瞬移/被击退时兜住，避免「闪一下重新找」；
-      3) 全图 —— 取前 5 个峰，按「分数 - 位置惩罚」排序。
+      3) 带内全搜 —— 取前 5 个峰，按「分数 - 位置惩罚」排序。
 
     为什么不全图直搜：画面里还有别处长得一模一样的白字（左下角 LV 栏就印着同一个
-    名字，分数 0.92），全图搜很容易被它抢走；局部搜索天然排除了这种情况。
+    名字，分数 0.92），全图搜很容易被它抢走；局部搜索 + 范围收窄天然排除了这种情况。
     """
     with char_lock:
         tpl_w = char_state["tpl_w"]
@@ -1543,39 +1591,47 @@ def find_char(frame):
     if th >= H or tw >= W:
         return None, 0.0
 
-    # 1) / 2) 局部跟踪：命中且过门限就算数，不必回到全图
+    ry1, ry2 = _char_roi(g.shape)
+    band = g[ry1:ry2]                    # 只在这一条里找
+    bh, bw = band.shape[:2]
+    if th >= bh or tw >= bw:
+        return None, 0.0
+
+    # 1) / 2) 局部跟踪：命中且过门限就算数，不必回到全搜
     if last is not None and misses <= CHAR_REACQ_MISS:
+        lb = [last[0], last[1] - ry1, last[2], last[3] - ry1]    # 换成带内坐标
         for radius in (CHAR_LOCAL_RADIUS, CHAR_WIDE_RADIUS):
-            hit = _local_search(g, tpl_w, last, radius)
+            hit = _local_search(band, tpl_w, lb, radius)
             if hit is not None and hit[1] >= thresh:
-                return hit
+                b = hit[0]
+                return [b[0], b[1] + ry1, b[2], b[3] + ry1], hit[1]
             if hit is not None and radius == CHAR_WIDE_RADIUS:
                 break      # 宽搜都只有低分：别再拿低分位置凑数
 
-    # 3) 全图重找
-    fw = _white_map(g)
+    # 3) 带内全搜
+    fw = _white_map(band)
     res = cv2.matchTemplate(fw, tpl_w, cv2.TM_CCOEFF_NORMED)
     cands = _best_peaks(res, 5)
     if not cands:
         return None, 0.0
     if last is not None:
-        ref = ((last[0] + last[2]) / 2.0, (last[1] + last[3]) / 2.0)
+        ref = ((last[0] + last[2]) / 2.0, (last[1] + last[3]) / 2.0 - ry1)
     else:
-        ref = (W / 2.0, H * 0.45)          # 首次：人物一般在画面中部
-    diag = (W * W + H * H) ** 0.5
+        ref = (bw / 2.0, bh * 0.55)      # 首次：带子里偏中下（人物脚踩平台）
+    diag = (bw * bw + bh * bh) ** 0.5
     best = None
     for sc, x, y in cands:
-        box = [x, y, x + tw, y + th]
+        box = [x, y + ry1, x + tw, y + th + ry1]
         d = (((x + tw / 2.0) - ref[0]) ** 2 + ((y + th / 2.0) - ref[1]) ** 2) ** 0.5
         val = sc - CHAR_DIST_PENALTY * (d / diag) - _hud_penalty(box, W, H)
         if best is None or val > best[0]:
             best = (val, sc, x, y)
     val, sc, x, y = best
-    # 判定用「扣掉位置惩罚后的分」：真身在画面中部，扣完还是 0.95 左右；HUD 里那行
+    # 判定用「扣掉位置惩罚后的分」：真身在带子中部，扣完还是 0.95 左右；HUD 里那行
     # 同名文字 0.84 要扣 0.24 只剩 0.60，直接判不通过。显示出去的仍是原始匹配分。
     if val < thresh:
         return None, float(sc)
-    return [x, y, x + tw, y + th], float(sc)
+    return [x, y + ry1, x + tw, y + th + ry1], float(sc)
 
 
 def _bbox_center(b):
@@ -2044,6 +2100,7 @@ async def stats():
             "dir": char_state["dir"],
             "scale": char_state["scale"],
             "guard": char_state["guard"],   # >0：疑似跳变，正在攒帧确认
+            "roi": list(char_state["roi"]),   # 搜索范围（归一化 y1,y2；整宽）
         },
     })
 
@@ -2318,6 +2375,7 @@ async def char_status():
             "dir": char_state["dir"],
             "scale": char_state["scale"],
             "guard": char_state["guard"],
+            "roi": list(char_state["roi"]),   # 搜索范围（归一化上下边界，整宽）
             "error": char_state["error"],
             "thread": _char_thread_alive(),   # 找人线程是否活着（排查「标记不动了」）
         })
@@ -2431,12 +2489,14 @@ async def char_tpl_png():
 
 
 @app.get("/api/char/conf")
-async def char_conf(v: float = 0, enabled: int = -1, dir: str = ""):
-    """人物匹配阈值 / 开关。
+async def char_conf(v: float = 0, enabled: int = -1, dir: str = "",
+                    roi: str = ""):
+    """人物匹配阈值 / 开关 / 搜索范围。
 
-    v    阈值（0.30~0.95）
+    v        阈值（0.30~0.95）
     enabled  0/1 才改开关
-    dir  已废弃：箭头固定朝上。参数留着是为了老页面不会 422。
+    roi      "y1,y2" 归一化上下边界（左右恒为整宽），如 "0.38,0.70"
+    dir      已废弃：箭头固定朝上。参数留着是为了老页面不会 422。
     """
     changed = False
     if v:
@@ -2446,12 +2506,29 @@ async def char_conf(v: float = 0, enabled: int = -1, dir: str = ""):
         char_state["enabled"] = bool(enabled)
         changed = True
     char_state["dir"] = "above"
+    if roi:
+        parts = [x for x in roi.replace("%", "").split(",") if x.strip() != ""]
+        new_roi = None
+        if len(parts) == 2:
+            try:
+                new_roi = _clamp_roi(float(parts[0]), float(parts[1]))
+            except (TypeError, ValueError):
+                new_roi = None
+        if new_roi is not None and new_roi != char_state["roi"]:
+            char_state["roi"] = new_roi
+            changed = True
+            # 范围一变，上一帧的框八成落在新带子外面。清掉它重新搜：
+            # 否则「局部跟踪」会一直围着带外的旧位置打转。
+            with char_lock:
+                char_state["box"] = None
+                char_state["pending"] = None
+                char_state["guard"] = 0
     if changed:
         _save_char_conf()
         with char_lock:
             char_state["misses"] = 0
     return JSONResponse({"thresh": char_state["thresh"], "enabled": char_state["enabled"],
-                         "dir": char_state["dir"]})
+                         "dir": char_state["dir"], "roi": list(char_state["roi"])})
 
 
 @app.get("/api/snapshot")

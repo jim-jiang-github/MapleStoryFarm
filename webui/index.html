@@ -333,6 +333,16 @@
   .cneed:hover { background: #fef3c7; border-color: #d97706; }
   .cneed.busy { color: var(--muted); border-color: var(--border); background: #f5f5f4; }
   .hold { color: #b45309; }        /* 「校准中」：疑似跳变，正在攒帧确认 */
+  /* 行内小按钮（人物范围的「调整 / 完成」）：默认 button 是 flex:1 会撑满整行 */
+  button.mini {
+    flex: none; padding: 2px 9px; margin-left: 6px;
+    font-size: 11px; line-height: 1.5; border-radius: 6px;
+  }
+  button.mini.on {
+    color: #fff; background: #0ea5e9; border-color: #0ea5e9;
+  }
+  button.mini.on:hover { background: #0284c7; border-color: #0284c7; }
+  #charRoi { font-variant-numeric: tabular-nums; }
   .filterrow { margin-top: 10px; }
   .filterrow input {
     width: 100%;
@@ -420,6 +430,12 @@
             <div class="row"><span class="k">锁定目标</span><span class="v small" id="lock">—</span></div>
             <div class="row"><span class="k">人物</span>
               <span class="v small"><span id="charInfo">未设置</span></span>
+            </div>
+            <div class="row"><span class="k">人物范围</span>
+              <span class="v small">
+                <span id="charRoi" title="只在这一条横向带里找名字牌（左右整宽，上下可调）。上下 HUD 里的同名文字因此不会被误认">整宽 · 8%~90%</span>
+                <button id="roiBtn" class="mini" title="在画面上拖动上下两条虚线，把范围收到人物可能出现的那一条">调整</button>
+              </span>
             </div>
             <div class="row"><span class="k">条位置</span><span class="v small" id="barsrc">—</span></div>
           </div>
@@ -537,6 +553,7 @@
 
   const RED_FILL = "rgba(239,68,68,.20)", RED_LINE = "rgba(239,68,68,.95)";
   const BLUE_FILL = "rgba(37,99,235,.20)", BLUE_LINE = "#2563eb";
+  const ROI_LINE = "#0ea5e9";     // 人物搜索范围的边线（天蓝，跟后端 ME 标记同色系）
   const MIN_N = 0.012;            // 新框最小边长（归一化），小于此值视为误点
   const DEL_SIZE = 20;            // 选区右上角删除按钮边长（px）
 
@@ -562,6 +579,14 @@
   let barQueue = [];              // 待标定的剩余条（按 hp -> mp -> exp 顺序）
   let charHasTpl = false;         // 后端已经有模板
   let charLockUntil = 0;          // 拖人物阈值滑块期间，别让轮询把值拽回去
+  /* 人物搜索范围：只在画面中部一条横向带里找名字牌（左右整宽，上下可调）。
+     上下 HUD（小地图/任务栏/血条/聊天）里也印着玩家名字，收窄范围等于把它们从
+     搜索里剔掉——误匹配更少，全搜也更快。 */
+  let roiCal = false;             // 正在调人物搜索范围
+  let roi = { y1: 0.08, y2: 0.90 };
+  let roiOrig = null;             // 进入调整时的值，Esc 撤回
+  const ROI_EDGE = 14;            // 边界把手命中像素
+  const ROI_MIN_H = 0.05;         // 与后端 CHAR_ROI_MIN_H 一致
   let grabberReady = false;       // 抓到画面后才知道画面比例，标定前先确认
   const L = { w: 0, h: 0, ox: 0, oy: 0 }; // 内容区尺寸 + 内容区在 canvas 内的偏移
   // 遮罩 canvas 盖住 tile 并四周外扩 PAD(px)：贴边选区(x2=1.0 等)的把手
@@ -637,9 +662,76 @@
     });
   }
 
+  /* 人物搜索范围的可视化：带外压暗、带内淡蓝，上下两条可拖的边线。
+     只在「调整」状态下画——平时画面上不需要这条线。 */
+  function drawRoiBand() {
+    if (!L.w || !L.h) return;
+    const x0 = X(0), x1 = X(1);
+    const yTop = Y(roi.y1), yBot = Y(roi.y2);
+    // 带外压暗：一眼看出「这条以外不会被搜索」
+    mctx.fillStyle = "rgba(12,10,9,.55)";
+    mctx.fillRect(x0, L.oy, x1 - x0, Math.max(0, yTop - L.oy));
+    mctx.fillRect(x0, yBot, x1 - x0, Math.max(0, L.oy + L.h - yBot));
+    // 带内淡蓝
+    mctx.fillStyle = "rgba(14,165,233,.10)";
+    mctx.fillRect(x0, yTop, x1 - x0, Math.max(1, yBot - yTop));
+    // 左右两条竖虚线：范围恒为整宽，画出来才对得上
+    mctx.setLineDash([4, 5]);
+    mctx.strokeStyle = "rgba(14,165,233,.55)";
+    mctx.lineWidth = 1;
+    [x0 + 0.5, x1 - 0.5].forEach((x) => {
+      mctx.beginPath(); mctx.moveTo(x, yTop); mctx.lineTo(x, yBot); mctx.stroke();
+    });
+    mctx.setLineDash([]);
+    // 上下两条边线：先白后蓝（压在浅色地面/黄沙上也看得出来）
+    [[roi.y1, "上边界"], [roi.y2, "下边界"]].forEach(([n, name]) => {
+      const y = Y(n);
+      mctx.strokeStyle = "rgba(255,255,255,.92)";
+      mctx.lineWidth = 3.4;
+      mctx.beginPath(); mctx.moveTo(x0, y); mctx.lineTo(x1, y); mctx.stroke();
+      mctx.strokeStyle = ROI_LINE;
+      mctx.lineWidth = 1.7;
+      mctx.beginPath(); mctx.moveTo(x0, y); mctx.lineTo(x1, y); mctx.stroke();
+      // 中间一个小把手，提示「这里能拖」
+      const hx = (x0 + x1) / 2, hy = y;
+      mctx.fillStyle = ROI_LINE;
+      mctx.beginPath();
+      if (mctx.roundRect) mctx.roundRect(hx - 24, hy - 8, 48, 16, 8);
+      else mctx.rect(hx - 24, hy - 8, 48, 16);
+      mctx.fill();
+      mctx.fillStyle = "#fff";
+      mctx.font = "600 10px ui-monospace, Menlo, Consolas, monospace";
+      mctx.textAlign = "center";
+      mctx.fillText("拖", hx, hy + 3.5);
+      mctx.textAlign = "left";
+      // 标签贴在左边（避开中间的把手）
+      const label = `${name} ${Math.round(n * 100)}%`;
+      mctx.font = "600 11px ui-monospace, Menlo, Consolas, monospace";
+      const tw = mctx.measureText(label).width;
+      mctx.fillStyle = "rgba(12,10,9,.72)";
+      mctx.beginPath();
+      if (mctx.roundRect) mctx.roundRect(x0 + 6, y - 20, tw + 12, 17, 5);
+      else mctx.rect(x0 + 6, y - 20, tw + 12, 17);
+      mctx.fill();
+      mctx.fillStyle = "#fff";
+      mctx.fillText(label, x0 + 12, y - 7.5);
+    });
+  }
+
+  function roiHit(p) {
+    if (!L.h) return null;
+    const dTop = Math.abs(Y(p.y) - Y(roi.y1));
+    const dBot = Math.abs(Y(p.y) - Y(roi.y2));
+    if (dTop <= ROI_EDGE && dTop <= dBot) return "top";
+    if (dBot <= ROI_EDGE) return "bottom";
+    if (p.y > roi.y1 && p.y < roi.y2) return "band";
+    return null;
+  }
+
   function drawMasks() {
     if (!L.w || !L.h) return;
     mctx.clearRect(0, 0, maskLayer.clientWidth, maskLayer.clientHeight);
+    if (roiCal) { drawRoiBand(); return; }   // 调范围时只看这条带，别叠选区
     drawBarRects();
     if (!maskOn) return;
 
@@ -929,6 +1021,14 @@
 
   function paintChar(c) {
     if (!c) return;
+    // 搜索范围以后端为准（换设备/清缓存后也能对上）；正在拖动时不抢，免得跳回去
+    if (Array.isArray(c.roi) && c.roi.length === 2 && !roiCal) {
+      if (Math.abs(roi.y1 - c.roi[0]) > 1e-4 || Math.abs(roi.y2 - c.roi[1]) > 1e-4) {
+        roi.y1 = c.roi[0];
+        roi.y2 = c.roi[1];
+      }
+      paintRoi();
+    }
     if (!!c.has_tpl !== charHasTpl) showCharTpl(!!c.has_tpl);
     if (!charHasTpl) {
       $("charInfo").textContent = "未设置";
@@ -956,6 +1056,52 @@
         $("charVal").textContent = Number(c.thresh).toFixed(2);
       }
     }
+  }
+
+  /* ---------- 人物搜索范围（ROI） ----------
+     人物只可能出现在画面中部一条横向带里：左右顶满、上下很小。把匹配收窄到这条带，
+     上下 HUD 里的同名文字天然被排除，误检和全搜耗时一起降。范围存在后端（跟着窗口
+     尺寸归一化），换分辨率不用重调。 */
+  function paintRoi() {
+    const a = Math.round(roi.y1 * 100), b = Math.round(roi.y2 * 100);
+    $("charRoi").textContent = `整宽 · ${a}%~${b}%`;
+    $("charRoi").title =
+      `只在画面 ${a}%~${b}% 高、整宽这一条里找名字牌；上下 HUD 里的同名文字不会被认成人物`;
+  }
+
+  async function saveRoi() {
+    const q = `${roi.y1.toFixed(3)},${roi.y2.toFixed(3)}`;
+    try {
+      const r = await (await fetch(`/api/char/conf?roi=${q}`, { cache: "no-store" })).json();
+      if (Array.isArray(r.roi)) { roi.y1 = r.roi[0]; roi.y2 = r.roi[1]; }
+      paintRoi();
+      drawMasks();
+      refreshChar();
+    } catch (e) {
+      toast("范围保存失败", true);
+    }
+  }
+
+  function startRoiCal() {
+    roiCal = true;
+    roiOrig = { ...roi };
+    $("roiBtn").textContent = "完成";
+    $("roiBtn").classList.add("on");
+    maskLayer.style.cursor = "ns-resize";
+    drawMasks();
+    toast("拖上下两条虚线，把范围收到人物会出现的那一条；拖完点「完成」");
+  }
+
+  async function stopRoiCal(revert) {
+    if (!roiCal) return;
+    roiCal = false;
+    $("roiBtn").textContent = "调整";
+    $("roiBtn").classList.remove("on");
+    maskLayer.style.cursor = "crosshair";
+    const back = revert && roiOrig ? { ...roiOrig } : null;
+    roiOrig = null;
+    if (back) { roi = back; await saveRoi(); }   // Esc：撤回并写回后端
+    drawMasks();
   }
 
   /* 上传名字牌小图：客户端先缩到 600 宽以内再发（base64 比原图小一个量级），
@@ -1027,6 +1173,10 @@
   /* 入口在「人物」那一行：没图时是虚线提示块，有图时点缩略图换一张。 */
   $("charNeed").addEventListener("click", openPaste);
   $("charTpl").addEventListener("click", openPaste);
+  $("roiBtn").addEventListener("click", () => {
+    if (roiCal) stopRoiCal(false);
+    else startRoiCal();
+  });
   $("pasteCancel").addEventListener("click", closePaste);
   pasteBox.addEventListener("mousedown", (e) => { if (e.target === pasteBox) closePaste(); });
   pasteZone.addEventListener("click", () => $("charFile").click());
@@ -1371,14 +1521,14 @@
   /* ---------- 画布交互 ---------- */
   maskLayer.addEventListener("contextmenu", (e) => {
     e.preventDefault();
-    if (!maskOn) return;
+    if (!maskOn || roiCal) return;
     const p = toNorm(e);
     const hit = masks.slice().reverse().find((m) => inside(m, p));
     openCtx(e.clientX, e.clientY, hit ? hit.id : null);
   });
 
   maskLayer.addEventListener("dblclick", (e) => {
-    if (!maskOn) return;
+    if (!maskOn || roiCal) return;
     const p = toNorm(e);
     const hit = masks.slice().reverse().find((m) => inside(m, p));
     if (hit) enterEdit(hit.id);          // 双击选区 -> 进入编辑模式
@@ -1387,10 +1537,15 @@
 
   maskLayer.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
-    if (!maskOn && !barCal) return;
+    if (!maskOn && !barCal && !roiCal) return;
     e.preventDefault();
     maskLayer.setPointerCapture(e.pointerId);
     const p = toNorm(e);
+    if (roiCal) {                        // 调范围：拖上边界 / 下边界 / 整条带走
+      drag = { mode: "roi", edge: roiHit(p) || "band", start: p, orig: { ...roi } };
+      drawMasks();
+      return;
+    }
     if (barCal) {                        // 标定模式：任何拖拽都是在画这一条的框
       drag = { mode: "bar", kind: barCal, start: p, cur: p };
       drawMasks();
@@ -1430,8 +1585,28 @@
   });
 
   maskLayer.addEventListener("pointermove", (e) => {
-    if (!maskOn && !barCal) return;
+    if (!maskOn && !barCal && !roiCal) return;
     const p = toNorm(e);
+    if (roiCal) {
+      if (drag && drag.mode === "roi") {
+        const o = drag.orig;
+        if (drag.edge === "top") {
+          roi.y1 = Math.min(clamp01(p.y), o.y2 - ROI_MIN_H);
+        } else if (drag.edge === "bottom") {
+          roi.y2 = Math.max(clamp01(p.y), o.y1 + ROI_MIN_H);
+        } else {                        // 抓带子中间：整条平移，高度不变
+          const dy = Math.min(Math.max(p.y - drag.start.y, -o.y1), 1 - o.y2);
+          roi.y1 = o.y1 + dy;
+          roi.y2 = o.y2 + dy;
+        }
+        drawMasks();
+        return;
+      }
+      const h = roiHit(p);
+      maskLayer.style.cursor = (h === "top" || h === "bottom") ? "ns-resize"
+        : h === "band" ? "grab" : "crosshair";
+      return;
+    }
     if (barCal) {
       maskLayer.style.cursor = "crosshair";
       if (!drag) return;                 // 标定时不参与选区命中判断
@@ -1469,6 +1644,13 @@
     if (!drag) return;
     const d = drag;
     drag = null;
+    if (d.mode === "roi") {
+      const moved = Math.abs(roi.y1 - d.orig.y1) > 1e-4
+                 || Math.abs(roi.y2 - d.orig.y2) > 1e-4;
+      if (moved) saveRoi();             // 松手即存：后端立刻按新范围重找，能马上看到效果
+      else drawMasks();
+      return;
+    }
     if (d.mode === "bar") {
       commitBar(d);
       return;
@@ -1497,6 +1679,7 @@
       return;
     }
     if (e.key === "Escape") {
+      if (roiCal) { stopRoiCal(true); return; }
       if (barCal) { cancelBarCal(); return; }
       if (ctxMenu.classList.contains("open")) { closeCtx(); return; }
       if (editMode) exitEdit();
