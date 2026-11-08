@@ -52,6 +52,11 @@ EXTENDED = {"left", "right"}
 POT_KEYS = ("pot8", "pot9", "pot0")
 POT_LABEL = {"pot8": "8", "pot9": "9", "pot0": "0"}
 
+# 转身后等多久再攻击（毫秒）。方向键和 Ctrl 挨着发出去，游戏会在同一帧里
+# 一起处理，结果往往按「转身前」的朝向出招——看着就是朝着反方向挥刀。
+TURN_SETTLE_MS = 130
+TURN_TAP_MS = 50          # 转身时方向键按住多久：够游戏认一次转向，又不至于真的迈一步
+
 KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_SCANCODE = 0x0008
@@ -360,6 +365,8 @@ class Bot:
         self._held = 0            # 当前按住的左右方向：-1 / 0 / 1
         self._down = set()        # 当前真的按住没松的键（别对没按的键发抬起）
         self._face = 0            # 上一次转向的方向（攻击朝这一侧）
+        self._t_turn = 0.0        # 上一次转身的时刻：转完要等一帧再打，否则打的是旧朝向
+        self._was_fg = False      # 上一轮游戏是否在前台（重新拿回焦点时朝向不可信）
         self._t_pot = 0.0
         self._t_atk = 0.0
         self._t_pick = 0.0
@@ -401,6 +408,8 @@ class Bot:
         on = bool(on)
         self.update_cfg({"on": on}, save=save)
         if on:
+            self._face = 0            # 刚开：不知道角色现在朝哪，第一下必须转身
+            self._t_turn = 0.0
             self._ensure_thread()
         else:
             self.release_all()
@@ -481,12 +490,20 @@ class Bot:
         st = self.get_state() or {}
         hp = st.get("hp")
         self._set_status(hp=hp)
+        if hp is not None and hp <= 0:
+            # 死了：复活点出生时朝向右，之前的朝向记忆不可信
+            self._face = 0
 
         # 失焦：绝对不能发按键（会打进别的窗口），同时把按住的键松开
         if not st.get("fg"):
             self.release_all()
+            self._was_fg = False
             self._set_status(act="游戏不在前台", target="", err="")
             return
+        if not self._was_fg:
+            # 重新拿回焦点：这期间你可能手动走过、转过，朝向记忆作废，下一轮先转身
+            self._was_fg = True
+            self._face = 0
 
         now = time.time()
 
@@ -506,6 +523,7 @@ class Bot:
         char = st.get("char")
         if not char:
             self._set_dir(0)
+            self._face = 0            # 人都没定位到，朝向记忆一并作废
             self._set_status(act="找不到人物", target="")
             return
 
@@ -543,9 +561,17 @@ class Bot:
         # 进范围了：先站住，再转向目标，然后按节奏攻击
         self._set_dir(0)
         if self._face != side:
-            # 这个游戏只能靠按方向键转身。轻点一下，位置基本不动，但朝向会变。
-            self._tap("right" if side > 0 else "left", 45)
+            # 这个游戏只能靠按方向键转身。轻点一下位置几乎不动，但朝向会变。
+            # 转完这一轮**不打**：转身和攻击挨着发，游戏会按旧朝向出招。
+            self._tap("right" if side > 0 else "left", TURN_TAP_MS)
             self._face = side
+            self._t_turn = now
+            self._set_status(act="转身朝目标", err="")
+            return
+        if (now - self._t_turn) * 1000.0 < TURN_SETTLE_MS:
+            # 刚转完身，等游戏把朝向渲染出来再出手
+            self._set_status(act="等朝向生效")
+            return
         if (now - self._t_atk) * 1000.0 >= cfg["atk_ms"]:
             self._tap("attack")
             self._t_atk = now

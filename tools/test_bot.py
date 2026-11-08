@@ -39,6 +39,11 @@ def up_keys(c):
     return [n for n, d in c if not d and n != "pick"]
 
 
+def settle(b, ms=200):
+    """把「上一次转身」的时间往前推，模拟已经等够了（不用真 sleep）。"""
+    b._t_turn -= ms / 1000.0
+
+
 ok = 0
 fail = 0
 
@@ -53,13 +58,24 @@ def check(title, cond, detail=""):
         print(f"  FAIL {title}  {detail}")
 
 
-print("[1] 怪在攻击距离内 → 转身 + 攻击")
+print("[1] 怪在攻击距离内 → 先转身，同一帧不出手")
 b = make()
 mon = [{"name": "Stump", "box": [740, 300, 800, 360], "conf": 0.9}]   # 中心 770，dx=140
 c = step(b, m=mon)
-# 第一帧还不知道朝向，会先点一下右方向转身，再攻击
-check("先右转再攻击", down_keys(c) == ["right", "attack"], c)
-check("两个键都抬起", up_keys(c) == ["right", "attack"], c)
+# 第一帧还不知道朝向：只点一下右方向转身，Ctrl 留到下一帧
+check("第一帧只转身", down_keys(c) == ["right"], c)
+check("转身键随即抬起（不会一直按住走过去）", up_keys(c) == ["right"], c)
+check("状态是转身朝目标", b.snapshot()[1]["act"] == "转身朝目标", b.snapshot()[1])
+
+print("[1b] 刚转完身的那一帧仍然不打（等游戏把朝向渲染出来）")
+c = step(b, m=mon)
+check("这一帧不出手", "attack" not in down_keys(c), c)
+check("状态是等朝向生效", b.snapshot()[1]["act"] == "等朝向生效", b.snapshot()[1])
+
+print("[1c] 过了 130ms 才按 Ctrl")
+settle(b)
+c = step(b, m=mon)
+check("这一帧按了 Ctrl", down_keys(c) == ["attack"], c)
 check("状态是攻击", b.snapshot()[1]["act"] == "攻击", b.snapshot()[1])
 
 print("[2] 攻击冷却：紧接着再来一帧不应重复攻击")
@@ -67,10 +83,20 @@ c = step(b, m=mon)
 check("这一帧没攻击", "attack" not in down_keys(c), c)
 check("状态是等冷却", b.snapshot()[1]["act"] == "等冷却", b.snapshot()[1])
 
-print("[3] 怪在左边、距离内 → 先左转再攻击")
+print("[3] 怪在左边、距离内 → 先左转，等朝向生效再打")
 b = make()
-c = step(b, m=[{"name": "Snail", "box": [460, 300, 520, 360], "conf": 0.8}])  # 中心 490, dx=-140
-check("先点左方向再攻击", down_keys(c) == ["left", "attack"], c)
+left_mon = [{"name": "Snail", "box": [460, 300, 520, 360], "conf": 0.8}]  # 中心 490, dx=-140
+c = step(b, m=left_mon)
+check("第一帧点左方向", down_keys(c) == ["left"], c)
+settle(b)
+c = step(b, m=left_mon)
+check("第二帧才攻击", down_keys(c) == ["attack"], c)
+
+print("[3b] 重新拿回焦点后朝向记忆作废：第一帧必须重新转身")
+b = make()
+step(b, fg=False)                    # 失焦一轮
+c = step(b, m=mon)                   # 回到前台
+check("回前台第一帧先转身", down_keys(c) == ["right"], c)
 
 print("[4] 怪在范围外 → 按住右方向走过去，不攻击")
 b = make()

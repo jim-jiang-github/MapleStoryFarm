@@ -1877,9 +1877,15 @@ def draw_attack_range(img, box):
     thick = 2 if on else 1
     h, w = img.shape[:2]
     cx = (int(box[0]) + int(box[2])) // 2
-    # 名字牌在头顶，身体在它下面：带宽中心往下挪一点，看着才像「打到身前」
-    cy = int(box[3]) + 26
-    half = 34
+    # 这个游戏把名字牌挂在角色**脚下**，身体在牌子上方（实测 16px 高的牌子
+    # 对应约 50px 高的人物，脚底离牌顶 13px）。所以带宽要往上挪，不是往下。
+    # 跟着牌子高度等比缩放：换分辨率/缩放时牌子会变高变矮，人物同比例变。
+    ph = max(8, int(box[3]) - int(box[1]))
+    k = ph / 16.0
+    body_h = int(round(60 * k))        # 人物身高（实测 55~60px）
+    gap = int(round(8 * k))            # 脚底到牌顶的空隙（实测 5~13px，取中）
+    cy = int(box[1]) - gap - body_h // 2
+    half = max(12, body_h // 2)
     left, right = max(2, cx - r), min(w - 3, cx + r)
     top, bot = max(2, cy - half), min(h - 3, cy + half)
     _dash(img, (left, top), (right, top), color, thick)

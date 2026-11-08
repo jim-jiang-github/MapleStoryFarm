@@ -1,9 +1,9 @@
 {
-  "on": false,
+  "on": true,
   "hp_pct": 60.0,
   "pot_sec": 3.0,
   "pot_key": "pot8",
-  "range_px": 160.0,
+  "range_px": 110.0,
   "atk_ms": 420,
   "pick": true,
   "pick_ms": 130,
