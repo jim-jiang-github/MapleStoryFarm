@@ -17,8 +17,11 @@
   **只有游戏窗口在前台时才发按键。** 否则等于往当前获得焦点的窗口里打字/点鼠标。
   一旦失焦立刻松开所有按住的键，避免方向键卡在按下状态导致角色一直跑。
 
-按键走 SendInput + 扫描码（KEYEVENTF_SCANCODE），不是 PostMessage：
-游戏多半走 DirectInput/Raw Input，读的是扫描码；PostMessage 那种窗口消息它不看。
+按键出口有两个（见 Sender）：
+  hid  = CH9329F 硬件（串口转 USB HID），目标机收到的是真实 USB 键盘报文；
+  soft = SendInput + 扫描码（KEYEVENTF_SCANCODE），系统里带 LLKHF_INJECTED 标记。
+游戏多半走 DirectInput/Raw Input，读的是扫描码 —— PostMessage 那种窗口消息它不看；
+而带反外挂的游戏还会把带注入标记的按键认出来。所以优先硬件。
 """
 from __future__ import annotations
 
@@ -104,6 +107,122 @@ def send_key(name, down):
     return _u32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
 
 
+# ---------------- 按键出口 ----------------
+class Sender:
+    """把按键发出去，优先走硬件。
+
+    hid  = CH9329F（串口转 USB HID）：对目标机就是一个普通 USB 键盘，
+           没有注入标记，DirectInput / 反外挂都当真人操作。
+    soft = SendInput：不用额外硬件，但按键带 LLKHF_INJECTED，可能被游戏无视或识别。
+    auto = 有硬件用硬件；找不到硬件、或者运行中掉线，就回落到软件注入并记下原因。
+
+    掉线回落是刻意的：宁可降级继续跑，也不要整个脚本哑掉。面板会显示当前实际在用哪个。
+    """
+
+    RETRY_SEC = 5.0      # 硬件掉线后多久再试着连一次
+
+    def __init__(self, mode="auto", port=""):
+        self._lock = threading.Lock()
+        self.mode = mode
+        self.req_port = port or ""      # 配置里要求的串口（可能为空＝自动找）
+        self.hid = None                 # 真的连上了才有，端口号从 self.hid.port 读
+        self.err = ""
+        self._next_try = 0.0
+        self._apply(mode, self.req_port)
+
+    # ---- 硬件 ----
+    def _open_hid(self):
+        import hidinput                      # 延迟导入：没有 pyserial 也能跑软件注入
+        p = self.req_port or hidinput.find_port()
+        if not p:
+            raise hidinput.HidUnavailable("没有串口应答 CH9329（小板没插？驱动没装？）")
+        k = hidinput.HidKeyboard(p)
+        try:
+            k.info()                         # 确认对面真的是 CH9329，而不是碰巧占用的串口
+        except Exception:
+            k.close()
+            raise
+        return k
+
+    def _apply(self, mode, port):
+        with self._lock:
+            if self.hid is not None:
+                try:
+                    self.hid.close()         # 关之前会补一帧全零，别把键留在按下状态
+                except Exception:  # noqa: BLE001
+                    pass
+                self.hid = None
+            self.mode, self.req_port = mode, port or ""
+            self.err = ""
+            if mode == "soft":
+                return
+            try:
+                self.hid = self._open_hid()
+            except Exception as e:  # noqa: BLE001
+                self.err = str(e)
+                self._next_try = time.time() + self.RETRY_SEC
+
+    def _maybe_retry(self):
+        if self.mode == "soft" or self.hid is not None:
+            return
+        if time.time() < self._next_try:
+            return
+        try:
+            k = self._open_hid()
+        except Exception as e:  # noqa: BLE001
+            self.err = str(e)
+            self._next_try = time.time() + self.RETRY_SEC
+            return
+        with self._lock:
+            self.hid, self.err = k, ""
+
+    def configure(self, mode, port):
+        """切换出口。配置没变就什么都不做——不能因为改了个血线就重连串口。"""
+        port = port or ""
+        if mode == self.mode and port == self.req_port:
+            return False
+        self._apply(mode, port)
+        return True
+
+    # ---- 对外 ----
+    def __call__(self, name, down):
+        if self.hid is None:
+            self._maybe_retry()
+        k = self.hid
+        if k is not None:
+            try:
+                k(name, down)
+                return True, "hid"
+            except Exception as e:  # noqa: BLE001
+                # 硬件没了（拔线/串口被抢）。回落软件注入，并记下来让面板看得见。
+                with self._lock:
+                    self.err = f"硬件断开，已回落软件注入: {e}"
+                    try:
+                        k.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self.hid = None
+                    self._next_try = time.time() + self.RETRY_SEC
+        return send_key(name, down) >= 1, "soft"
+
+    def release_all(self):
+        k = self.hid
+        if k is not None:
+            try:
+                k.release_all()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def describe(self):
+        """面板上显示「现在到底在用哪个出口」。"""
+        if self.hid is not None:
+            return f"硬件 {self.hid.port}"
+        if self.mode == "soft":
+            return "软件注入"
+        return "软件注入（硬件不可用）"
+
+
+
 # ---------------- 配置 ----------------
 DEFAULTS = {
     "on": False,
@@ -118,7 +237,12 @@ DEFAULTS = {
     "patrol_sec": 2.5,   # 巡逻换向间隔（秒）
     "move": True,        # 怪在攻击距离外时走过去
     "dy_tol": 150,       # 纵向容差：同一条平台上的怪才算目标（像素）
+    "input": "auto",     # 按键出口：auto 优先硬件 / hid 只认硬件 / soft 只用软件注入
+    "hid_port": "",      # 硬件串口，留空自动扫描（CH9329 通常挂在 CH343 那个口上）
 }
+
+# 字符串型配置的合法取值，非法就退回默认，免得写进一个谁都不认识的模式
+ENUMS = {"pot_key": POT_KEYS, "input": ("auto", "hid", "soft")}
 
 CLAMP = {
     "hp_pct": (10.0, 95.0),
@@ -141,7 +265,10 @@ def clamp_cfg(raw):
         if isinstance(dv, bool):
             out[k] = bool(v)
         elif isinstance(dv, str):
-            out[k] = v if v in POT_KEYS else dv
+            if k == "hid_port":
+                out[k] = str(v or "").strip().upper()[:16]
+            else:
+                out[k] = v if v in ENUMS.get(k, ()) else dv
         else:
             try:
                 v = float(v)
@@ -222,8 +349,10 @@ class Bot:
 
     def __init__(self, get_state, sender=None):
         self.get_state = get_state
-        self.sender = sender or send_key
         self.cfg = load_cfg()
+        # sender 传进来时是测试用的假出口（只记录事件，不发真按键）；
+        # 不传就按配置开真出口：优先 CH9329 硬件，连不上才软件注入。
+        self.sender = sender or Sender(self.cfg["input"], self.cfg["hid_port"])
         self._lock = threading.Lock()
         self._status = {"act": "空闲", "target": "", "hp": None,
                         "atk": 0, "pot": 0, "pick": 0, "err": ""}
@@ -250,7 +379,23 @@ class Bot:
             cfg = dict(self.cfg)
         if save:
             save_cfg(cfg)
+        # 换按键出口：先把手上的键松开（硬件那边关串口时会补一帧全零，
+        # 软件注入的键得自己抬），再重连。测试用的假出口没有 configure，就跳过。
+        if hasattr(self.sender, "configure"):
+            self.release_all()
+            try:
+                self.sender.configure(cfg["input"], cfg["hid_port"])
+            except Exception as e:  # noqa: BLE001
+                self._set_status(err=f"切换输入方式失败: {e}")
         return cfg
+
+    def input_info(self):
+        """面板上「按键出口」那几行：现在实际用的是什么、为什么退到软件。"""
+        s = self.sender
+        if not hasattr(s, "describe"):
+            return {"now": "测试替身", "err": "", "mode": "test", "port": ""}
+        return {"now": s.describe(), "err": s.err, "mode": s.mode,
+                "port": s.hid.port if s.hid is not None else s.req_port}
 
     def set_on(self, on, save=True):
         on = bool(on)

@@ -10,5 +10,7 @@
   "patrol": true,
   "patrol_sec": 2.5,
   "move": true,
-  "dy_tol": 150
+  "dy_tol": 150,
+  "input": "auto",
+  "hid_port": ""
 }

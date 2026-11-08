@@ -1825,7 +1825,9 @@ def _game_foreground():
     hwnd = find_window()
     if not hwnd:
         return False
-    return ctypes.windll.user32.GetForegroundWindow() == hwnd
+    # 用 win32gui 而不是 ctypes.windll：后者默认按 c_int 返回，64 位句柄会被
+    # 截成 32 位，和 find_window() 给的整数对不上，闸门就永远判成「不在前台」。
+    return int(win32gui.GetForegroundWindow()) == int(hwnd)
 
 
 def _bot_state():
@@ -2405,6 +2407,7 @@ async def bot_get():
         hp = bar_state["values"].get("hp")
     return JSONResponse({
         "cfg": cfg, "status": st, "hp": hp,
+        "input": game_bot.input_info(),      # 现在实际用硬件还是软件注入
         "foreground": _game_foreground(),
         "has_char": has_char,
         "detect_on": det_state["enabled"],

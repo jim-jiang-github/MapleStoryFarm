@@ -154,6 +154,7 @@
     text-align: right;
   }
   .v.warn { color: var(--bad); }
+  .v .sub.warn { color: var(--bad); }
   .v.small { font-size: 11.5px; }
   .rows select {
     font: inherit; font-size: 11.5px; color: var(--text); background: var(--surface);
@@ -445,6 +446,10 @@
             <div class="row"><span class="k">条位置</span><span class="v small" id="barsrc">—</span></div>
 
             <div class="row"><span class="k">挂机</span><span class="v small" id="botAct">—</span></div>
+            <div class="row conf">
+              <span class="k">按键出口</span>
+              <span class="v"><select id="inputSel" title="硬件 = CH9329F 小板：目标机收到的是真实 USB 键盘报文，反外挂和 DirectInput 都当真人；软件 = SendInput 注入，按键带注入标记，部分游戏会无视"><option value="auto">自动</option><option value="hid">硬件</option><option value="soft">软件</option></select><b class="sub" id="inputNow">—</b></span>
+            </div>
             <div class="row conf">
               <span class="k">血线</span>
               <span class="v"><input id="hpRange" class="rng" type="range" min="10" max="95" step="5" value="60" title="血量低于这个百分比就喝药；读不到血量（血条没标定）时不会瞎按"><b id="hpVal">60%</b></span>
@@ -1875,6 +1880,9 @@
   }
 
   $("potSel").addEventListener("change", () => { setBot({ pot_key: $("potSel").value }); });
+  $("inputSel").addEventListener("change", () => {
+    setBot({ input: $("inputSel").value }).catch(() => {});
+  });
 
   async function toggleBotFlag(key, btn) {
     btn.disabled = true;
@@ -1904,6 +1912,7 @@
       $("rngRange").value = cfg.range_px;
       $("atkRange").value = cfg.atk_ms;
       $("potSel").value = cfg.pot_key;
+      $("inputSel").value = cfg.input;
       paintBotVals();
     }
     $("pickBtn").classList.toggle("on", !!cfg.pick);
@@ -1942,6 +1951,14 @@
       $("botAct").title = st.err
         || (r.detect_on ? "" : "识别没开，脚本看不到怪（只会巡逻）")
         || (r.cfg.on && !r.foreground ? "只有游戏窗口在前台时才能发按键：切回游戏就会自己继续" : "");
+
+      // 按键出口：真用上硬件才显示端口号，退到软件注入就明说（降级要看得见）
+      const inp = r.input || {};
+      const nm = inp.now || "—";
+      $("inputNow").textContent = nm.startsWith("硬件 ") ? nm.slice(3)
+        : (inp.err ? "软件·降级" : "软件");
+      $("inputNow").className = "sub" + (inp.err ? " warn" : "");
+      $("inputNow").title = inp.err || nm;
     } catch (e) {
       /* 页面断开时保持上一次显示 */
     }
