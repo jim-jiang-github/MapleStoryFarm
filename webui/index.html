@@ -57,6 +57,13 @@
     position: relative;
   }
   .tile img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  /* H.264 视频模式：<video> 顶替 <img>，两者尺寸行为一致，遮罩层坐标不用改 */
+  .tile video {
+    width: 100%; height: 100%; object-fit: contain; display: none;
+    background: #0c0a09;
+  }
+  .tile.video img { display: none; }
+  .tile.video video { display: block; }
   .masklay {
     position: absolute; left: 0; top: 0;
     cursor: crosshair;
@@ -222,6 +229,7 @@
     <div class="tileWrap" id="tileWrap">
       <div class="tile" id="tile">
         <img id="view" alt="游戏画面预览" />
+        <video id="video" muted playsinline autoplay></video>
         <div class="badge"><span class="dot" id="dot"></span><span id="badge">等待画面</span></div>
       </div>
       <!-- 遮罩层放在 tile 外面：tile 有 overflow:hidden 会把贴边的把手裁掉 -->
@@ -240,6 +248,7 @@
         <div class="row"><span class="k">采集帧率</span><span class="v" id="cfps">—</span></div>
         <div class="row"><span class="k">推送帧率</span><span class="v" id="sfps">—</span></div>
         <div class="row"><span class="k">帧延迟</span><span class="v" id="age">—</span></div>
+        <div class="row"><span class="k">视频延迟</span><span class="v" id="vlat">—</span></div>
         <div class="row"><span class="k">检测耗时</span><span class="v" id="dms">—</span></div>
         <div class="row"><span class="k">检出目标</span><span class="v" id="targets">—</span></div>
         <div class="row"><span class="k">瞬现过滤</span><span class="v" id="pending">—</span></div>
@@ -255,6 +264,7 @@
         <button id="calBtn" title="依次框出 HP / MP / EXP 条的位置（沿条拖一下就行，会自动补齐整条槽）">标定条</button>
         <button id="autoBtn" title="在画面底部自动找三条血/蓝/经验条；自动模式下换客户端、换分辨率会自己重新定位，一般不用点">自动定位</button>
         <button id="ovBtn" title="在画面上画出三条的框：白框=参与判定的 ROI，洋红框=整条槽（百分比的分母），黄竖线=填充终点">标定框: 关</button>
+        <button id="qBtn" title="外网看画面用的码率档位。网慢就选流畅；只有走穿透/逐帧时才有意义，本地直连不受影响">画质: 标准</button>
         <button id="snap">存快照</button>
       </div>
       <div class="filterrow">
@@ -290,7 +300,9 @@
      只有一条到本机的连接：一旦开 /stream 就会把整条隧道堵死。所以——非本机访问时
      一开始就用逐帧轮询，连试都不试。本地直连照旧走流，最省 CPU。 */
   const LOCAL_HOSTS = ["localhost", "127.0.0.1", "::1", "[::1]", ""];
-  let remoteMode = !LOCAL_HOSTS.includes(location.hostname);
+  // 调试用：本机打开 ?video=1 也能走 H.264 通道，不用非得先挂隧道
+  const FORCE_REMOTE = new URLSearchParams(location.search).has("video");
+  let remoteMode = FORCE_REMOTE || !LOCAL_HOSTS.includes(location.hostname);
 
   function streamURL() {
     if (paused) return "";
@@ -320,36 +332,272 @@
   }
 
   function scheduleNextPoll() {
-    if (!remoteMode || !pollOn || paused) return;
+    if (!remoteMode || videoMode || !pollOn || paused) return;
     clearTimeout(pollNext);
-    pollNext = setTimeout(() => { if (remoteMode && pollOn && !paused) view.src = snapURL(false); }, 220);
+    pollNext = setTimeout(() => {
+      if (remoteMode && pollOn && !paused && !videoMode) view.src = snapURL(false);
+    }, 220);
   }
 
-  function useRemoteMode() {
-    if (remoteMode) return;
-    remoteMode = true;
-    stopPoll();
-    startPoll();
-    $("badge").textContent = "远程模式 · 逐帧";
+  /* ========== H.264 实时视频（MSE）==========
+     外网不再一帧一张 JPEG：服务端 ffmpeg 把画面编成 H.264（只传变化的部分），
+     每 0.5 秒切一个 fMP4 分片；这里用"短请求"逐片取、喂给 MediaSource 解码播放。
+     带宽约 1.5~2.5 Mbps（逐帧 JPEG 是它的 5~10 倍），延迟约 1 秒。
+     为什么不用长连接直播：免费内网穿透会把 chunked 长连接攒一大坨再发，
+     延迟能到十几秒甚至把整条隧道堵死；短请求没有这个问题。 */
+  const videoEl = $("video");
+  const VIDEO_MIME = 'video/mp4; codecs="avc1.42E028"';
+  /* 外网带宽是硬瓶颈：实测常见家用上行 + 免费隧道只有 1 Mbps 上下，
+     所以默认 900k / 1000px / 15fps，画面在 MapleStory 这种平涂画面上够看。 */
+  const QUALITY = {
+    low:  { w: 800,  fps: 12, kb: 450,  label: "流畅" },
+    mid:  { w: 1000, fps: 15, kb: 900,  label: "标准" },
+    high: { w: 1200, fps: 20, kb: 1600, label: "高清" },
+  };
+  const QKEYS = ["low", "mid", "high"];
+  let quality = localStorage.getItem("msfarm.quality") || "mid";
+  if (!QUALITY[quality]) quality = "mid";
+  function qualitySpec() { return QUALITY[quality]; }
+  let videoMode = false, videoKill = 0, videoUrl = null, videoFails = 0, videoFrags = 0;
+  let videoPath = "";             // live=单连接直播 / seg=分片轮询（隧道缓冲时用）
+
+  function videoOK() {
+    return !!(window.MediaSource && MediaSource.isTypeSupported(VIDEO_MIME) && window.fetch);
+  }
+
+  function videoQuery() {
+    const spec = qualitySpec();
+    const q = ["w=" + spec.w, "fps=" + spec.fps, "kb=" + spec.kb];
+    if (overlayOn) q.push("bars=1");
+    return "?" + q.join("&");
+  }
+
+  function videoBadge() {
+    return overlayOn ? "H.264 · 含定位框" : "H.264 实时";
+  }
+
+  function stopVideo() {
+    videoKill++;
+    videoMode = false;
+    tile.classList.remove("video");
+    try { videoEl.pause(); } catch (e) { /* 忽略 */ }
+    videoEl.removeAttribute("src");
+    try { videoEl.load(); } catch (e) { /* 忽略 */ }
+    if (videoUrl) { URL.revokeObjectURL(videoUrl); videoUrl = null; }
+    $("vlat").textContent = "—";
+    $("vlat").className = "v";
+  }
+
+  function videoSleep(ms) { return new Promise((ok) => setTimeout(ok, ms)); }
+
+  /* 把任意长度的字节流切回一个个完整盒子：init(ftyp+moov) 和分片(moof+mdat)。
+     隧道回来的 chunk 边界是随机的，直接 appendBuffer 有概率被判成非法段，
+     所以先在本地拼完整再喂给 MSE。 */
+  function makeSplitter(onUnit) {
+    let rest = new Uint8Array(0);
+    let initParts = [], cur = null;
+    const u32 = (b, o) => ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0;
+    const tag = (b, o) => String.fromCharCode(b[o], b[o + 1], b[o + 2], b[o + 3]);
+    const join = (parts) => {
+      let n = 0;
+      parts.forEach((p) => { n += p.length; });
+      const out = new Uint8Array(n);
+      let off = 0;
+      parts.forEach((p) => { out.set(p, off); off += p.length; });
+      return out;
+    };
+    return function push(chunk) {
+      const b = new Uint8Array(rest.length + chunk.length);
+      b.set(rest, 0); b.set(chunk, rest.length);
+      let off = 0;
+      while (off + 8 <= b.length) {
+        let size = u32(b, off);
+        const typ = tag(b, off + 4);
+        let hdr = 8;
+        if (size === 1) {
+          if (off + 16 > b.length) break;
+          size = u32(b, off + 8) * 4294967296 + u32(b, off + 12);
+          hdr = 16;
+        }
+        if (size < hdr || off + size > b.length) break;    // 还没收全
+        const box = b.subarray(off, off + size);
+        off += size;
+        if (typ === "moof") {
+          cur = [box];
+        } else if (typ === "mdat") {
+          if (cur) { cur.push(box); onUnit(join(cur)); cur = null; }
+        } else if (!cur) {
+          initParts.push(box);
+          if (typ === "moov") onUnit(join(initParts));
+        }
+      }
+      rest = b.subarray(off);
+    };
+  }
+
+  async function openMSE() {
+    const ms = new MediaSource();
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    videoUrl = URL.createObjectURL(ms);
+    videoEl.src = videoUrl;
+    await new Promise((ok, fail) => {
+      const t = setTimeout(() => fail(new Error("MediaSource 打不开")), 6000);
+      ms.addEventListener("sourceopen", () => { clearTimeout(t); ok(); }, { once: true });
+    });
+    return { ms, sb: ms.addSourceBuffer(VIDEO_MIME) };
+  }
+
+  function makeFeeder(sb) {
+    const waitEnd = () => new Promise((ok) => {
+      const done = () => { sb.removeEventListener("updateend", done); ok(); };
+      sb.addEventListener("updateend", done);
+    });
+    // 追直播点：落后超过 1.2 秒就跳回最新处，别越播越落后
+    const syncLive = () => {
+      const b = videoEl.buffered;
+      if (!b.length) return;
+      const end = b.end(b.length - 1);
+      if (videoEl.paused) videoEl.play().catch(() => {});
+      if (videoEl.currentTime < end - 1.2 || videoEl.currentTime > end) {
+        videoEl.currentTime = Math.max(0, end - 0.12);
+      }
+    };
+    const feed = async (buf) => {
+      if (!buf || !buf.length) return;
+      try {
+        if (sb.updating) await waitEnd();
+        sb.appendBuffer(buf);
+        await waitEnd();
+      } catch (e) {
+        // 缓冲满了就先砍掉旧的再来一次
+        const b = sb.buffered;
+        if (b.length) {
+          try { sb.remove(b.start(0), b.end(b.length - 1)); await waitEnd(); sb.appendBuffer(buf); await waitEnd(); }
+          catch (e2) { return; }
+        } else { return; }
+      }
+      const b = sb.buffered;
+      if (b.length && b.end(b.length - 1) - b.start(0) > 8) {
+        const from = b.start(0), to = b.end(b.length - 1) - 6;
+        if (to > from) { try { sb.remove(from, to); await waitEnd(); } catch (e) { /* 忽略 */ } }
+      }
+      syncLive();
+    };
+    return feed;
+  }
+
+  function markVideoReady() {
+    if (videoMode) return;
+    videoMode = true;
+    tile.classList.add("video");
+    $("badge").textContent = videoBadge();
     $("dot").className = "dot on";
-    toast("流式传输不通（多半是内网穿透缓冲了长连接），已切成逐帧刷新");
+    layoutLayer();
+  }
+
+  async function startVideo() {
+    const kill = ++videoKill;
+    const { sb } = await openMSE();
+    if (kill !== videoKill) return;
+    const feed = makeFeeder(sb);
+    let chain = Promise.resolve();
+    // 每喂完一段就试着点亮"已出画面"（markVideoReady 是幂等的）
+    const enqueue = (buf) => {
+      chain = chain.then(() => feed(buf)).then(() => markVideoReady()).catch(() => {});
+      return chain;
+    };
+    const splitter = makeSplitter(enqueue);
+
+    // ① 先试长连接直播（最省事、延迟最低）
+    let got = false;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => { if (!got) ctrl.abort(); }, 6000);
+    try {
+      const res = await fetch("/video/live" + videoQuery(), { cache: "no-store", signal: ctrl.signal });
+      if (res.ok && res.body) {
+        const reader = res.body.getReader();
+        while (kill === videoKill && !paused) {
+          const { value, done } = await reader.read();
+          if (done || !value) break;
+          if (!got) { got = true; clearTimeout(timer); videoPath = "live"; }
+          splitter(value);
+        }
+      }
+    } catch (e) {
+      // 被 abort / 隧道把长连接憋住了
+    } finally {
+      clearTimeout(timer);
+    }
+    if (kill !== videoKill || paused) return;
+    await chain;
+    if (got) { markVideoReady(); return; }
+
+    // ② 长连接不给数据（tunnelmole 这类会整段缓冲）→ 改用短请求逐片取
+    videoPath = "seg";
+    const init = await fetch("/video/init" + videoQuery(), { cache: "no-store" });
+    if (!init.ok) throw new Error("init HTTP " + init.status);
+    let seq = parseInt(init.headers.get("X-Seq") || "0", 10) || 0;
+    await feed(new Uint8Array(await init.arrayBuffer()));
+    if (kill !== videoKill) return;
+    markVideoReady();
+    while (kill === videoKill && !paused) {
+      let r;
+      try {
+        r = await fetch("/video/seg?i=" + seq + videoQuery(), { cache: "no-store" });
+      } catch (e) {
+        await videoSleep(500);
+        continue;
+      }
+      if (kill !== videoKill) return;
+      const next = parseInt(r.headers.get("X-Next") || seq, 10);
+      if (r.status === 409) throw new Error("分片已过期");
+      if (r.status === 204) { seq = next; continue; }
+      if (!r.ok) { await videoSleep(400); continue; }
+      seq = next;
+      const age = parseInt(r.headers.get("X-Age") || "-1", 10);
+      await feed(new Uint8Array(await r.arrayBuffer()));
+      videoFrags++;
+      if (age >= 0) {
+        const b = videoEl.buffered;
+        const ahead = b.length ? Math.max(0, b.end(b.length - 1) - videoEl.currentTime) : 0;
+        const ms = age + ahead * 1000;
+        $("vlat").textContent = Math.round(ms) + " ms";
+        $("vlat").className = "v" + (ms > 2500 ? " warn" : "");
+      }
+    }
+  }
+
+  async function startRemote() {
+    if (videoOK() && videoFails < 3) {
+      try {
+        await startVideo();
+        return;
+      } catch (e) {
+        videoFails++;
+        stopVideo();
+        console.warn("H.264 起不来", e);
+        if (videoFails >= 3) toast("视频流起不来，已回退到逐帧刷新", true);
+      }
+    }
+    // 回退：一帧一张 JPEG（浏览器不支持 MSE 时）
+    startPoll();
+    view.src = snapURL(false);
+    $("badge").textContent = "远程 · 逐帧";
+    $("dot").className = "dot on";
   }
 
   function applyTransport() {
+    stopPoll();
+    stopVideo();
     if (paused) { view.src = ""; return; }
-    if (remoteMode) {
-      startPoll();
-      view.src = snapURL(false);
-      $("badge").textContent = "远程模式 · 逐帧";
-      $("dot").className = "dot on";
-    }
-    else { stopPoll(); streamStartAt = Date.now(); view.src = streamURL(); }
+    if (remoteMode) { startRemote(); }
+    else { streamStartAt = Date.now(); view.src = streamURL(); }
   }
 
   /* 看门狗：本地直连时 <img> 会不断触发 load（每帧一次）；走穿透时中间层把
      多部分流憋住，一个字节都不给 -> 5 秒内没帧就自动切逐帧模式。 */
   setInterval(() => {
-    if (paused || remoteMode) return;
+    if (paused || remoteMode || videoMode) return;
     const since = lastFrameAt || streamStartAt;
     if (since && Date.now() - since > 5000) useRemoteMode();
   }, 2000);
@@ -407,9 +655,16 @@
   }
 
   // 把遮罩层对齐到 object-fit:contain 之后的真实画面区域（去掉黑边）
+  // 画面真实尺寸：视频模式看 <video>，图片模式看 <img>
+  function frameSize() {
+    if (videoMode && videoEl.videoWidth) return [videoEl.videoWidth, videoEl.videoHeight];
+    return [view.naturalWidth || 0, view.naturalHeight || 0];
+  }
+
   function layoutLayer() {
-    if (view.naturalWidth && view.naturalHeight) {
-      lastNW = view.naturalWidth; lastNH = view.naturalHeight;
+    const [fw, fh] = frameSize();
+    if (fw && fh) {
+      lastNW = fw; lastNH = fh;
       // 画面比例变了（游戏改分辨率 / 窗口被拉伸）→ 容器比例跟着换，不留黑边
       const ar = lastNW + " / " + lastNH;
       if (tile.style.aspectRatio !== ar) tile.style.aspectRatio = ar;
@@ -769,7 +1024,7 @@
     btn.textContent = "标定框: " + (overlayOn ? "开" : "关");
     btn.classList.toggle("on", overlayOn);
     applyTransport();
-    if (!paused) $("badge").textContent = overlayOn ? "实时 · 含定位框" : "实时";
+    if (!paused && !videoMode) $("badge").textContent = overlayOn ? "实时 · 含定位框" : "实时";
   });
 
   $("calBtn").addEventListener("click", () => {
@@ -1042,12 +1297,17 @@
 
   view.addEventListener("load", () => {
     lastFrameAt = Date.now();
-    $("badge").textContent = remoteMode
-      ? "远程模式 · 逐帧"
-      : (overlayOn ? "实时 · 含定位框" : "实时");
+    if (!videoMode) {
+      $("badge").textContent = remoteMode
+        ? "远程 · 逐帧"
+        : (overlayOn ? "实时 · 含定位框" : "实时");
+    }
     layoutLayer();          // 首帧到达后才知道真实画面比例，重新贴合遮罩层
     scheduleNextPoll();
   });
+
+  videoEl.addEventListener("loadedmetadata", () => { layoutLayer(); });
+  videoEl.addEventListener("resize", () => { layoutLayer(); });
 
   view.addEventListener("error", () => {
     scheduleNextPoll();     // 远端那张没拿到也要继续排下一张，别卡死
@@ -1059,6 +1319,20 @@
     applyTransport();
     if (paused) { $("badge").textContent = "已暂停"; $("dot").className = "dot"; }
   });
+
+  function renderQualityBtn() {
+    $("qBtn").textContent = "画质: " + qualitySpec().label;
+    $("qBtn").className = quality === "high" ? "on" : "";
+  }
+
+  $("qBtn").addEventListener("click", () => {
+    quality = QKEYS[(QKEYS.indexOf(quality) + 1) % QKEYS.length];
+    localStorage.setItem("msfarm.quality", quality);
+    renderQualityBtn();
+    applyTransport();          // 换档要重建编码流，直接从最新画面重新开始
+    toast("画质: " + qualitySpec().label + "（约 " + qualitySpec().kb + " kbps）");
+  });
+  renderQualityBtn();
 
   $("snap").addEventListener("click", () => {
     const a = document.createElement("a");
@@ -1147,12 +1421,12 @@
       $("modeBtn").className = s.mode === "accurate" ? "on" : "";
       if (maskOn !== s.mask) { maskOn = s.mask; updateMaskUI(); }   // 与后端保持一致
       // 游戏窗口改尺寸 / 改分辨率后，画面比例跟着变，遮罩层要重新贴合
-      if (view.naturalWidth && (view.naturalWidth !== lastNW || view.naturalHeight !== lastNH)) {
-        layoutLayer();
-      }
+      const [fw, fh] = frameSize();
+      if (fw && (fw !== lastNW || fh !== lastNH)) layoutLayer();
       if (!paused) {
-        $("badge").textContent = s.detect_loading ? "模型加载中"
-          : (s.detect_enabled ? "识别中" : (found ? "实时" : "无信号"));
+        $("badge").textContent = videoMode ? videoBadge()
+          : (s.detect_loading ? "模型加载中"
+            : (s.detect_enabled ? "识别中" : (found ? "实时" : "无信号")));
       }
     } catch (e) {
       $("dot").className = "dot off";

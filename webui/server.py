@@ -26,6 +26,8 @@ from fastapi import Body, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
+import video as video_mod
+
 ctypes.windll.user32.SetProcessDPIAware()
 
 SCREENSHOT = getattr(mss, "MSS", None) or getattr(mss, "mss")
@@ -1266,6 +1268,104 @@ def encode(frame, width=None, quality=JPEG_QUALITY):
         frame = cv2.resize(frame, (width, int(h * width / w)), interpolation=cv2.INTER_AREA)
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return buf.tobytes() if ok else b""
+
+
+# ---------------- 实时视频（H.264 / MSE） ----------------
+# 外网访问不再一帧一张 JPEG：ffmpeg 编 H.264（只传变化的部分），每 0.5s 切一个 fMP4
+# 分片，前端用"短请求"逐片取、喂给 MediaSource。带宽约 2 Mbps，延迟 ~1 秒；
+# 长连接直播在免费穿透上会被缓冲成十几秒，短请求没有这个问题。
+def _video_frame():
+    with det_lock:
+        ann = det_state["annotated"] if det_state["enabled"] else None
+    return ann if ann is not None else grabber.snapshot()
+
+
+video_hub = video_mod.VideoHub(_video_frame, overlay=bars_overlay_frame)
+
+
+def _video_stream(bars, w, fps, kb=0):
+    st = video_hub.get(width=(w or None), fps=(fps or None), bars=bool(bars),
+                       bitrate=(f"{kb}k" if kb else None))
+    st.touch()
+    return st
+
+
+@app.get("/video/info")
+async def video_info(bars: int = 0, w: int = 0, fps: int = 0, kb: int = 0):
+    st = _video_stream(bars, w, fps, kb)
+    info = st.info()
+    info["available"] = bool(video_mod.ffmpeg_exe())
+    return JSONResponse(info)
+
+
+@app.get("/video/init")
+async def video_init(bars: int = 0, w: int = 0, fps: int = 0, kb: int = 0):
+    """初始化段（ftyp+moov，几百字节）。客户端拿它建 SourceBuffer，X-Seq 是起始分片号。"""
+    st = _video_stream(bars, w, fps, kb)
+    t0 = time.time()
+    while not st.init and not st.stopped.is_set() and time.time() - t0 < 6:
+        await asyncio.sleep(0.05)
+    if not st.init:
+        return Response((st.error or "视频流未就绪").encode("utf-8"),
+                        status_code=503, media_type="text/plain; charset=utf-8")
+    # 从最新一片开始：新连上的人不需要把积压的旧画面补完，直接看现在
+    head = (st.frags[-1][0] + 1) if st.frags else st.seq
+    return Response(st.init, media_type="video/mp4",
+                    headers={"Cache-Control": "no-store",
+                             "X-Seq": str(head), "X-Oldest": str(st.frags[0][0] if st.frags else st.seq),
+                             "X-Codec": video_mod.VIDEO_MIME})
+
+
+@app.get("/video/seg")
+async def video_seg(i: int = 0, bars: int = 0, w: int = 0, fps: int = 0, kb: int = 0,
+                     wait: float = 2.0):
+    """取第 i 片起已经生成的分片。没有就挂最多 wait 秒（短连接，隧道能过）。
+
+    返回 204 = 暂时没新片，按 X-Next 重试；409 = 客户端落后太多，分片已被回收，重连。
+    """
+    st = _video_stream(bars, w, fps, kb)
+    nxt, blob = await asyncio.to_thread(st.get_frags, i, min(max(wait, 0.1), 4.0))
+    if nxt is None:
+        return Response(status_code=409, headers={"X-Resync": "1", "Cache-Control": "no-store"})
+    headers = {"X-Next": str(nxt), "Cache-Control": "no-store"}
+    if st.last_ts:
+        # 最新一片"出炉"到现在多久（前端加上播放缓冲就是端到端延迟）
+        headers["X-Age"] = str(int((time.time() - st.last_ts) * 1000))
+    if not blob:
+        return Response(status_code=204, headers=headers)
+    return Response(blob, media_type="video/mp4", headers=headers)
+
+
+@app.get("/video/live")
+async def video_live(bars: int = 0, w: int = 0, fps: int = 0, kb: int = 0):
+    """单条长连接直播：init + 之后所有分片。
+
+    隧道支持流式（cloudflared / 直连 / 局域网）时走这条最省事，延迟最低；
+    像 tunnelmole 这种会把长连接攒一大坨再发的，前端探不到数据会自动改用 /video/seg。
+    """
+    st = _video_stream(bars, w, fps, kb)
+
+    async def gen():
+        t0 = time.time()
+        while not st.init and not st.stopped.is_set() and time.time() - t0 < 6:
+            await asyncio.sleep(0.05)
+        if not st.init:
+            return
+        yield st.init
+        seq = st.frags[-1][0] + 1 if st.frags else st.seq
+        while not st.stopped.is_set():
+            nxt, blob = await asyncio.to_thread(st.get_frags, seq, 3.0)
+            if nxt is None:
+                break
+            seq = nxt
+            if blob:
+                yield blob
+            else:
+                await asyncio.sleep(0.05)
+
+    return StreamingResponse(gen(), media_type="video/mp4",
+                             headers={"Cache-Control": "no-store",
+                                      "X-Accel-Buffering": "no"})
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -36,9 +36,10 @@ start "capture-preview" /min "%PICKED%" "webui\server.py" --port 8765
 timeout /t 4 >nul
 
 echo [2/2] Starting tunnel (no signup, random public URL) ...
-echo       When it prints the https URL, share:   URL/?k=%PREVIEW_TOKEN%
+echo       It will print the FINAL share link (already carrying ?k=token) and
+echo       copy it to your clipboard. Just paste that link.
 echo.
-npx -y tunnelmole 8765
+"%PICKED%" "tools\tunnel.py" 8765
 
 echo.
 echo Tunnel stopped. The minimized "capture-preview" server window is still running;
