@@ -5,6 +5,7 @@ Run:  python webui/server.py
 Open: http://127.0.0.1:8765
 """
 import asyncio
+import base64
 import collections
 import ctypes
 import json
@@ -1178,6 +1179,284 @@ def pick_visible(tracks, shown, now, show_conf, show_hits, prev_tid=None):
     return vis
 
 
+# ---------------- 人物定位（名字牌模板匹配） ----------------
+# 2D 客户端里名字牌是叠在画面上的 UI 文本，像素尺寸不随分辨率变（换分辨率它还是
+# 那么高），所以拿 WebUI 上框出来的一小块名字牌当模板，用 TM_CCOEFF_NORMED 在
+# 整幅画面里找最强响应就能定位人物——比找人形轮廓稳得多，也不吃模型。
+#
+# 全画面直搜 1366x768 要 15~25ms，所以分两级：半分辨率粗搜（~4ms）+ 命中点附近
+# 按原尺寸精修（~2ms）。跑在独立线程里按 15fps 走，不占检测线程的推理时间。
+CHAR_TPL_FILE = Path(__file__).with_name("chartpl.png")
+CHAR_CONF_FILE = Path(__file__).with_name("charconf.json")
+CHAR_THRESH_DEFAULT = 0.75
+CHAR_MIN_W, CHAR_MIN_H = 24, 8      # 比这还小的框多半是框歪了
+CHAR_LOST_AFTER = 0.6               # 超过这么久没命中就不再画标记（秒）
+CHAR_FPS = 15
+
+char_lock = threading.Lock()
+char_state = {
+    "enabled": True,
+    "thresh": CHAR_THRESH_DEFAULT,
+    "tpl": None,          # 灰度模板（原尺寸，与截图像素一一对应）
+    "tpl_half": None,     # 半尺寸，粗搜用
+    "size": (0, 0),
+    "box": None,          # 最近一次命中的框 [x1,y1,x2,y2]（全分辨率）
+    "dir": "below",       # 人物在模板的下方(below)还是上方(above)，决定箭头方向
+    "scale": 1.0,         # 匹配用的缩放（上传的图和实际画面像素尺度不一致时自动标定）
+    "score": 0.0,
+    "ts": 0.0,
+    "misses": 0,
+    "error": "",
+}
+char_started = [False]
+
+
+def _clamp_thresh(v) -> float:
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return CHAR_THRESH_DEFAULT
+    return round(min(0.95, max(0.30, v)), 2)
+
+
+def _save_char_conf():
+    try:
+        CHAR_CONF_FILE.write_text(json.dumps(
+            {"enabled": char_state["enabled"], "thresh": char_state["thresh"],
+             "dir": char_state["dir"]}
+        ), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_char_conf():
+    try:
+        raw = json.loads(CHAR_CONF_FILE.read_text("utf-8"))
+    except Exception:
+        raw = {}
+    char_state["enabled"] = bool(raw.get("enabled", True))
+    char_state["thresh"] = _clamp_thresh(raw.get("thresh", CHAR_THRESH_DEFAULT))
+    char_state["dir"] = "above" if raw.get("dir") == "above" else "below"
+
+
+def _set_char_tpl(gray):
+    """装上模板（灰度图）。半尺寸那份是粗搜用的，一起算好省得每帧 resize 模板。"""
+    h, w = gray.shape[:2]
+    half = cv2.resize(gray, (max(8, w // 2), max(5, h // 2)), interpolation=cv2.INTER_AREA)
+    with char_lock:
+        char_state["tpl"] = gray
+        char_state["tpl_half"] = half
+        char_state["size"] = (w, h)
+        char_state["box"] = None
+        char_state["score"] = 0.0
+        char_state["misses"] = 0
+        char_state["error"] = ""
+
+
+def _gray_from_image(raw):
+    """bytes -> 灰度图。解码失败返回 None。"""
+    buf = np.frombuffer(raw, dtype=np.uint8)
+    img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    if img is None or img.size == 0:
+        return None
+    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+
+def _decode_data_url(s):
+    """data:image/png;base64,xxx -> bytes。只认 data URL，避免读任意路径。"""
+    if not isinstance(s, str) or "," not in s:
+        return None
+    head, b64 = s.split(",", 1)
+    if "base64" not in head:
+        return None
+    try:
+        return base64.b64decode(b64)
+    except Exception:
+        return None
+
+
+def _char_scale_sweep(gray, frame_gray):
+    """在 0.25~1.60 里试一遍缩放，找模板和画面像素尺度最匹配的那个。
+
+    上传的名字牌可能来自别的分辨率截图（4K 截图裁的、手机截图裁的），像素尺度
+    和当前画面不一定 1:1。先在半分辨率上粗扫一遍定尺度，之后每帧只按这个尺度
+    匹配、不再多尺度烧 CPU。返回 (best_score, best_scale)。
+    """
+    H, W = frame_gray.shape[:2]
+    small = cv2.resize(frame_gray, (W // 2, H // 2), interpolation=cv2.INTER_AREA)
+    sh, sw = small.shape[:2]
+    th, tw = gray.shape[:2]
+    best = (-1.0, 1.0)
+    for sc in np.arange(0.25, 1.61, 0.05):
+        w, h = int(round(tw * sc / 2)), int(round(th * sc / 2))
+        if w < 6 or h < 4 or w >= sw or h >= sh:
+            continue
+        t = cv2.resize(gray, (w, h), interpolation=cv2.INTER_AREA)
+        r = cv2.matchTemplate(small, t, cv2.TM_CCOEFF_NORMED)
+        _, mx, _, _ = cv2.minMaxLoc(r)
+        if mx > best[0]:
+            best = (float(mx), round(float(sc), 2))
+    return best
+
+
+def _install_char_tpl(gray):
+    """装模板并顺手标定尺度：返回 (score, scale)。"""
+    frame = grabber.snapshot()
+    fg = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    score, scale = _char_scale_sweep(gray, fg)
+    if score < 0.35:          # 画面上没找到这块图，扫出来的尺度就是噪声，别信
+        scale = 1.0
+    if scale != 1.0:          # 按标定出来的尺度重采样，之后每帧都是 1:1
+        gray = cv2.resize(gray, (max(8, int(round(gray.shape[1] * scale))),
+                                 max(5, int(round(gray.shape[0] * scale)))),
+                          interpolation=cv2.INTER_AREA)
+    _set_char_tpl(gray)
+    with char_lock:
+        char_state["scale"] = scale
+    # 立刻在整幅画面上跑一次，命中就把标记点上，前端马上能看到
+    box, sc2 = find_char(frame)
+    with char_lock:
+        char_state["score"] = round(sc2, 3)
+        if sc2 >= char_state["thresh"]:
+            char_state["box"] = box
+            char_state["ts"] = time.time()
+            char_state["misses"] = 0
+    ensure_char_thread()
+    return sc2, scale
+
+
+def load_char_tpl():
+    if not CHAR_TPL_FILE.exists():
+        return
+    try:
+        buf = np.frombuffer(CHAR_TPL_FILE.read_bytes(), dtype=np.uint8)
+        img = cv2.imdecode(buf, cv2.IMREAD_GRAYSCALE)
+    except Exception:
+        img = None
+    if img is not None and img.size and img.shape[1] >= CHAR_MIN_W:
+        _set_char_tpl(img)
+
+
+def find_char(frame):
+    """在当前画面里找名字牌。返回 (box, score)；box 为全分辨率像素坐标。"""
+    with char_lock:
+        tpl, tpl_half = char_state["tpl"], char_state["tpl_half"]
+    if tpl is None:
+        return None, 0.0
+    g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    H, W = g.shape[:2]
+    th, tw = tpl.shape[:2]
+    if th >= H or tw >= W:
+        return None, 0.0
+
+    # 1) 半分辨率粗搜：把「在哪儿」先定到 ±4px 级别
+    cx = cy = 0
+    best = -1.0
+    if tpl_half.shape[0] < H // 2 and tpl_half.shape[1] < W // 2:
+        small = cv2.resize(g, (W // 2, H // 2), interpolation=cv2.INTER_AREA)
+        r = cv2.matchTemplate(small, tpl_half, cv2.TM_CCOEFF_NORMED)
+        _, best, _, loc = cv2.minMaxLoc(r)
+        cx, cy = loc[0] * 2, loc[1] * 2
+
+    # 2) 全分辨率精修：只在粗命中点附近 ±10px 搜，拿到准确的框和分数
+    m = 10
+    x1, y1 = max(0, cx - m), max(0, cy - m)
+    x2, y2 = min(W, cx + tw + m), min(H, cy + th + m)
+    roi = g[y1:y2, x1:x2]
+    if roi.shape[0] >= th and roi.shape[1] >= tw:
+        r2 = cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED)
+        _, score, _, loc2 = cv2.minMaxLoc(r2)
+        return ([x1 + loc2[0], y1 + loc2[1], x1 + loc2[0] + tw, y1 + loc2[1] + th],
+                float(score))
+    return [cx, cy, cx + tw, cy + th], float(best)
+
+
+def char_loop():
+    """独立线程：按 CHAR_FPS 找人，结果写进 char_state 供画面叠加用。"""
+    while True:
+        with char_lock:
+            enabled, has_tpl = char_state["enabled"], char_state["tpl"] is not None
+        if not enabled or not has_tpl or not grabber.window_found:
+            time.sleep(0.25)
+            continue
+        frame = grabber.snapshot()
+        try:
+            box, score = find_char(frame)
+        except Exception as e:  # noqa: BLE001
+            with char_lock:
+                char_state["error"] = f"{type(e).__name__}: {e}"
+            time.sleep(0.5)
+            continue
+        with char_lock:
+            char_state["error"] = ""
+            char_state["score"] = round(score, 3)
+            if score >= char_state["thresh"]:
+                char_state["box"] = box
+                char_state["ts"] = time.time()
+                char_state["misses"] = 0
+            else:
+                char_state["misses"] += 1
+                if char_state["misses"] > 3:      # 连续几帧没命中就当丢了
+                    char_state["box"] = None
+                    char_state["ts"] = 0.0
+        time.sleep(1.0 / CHAR_FPS)
+
+
+CHAR_COLOR = (255, 200, 0)      # BGR 天蓝，和识别框（绿/红/怪种色）都区分得开
+
+
+def overlay_char(img):
+    """把人物标记画到画面上（原地修改并返回）。名字牌下面那条竖线指向人物本体。"""
+    with char_lock:
+        box = char_state["box"]
+        score = char_state["score"]
+        ts = char_state["ts"]
+        char_dir = char_state["dir"]
+    if box is None or ts <= 0 or time.time() - ts > CHAR_LOST_AFTER:
+        return img
+    x1, y1, x2, y2 = (int(v) for v in box)
+    h, w = img.shape[:2]
+    x1, y1 = max(1, x1), max(1, y1)
+    x2, y2 = min(w - 2, x2), min(h - 2, y2)
+    cv2.rectangle(img, (x1 - 4, y1 - 3), (x2 + 4, y2 + 3), CHAR_COLOR, 2)
+    cx = (x1 + x2) // 2
+    ph = max(8, y2 - y1)
+    # 指示线长度：名字牌很扁（~16px）时要伸到人物身上；框本身已经包含身体
+    # （比如框的是头顶/帽子）时就短一点，别拖一条长尾巴。按牌高算再夹到 14~40px。
+    seg = min(40, max(14, int(ph * 1.7)))
+    below = char_dir != "above"
+    if below:                      # 人物在模板下方：从框底往下指
+        tip = min(h - 3, y2 + 6 + seg)
+        cv2.line(img, (cx, y2 + 6), (cx, tip - 7), CHAR_COLOR, 2, cv2.LINE_AA)
+        cv2.fillPoly(img, [np.array([[cx - 6, tip - 8], [cx + 6, tip - 8], [cx, tip]],
+                                    np.int32)], CHAR_COLOR, cv2.LINE_AA)
+    else:                          # 人物在模板上方：从框顶往上指
+        tip = max(3, y1 - 6 - seg)
+        cv2.line(img, (cx, y1 - 6), (cx, tip + 7), CHAR_COLOR, 2, cv2.LINE_AA)
+        cv2.fillPoly(img, [np.array([[cx - 6, tip + 8], [cx + 6, tip + 8], [cx, tip]],
+                                    np.int32)], CHAR_COLOR, cv2.LINE_AA)
+    tag = f"ME {score:.2f}"
+    (tw_, th_), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+    # 标签放在箭头反方向那一侧，别压在指示线上
+    ty = (y2 + th_ + 8) if not below else (y1 - 6 if y1 - 6 > th_ else y2 + th_ + 8)
+    cv2.rectangle(img, (x1 - 4, ty - th_ - 4), (x1 - 4 + tw_ + 4, ty + 2), TXT_BG, -1)
+    cv2.putText(img, tag, (x1 - 2, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                CHAR_COLOR, 1, cv2.LINE_AA)
+    return img
+
+
+def ensure_char_thread():
+    if not char_started[0]:
+        char_started[0] = True
+        threading.Thread(target=char_loop, daemon=True).start()
+
+
+_load_char_conf()
+load_char_tpl()
+if char_state["tpl"] is not None:
+    ensure_char_thread()
+
+
 def detect_loop():
     import warnings
     warnings.filterwarnings("ignore")
@@ -1423,6 +1702,17 @@ async def stats():
         "mask": det_state["mask"],
         "bars": dict(bar_state["values"]),
         "bars_fps": round(bar_state["fps"], 1),
+        "char": {
+            "has_tpl": char_state["tpl"] is not None,
+            "enabled": char_state["enabled"],
+            "thresh": char_state["thresh"],
+            "score": char_state["score"],
+            "age": (round(time.time() - char_state["ts"], 2)
+                    if char_state["ts"] else None),
+            "size": list(char_state["size"]),
+            "dir": char_state["dir"],
+            "scale": char_state["scale"],
+        },
     })
 
 
@@ -1680,6 +1970,141 @@ async def window_focus():
     return JSONResponse({"ok": ok, "msg": msg, "window_found": grabber.window_found})
 
 
+# ---------------- 人物定位接口 ----------------
+@app.get("/api/char")
+async def char_status():
+    with char_lock:
+        ts = char_state["ts"]
+        return JSONResponse({
+            "has_tpl": char_state["tpl"] is not None,
+            "enabled": char_state["enabled"],
+            "thresh": char_state["thresh"],
+            "score": char_state["score"],
+            "box": char_state["box"],
+            "age": round(time.time() - ts, 2) if ts else None,
+            "size": list(char_state["size"]),
+            "dir": char_state["dir"],
+            "scale": char_state["scale"],
+            "error": char_state["error"],
+        })
+
+
+@app.post("/api/char/template")
+async def char_set_template(payload: dict = Body(...)):
+    """用前端框出来的归一化矩形，从**当前原始画面**裁一块当名字牌模板。
+
+    注意是从原始帧裁、不是从推流画面裁：推流画面叠了识别框和血条标注，
+    裁进来模板就把那些线也一起认了。
+    """
+    try:
+        x1, y1, x2, y2 = (float(payload[k]) for k in ("x1", "y1", "x2", "y2"))
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse({"ok": False, "msg": "坐标不合法"}, status_code=400)
+    frame = grabber.snapshot()
+    h, w = frame.shape[:2]
+    px1, px2 = sorted((int(round(x1 * w)), int(round(x2 * w))))
+    py1, py2 = sorted((int(round(y1 * h)), int(round(y2 * h))))
+    px1, py1 = max(0, px1), max(0, py1)
+    px2, py2 = min(w, px2), min(h, py2)
+    cw, ch = px2 - px1, py2 - py1
+    if cw < CHAR_MIN_W or ch < CHAR_MIN_H:
+        return JSONResponse({"ok": False,
+                             "msg": f"框太小（{cw}×{ch}），至少要 {CHAR_MIN_W}×{CHAR_MIN_H}"},
+                            status_code=400)
+    gray = cv2.cvtColor(frame[py1:py2, px1:px2], cv2.COLOR_BGR2GRAY)
+    ok, buf = cv2.imencode(".png", gray)
+    if not ok:
+        return JSONResponse({"ok": False, "msg": "模板编码失败"}, status_code=500)
+    CHAR_TPL_FILE.write_bytes(buf.tobytes())
+    score, scale = _install_char_tpl(gray)
+    return JSONResponse({"ok": True, "size": [cw, ch], "score": round(score, 3),
+                         "scale": scale, "thresh": char_state["thresh"]})
+
+
+@app.post("/api/char/upload")
+async def char_upload(payload: dict = Body(...)):
+    """上传一张人物名字牌的小图当模板（前端传 data URL，不用 multipart 依赖）。
+
+    收到图之后会在当前画面上扫一遍缩放尺度（截图可能来自别的分辨率），把模板
+    重采样到和画面一致的像素尺度，再跑一次匹配，命中就立刻把标记点上。
+    """
+    raw = _decode_data_url(payload.get("image"))
+    if not raw:
+        return JSONResponse({"ok": False, "msg": "图片数据不合法"}, status_code=400)
+    gray = await asyncio.to_thread(_gray_from_image, raw)
+    if gray is None:
+        return JSONResponse({"ok": False, "msg": "这张图解析不了（要 png/jpg/webp）"},
+                            status_code=400)
+    h, w = gray.shape[:2]
+    if w < CHAR_MIN_W or h < CHAR_MIN_H:
+        return JSONResponse({"ok": False,
+                             "msg": f"图太小（{w}×{h}），至少要 {CHAR_MIN_W}×{CHAR_MIN_H}"},
+                            status_code=400)
+    if w > 600:                      # 上传整张截图也能用，先缩一下省内存
+        gray = cv2.resize(gray, (600, max(8, int(round(h * 600 / w)))),
+                          interpolation=cv2.INTER_AREA)
+        h, w = gray.shape[:2]
+    ok, buf = cv2.imencode(".png", gray)
+    if not ok:
+        return JSONResponse({"ok": False, "msg": "模板编码失败"}, status_code=500)
+    CHAR_TPL_FILE.write_bytes(buf.tobytes())
+    score, scale = await asyncio.to_thread(_install_char_tpl, gray)
+    return JSONResponse({"ok": True, "size": [w, h], "score": round(score, 3),
+                         "scale": scale, "thresh": char_state["thresh"]})
+
+
+@app.delete("/api/char/template")
+async def char_del_template():
+    try:
+        CHAR_TPL_FILE.unlink()
+    except FileNotFoundError:
+        pass
+    with char_lock:
+        char_state["tpl"] = None
+        char_state["tpl_half"] = None
+        char_state["size"] = (0, 0)
+        char_state["box"] = None
+        char_state["score"] = 0.0
+        char_state["ts"] = 0.0
+        char_state["misses"] = 0
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/char/template.png")
+async def char_tpl_png():
+    if not CHAR_TPL_FILE.exists():
+        return Response(status_code=404)
+    return Response(CHAR_TPL_FILE.read_bytes(), media_type="image/png",
+                    headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/char/conf")
+async def char_conf(v: float = 0, enabled: int = -1, dir: str = ""):
+    """人物匹配阈值 / 开关 / 箭头方向。
+
+    v    阈值（0.30~0.95）
+    enabled  0/1 才改开关
+    dir  below = 人物在模板下方（名字牌在头顶时的常规情况）；above = 人物在上方
+         （有的客户端把名字画在脚下，这时候箭头要朝上）
+    """
+    changed = False
+    if v:
+        char_state["thresh"] = _clamp_thresh(v)
+        changed = True
+    if enabled in (0, 1):
+        char_state["enabled"] = bool(enabled)
+        changed = True
+    if dir in ("above", "below"):
+        char_state["dir"] = dir
+        changed = True
+    if changed:
+        _save_char_conf()
+        with char_lock:
+            char_state["misses"] = 0
+    return JSONResponse({"thresh": char_state["thresh"], "enabled": char_state["enabled"],
+                         "dir": char_state["dir"]})
+
+
 @app.get("/api/snapshot")
 async def snapshot(focus: int = 0, fresh: int = 1, bars: int = 0,
                    w: int = 0, q: int = 0):
@@ -1698,6 +2123,7 @@ async def snapshot(focus: int = 0, fresh: int = 1, bars: int = 0,
     frame = grabber.snapshot()
     if bars:
         frame = await asyncio.to_thread(bars_overlay_frame, frame)
+    frame = overlay_char(frame)         # 人物标记跟识别开关无关，始终画（有模板才画）
     jpg = encode(frame, width=(w or None), quality=(q or 92))
     # 响应头只能是 latin-1，所以这里放英文状态；中文说明走 /api/window/focus 的 JSON
     state = "skip" if not focus else ("ok" if focus_ok else "fail")
@@ -1724,7 +2150,12 @@ async def stream(bars: int = 0, w: int = 0, q: int = 0):
         while True:
             with det_lock:
                 ann = det_state["annotated"] if det_state["enabled"] else None
-            src = ann if ann is not None else grabber.snapshot()
+            if ann is not None:
+                # annotated 是多帧共享的，要画人物标记得先复制一份，否则多个客户端会叠画
+                src = ann.copy() if char_state["box"] is not None else ann
+            else:
+                src = grabber.snapshot()      # 已经是副本
+            src = overlay_char(src)
             if bars:
                 src = await asyncio.to_thread(bars_overlay_frame, src)
             # 编解码放线程：cv2 会释放 GIL，别把事件循环堵住（否则血条/统计请求排队）

@@ -230,3 +230,7 @@ model_*_openvino_model/
 # 运行期产物
 debug.log
 webui/masks.json.tmp
+# 人物定位：模板是这台机器框/传出来的，配置是本机调的门限，都不入库
+webui/chartpl.png
+webui/charconf.json
+/.tmpchk
