@@ -1860,16 +1860,39 @@
 
   async function setBot(patch) {
     botLockUntil = Date.now() + 900;        // 这段时间内别让轮询把控件拽回去
-    const r = await (await fetch("/api/bot/set", {
+    const r = await botFetch("/api/bot/set", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(patch), cache: "no-store" })).json();
+      body: JSON.stringify(patch) });
     return r.cfg;
+  }
+
+  /* 挂机接口的统一入口。存在的意义只有一个：后端跑的还是旧代码时（接口 404），
+     报一句人话，而不是 "Cannot read properties of undefined (reading 'on')"。
+     index.html 是每次从磁盘读的，页面会先于服务进程更新，这个错位很容易撞上。 */
+  async function botFetch(url, opts) {
+    const res = await fetch(url, Object.assign({ cache: "no-store" }, opts || {}));
+    const body = await res.json().catch(() => null);
+    if (res.status === 404) {
+      throw new Error("服务端没有这个接口，说明它还在跑旧代码 —— 重启一次服务再刷新页面");
+    }
+    if (!res.ok || !body) {
+      throw new Error(`服务端返回 ${res.status}` + (body && body.detail ? ` · ${body.detail}` : ""));
+    }
+    return body;
+  }
+
+  let botErrAt = 0;
+  function botFail(e) {
+    // 拖滑块会连发请求，同样的错别刷屏
+    if (Date.now() - botErrAt < 4000) return;
+    botErrAt = Date.now();
+    toast("挂机设置失败：" + (e && e.message ? e.message : e));
   }
 
   for (const k in botUI) {
     const [inp, , key] = botUI[k];
     let timer = null;
-    const send = () => { setBot({ [key]: Number(inp.value) }).catch(() => {}); };
+    const send = () => { setBot({ [key]: Number(inp.value) }).catch(botFail); };
     inp.addEventListener("input", () => {
       paintBotVals();
       botLockUntil = Date.now() + 900;
@@ -1879,9 +1902,11 @@
     inp.addEventListener("change", () => { clearTimeout(timer); send(); });
   }
 
-  $("potSel").addEventListener("change", () => { setBot({ pot_key: $("potSel").value }); });
+  $("potSel").addEventListener("change", () => {
+    setBot({ pot_key: $("potSel").value }).catch(botFail);
+  });
   $("inputSel").addEventListener("change", () => {
-    setBot({ input: $("inputSel").value }).catch(() => {});
+    setBot({ input: $("inputSel").value }).catch(botFail);
   });
 
   async function toggleBotFlag(key, btn) {
@@ -1892,7 +1917,7 @@
       btn.classList.toggle("on", on);
       btn.textContent = on ? "开" : "关";
     } catch (e) {
-      toast("设置失败：" + e);
+      botFail(e);
     } finally {
       btn.disabled = false;
     }
@@ -1925,12 +1950,12 @@
   $("botBtn").addEventListener("click", async () => {
     $("botBtn").disabled = true;
     try {
-      const r = await (await fetch("/api/bot/toggle", { method: "POST", cache: "no-store" })).json();
+      const r = await botFetch("/api/bot/toggle", { method: "POST" });
       paintBotBtn(r.cfg);
       toast(r.on ? "挂机已开启：血低喝药 · 打范围内的怪 · 全程按 Z（记得把游戏切回前台）"
                  : "挂机已关闭，按键已全部松开");
     } catch (e) {
-      toast("切换失败：" + e);
+      toast("切换失败：" + (e && e.message ? e.message : e));
     } finally {
       $("botBtn").disabled = false;
     }
@@ -1938,7 +1963,15 @@
 
   async function pollBot() {
     try {
-      const r = await (await fetch("/api/bot", { cache: "no-store" })).json();
+      const res = await fetch("/api/bot", { cache: "no-store" });
+      if (!res.ok) {
+        // 接口 404 = 服务进程还是旧代码（页面已经更新了，进程没重启）
+        $("botAct").textContent = res.status === 404 ? "服务在跑旧代码，重启后可用" : `接口 ${res.status}`;
+        $("botAct").className = "v small warn";
+        return;
+      }
+      const r = await res.json();
+      if (!r.cfg) return;
       paintBotCfg(r.cfg);
       const st = r.status || {};
       let txt = st.act || "—";
