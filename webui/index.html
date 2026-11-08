@@ -229,7 +229,7 @@
     <div class="tileWrap" id="tileWrap">
       <div class="tile" id="tile">
         <img id="view" alt="游戏画面预览" />
-        <video id="video" muted playsinline autoplay></video>
+        <video id="video" muted playsinline webkit-playsinline x5-playsinline autoplay></video>
         <div class="badge"><span class="dot" id="dot"></span><span id="badge">等待画面</span></div>
       </div>
       <!-- 遮罩层放在 tile 外面：tile 有 overflow:hidden 会把贴边的把手裁掉 -->
@@ -249,6 +249,7 @@
         <div class="row"><span class="k">推送帧率</span><span class="v" id="sfps">—</span></div>
         <div class="row"><span class="k">帧延迟</span><span class="v" id="age">—</span></div>
         <div class="row"><span class="k">视频延迟</span><span class="v" id="vlat">—</span></div>
+        <div class="row"><span class="k">画面通道</span><span class="v small" id="vpath">—</span></div>
         <div class="row"><span class="k">检测耗时</span><span class="v" id="dms">—</span></div>
         <div class="row"><span class="k">检出目标</span><span class="v" id="targets">—</span></div>
         <div class="row"><span class="k">瞬现过滤</span><span class="v" id="pending">—</span></div>
@@ -346,24 +347,37 @@
      为什么不用长连接直播：免费内网穿透会把 chunked 长连接攒一大坨再发，
      延迟能到十几秒甚至把整条隧道堵死；短请求没有这个问题。 */
   const videoEl = $("video");
-  const VIDEO_MIME = 'video/mp4; codecs="avc1.42E028"';
+  const VIDEO_MIME = 'video/mp4; codecs="avc1.4D4028"';   // main@4.0（baseline 没有 CABAC，同码率更糊）
   /* 外网带宽是硬瓶颈：实测常见家用上行 + 免费隧道只有 1 Mbps 上下，
      所以默认 900k / 1000px / 15fps，画面在 MapleStory 这种平涂画面上够看。 */
   const QUALITY = {
-    low:  { w: 800,  fps: 12, kb: 450,  label: "流畅" },
-    mid:  { w: 1000, fps: 15, kb: 900,  label: "标准" },
-    high: { w: 1200, fps: 20, kb: 1600, label: "高清" },
+    low:  { w: 800,  fps: 15, kb: 480,  label: "流畅" },
+    mid:  { w: 1000, fps: 20, kb: 900,  label: "标准" },
+    high: { w: 1280, fps: 25, kb: 1600, label: "高清" },
   };
   const QKEYS = ["low", "mid", "high"];
   let quality = localStorage.getItem("msfarm.quality") || "mid";
   if (!QUALITY[quality]) quality = "mid";
   function qualitySpec() { return QUALITY[quality]; }
   let videoMode = false, videoKill = 0, videoUrl = null, videoFails = 0, videoFrags = 0;
+  let hlsFails = 0;
   let videoPath = "";             // live=单连接直播 / seg=分片轮询（隧道缓冲时用）
   let videoStalls = 0;            // 播放等待次数：网跟不上就自动降一档画质
 
   function videoOK() {
     return !!(window.MediaSource && MediaSource.isTypeSupported(VIDEO_MIME) && window.fetch);
+  }
+
+  /* iPhone / iPad 的 Safari 没有 MSE，但天生会放 HLS —— 服务端本来就是 1 秒一个
+     keyframe 的 fMP4 分片，顺手出个 m3u8 就能原生播，帧率和画质与 MSE 完全一样。
+     以前这里检测不到 MSE 就退回"一帧一张 JPEG"，那是手机看着卡的真正原因。 */
+  function hlsOK() {
+    try { return !!videoEl.canPlayType("application/vnd.apple.mpegurl"); } catch (e) { return false; }
+  }
+
+  function setPath(text) {
+    const el = $("vpath");
+    if (el) el.textContent = text;
   }
 
   function videoQuery() {
@@ -374,7 +388,8 @@
   }
 
   function videoBadge() {
-    return overlayOn ? "H.264 · 含定位框" : "H.264 实时";
+    const tag = videoPath === "hls" ? "HLS 实时" : "H.264 实时";
+    return overlayOn ? tag.replace("实时", "· 含定位框") : tag;
   }
 
   function stopVideo() {
@@ -387,6 +402,7 @@
     if (videoUrl) { URL.revokeObjectURL(videoUrl); videoUrl = null; }
     $("vlat").textContent = "—";
     $("vlat").className = "v";
+    setPath("—");
   }
 
   function videoSleep(ms) { return new Promise((ok) => setTimeout(ok, ms)); }
@@ -459,8 +475,12 @@
       if (!b.length) return;
       const end = b.end(b.length - 1);
       if (videoEl.paused) videoEl.play().catch(() => {});
-      if (videoEl.currentTime < end - 1.2 || videoEl.currentTime > end) {
-        videoEl.currentTime = Math.max(0, end - 0.12);
+      const ahead = end - videoEl.currentTime;
+      if (videoEl.currentTime > end) {
+        videoEl.currentTime = Math.max(0, end - 0.3);          // 时间轴被裁掉了，跟回去
+      } else if (ahead > 2.5) {
+        // 落后太多才跳：每跳一次都会丢掉几帧，跳得越勤看着越卡
+        videoEl.currentTime = Math.max(0, end - 0.6);
       }
     };
     const feed = async (buf) => {
@@ -509,9 +529,12 @@
     };
     const splitter = makeSplitter(enqueue);
 
-    // 卡顿监控：6 秒内出现 3 次以上缓冲等待，说明带宽不够，自动降一档
+    // 卡顿监控：6 秒内出现 3 次以上缓冲等待，说明带宽不够，自动降一档。
+    // 起播头 15 秒不算——刚开始缓冲本来就是空的，一进去就降档纯属误判。
+    const warmup = Date.now() + 15000;
     const mon = setInterval(() => {
       if (kill !== videoKill) { clearInterval(mon); return; }
+      if (Date.now() < warmup) { videoStalls = 0; return; }
       if (videoStalls >= 3 && quality !== "low") {
         quality = quality === "high" ? "mid" : "low";
         localStorage.setItem("msfarm.quality", quality);
@@ -535,7 +558,11 @@
         while (kill === videoKill && !paused) {
           const { value, done } = await reader.read();
           if (done || !value) break;
-          if (!got) { got = true; clearTimeout(timer); videoPath = "live"; }
+          if (!got) {
+            got = true; clearTimeout(timer); videoPath = "live";
+            const spec = qualitySpec();
+            setPath("H.264 直播 " + spec.w + "p" + spec.fps + " · " + Math.round(spec.kb / 100) / 10 + "Mb");
+          }
           splitter(value);
         }
       }
@@ -583,6 +610,29 @@
     }
   }
 
+  /* 原生 HLS：给没有 MSE 的 iPhone / iPad。
+     直接把 m3u8 交给 <video>，Safari 自己拉列表、自己缓冲、硬解，比 JS 喂 MSE 还省电。
+     延迟比 MSE 那条路多 1~2 秒，但帧率和清晰度是同一套码流。 */
+  async function startHLS() {
+    const kill = ++videoKill;
+    videoPath = "hls";
+    videoEl.src = "/video/hls/index.m3u8" + videoQuery();
+    await new Promise((ok, fail) => {
+      let done = false;
+      const t = setTimeout(() => { if (!done) { done = true; fail(new Error("HLS 超时")); } }, 15000);
+      const good = () => { if (done) return; done = true; clearTimeout(t); ok(); };
+      const bad = () => { if (done) return; done = true; clearTimeout(t); fail(new Error("HLS 播放失败")); };
+      videoEl.addEventListener("loadeddata", good, { once: true });
+      videoEl.addEventListener("playing", good, { once: true });
+      videoEl.addEventListener("error", bad, { once: true });
+      videoEl.play().catch(() => {});
+    });
+    if (kill !== videoKill) return;
+    markVideoReady();
+    const spec = qualitySpec();
+    setPath("HLS 原生 " + spec.w + "p" + spec.fps + " · " + Math.round(spec.kb / 100) / 10 + "Mb");
+  }
+
   async function startRemote() {
     if (videoOK() && videoFails < 3) {
       try {
@@ -593,6 +643,17 @@
         stopVideo();
         console.warn("H.264 起不来", e);
         if (videoFails >= 3) toast("视频流起不来，已回退到逐帧刷新", true);
+      }
+    }
+    // 没有 MSE（iPhone Safari）→ 原生 HLS，帧率/画质跟 MSE 一样，别掉到逐帧 JPEG
+    if (hlsOK() && hlsFails < 2) {
+      try {
+        await startHLS();
+        return;
+      } catch (e) {
+        hlsFails++;
+        stopVideo();
+        console.warn("HLS 起不来", e);
       }
     }
     // 回退：一帧一张 JPEG（浏览器不支持 MSE 时）

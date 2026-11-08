@@ -15,6 +15,7 @@
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -53,6 +54,27 @@ def copy_to_clipboard(text):
         return False
 
 
+def lan_ips():
+    """本机局域网地址：手机连着同一个 WiFi 时走它，延迟从 1 秒降到几毫秒。"""
+    ips = []
+    try:
+        for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
+            if not ip.startswith("127.") and ip not in ips:
+                ips.append(ip)
+    except OSError:
+        pass
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("223.5.5.5", 80))
+        ip = probe.getsockname()[0]
+        probe.close()
+        if not ip.startswith("127.") and ip not in ips:
+            ips.insert(0, ip)
+    except OSError:
+        pass
+    return ips
+
+
 def banner(url, tool):
     full = f"{url}/?k={TOKEN}" if TOKEN else f"{url}/"
     line = "=" * 68
@@ -66,6 +88,9 @@ def banner(url, tool):
         print(f"  口令: {TOKEN}    （不带 ?k= 打不开，7 天内免重复输入）")
     else:
         print("  注意: 没设 PREVIEW_TOKEN，任何人都能打开这个地址")
+    for ip in lan_ips():
+        tail = f"/?k={TOKEN}" if TOKEN else "/"
+        print(f"  手机同 WiFi 就看这个（更快，不占上行）: http://{ip}:{PORT}{tail}")
     if copy_to_clipboard(full):
         print("  已复制到剪贴板 ✓")
     print(line)

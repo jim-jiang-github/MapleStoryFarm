@@ -22,7 +22,7 @@ import numpy as np
 import uvicorn
 import win32con
 import win32gui
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
@@ -37,7 +37,10 @@ PREVIEW_W = 320          # 小方格宽度（px）
 STREAM_W = 1024          # 推流分辨率宽度：预览可放大到千px级，1024 仍有清晰余量
 DEFAULT_FPS = 30
 JPEG_QUALITY = 72
-HOST, PORT = "127.0.0.1", 8765
+# 默认监听所有网卡：手机连同一个 WiFi 时直接走局域网地址最顺畅（往返几毫秒，
+# 对比免费穿透的 1 秒往返是降维打击）。只想给本机用就 set PREVIEW_HOST=127.0.0.1。
+HOST = (os.environ.get("PREVIEW_HOST") or "0.0.0.0").strip() or "0.0.0.0"
+PORT = int(os.environ.get("PREVIEW_PORT") or 8765)
 DETECT_CONF = 0.35
 # 两种部署配置，实测差异（30 帧真实画面，含 UI 排除+去重，对比 best.pt@960）：
 #   速度: INT8 384x672  ~44ms/22FPS  recall 83.6%  多检 0.8/帧
@@ -1248,9 +1251,14 @@ INDEX = Path(__file__).with_name("index.html")
 PREVIEW_TOKEN = (os.environ.get("PREVIEW_TOKEN") or "").strip()
 
 
+def _is_loopback(host):
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
 @app.middleware("http")
 async def _token_gate(request, call_next):
-    if not PREVIEW_TOKEN:
+    # 本机自己看不折腾：从 127.0.0.1 打开直接放行；局域网/外网一律要口令。
+    if not PREVIEW_TOKEN or _is_loopback(getattr(request.client, "host", "")):
         return await call_next(request)
     if request.query_params.get("k") == PREVIEW_TOKEN:
         resp = await call_next(request)
@@ -1366,6 +1374,46 @@ async def video_live(bars: int = 0, w: int = 0, fps: int = 0, kb: int = 0):
     return StreamingResponse(gen(), media_type="video/mp4",
                              headers={"Cache-Control": "no-store",
                                       "X-Accel-Buffering": "no"})
+
+
+# ---------------- HLS：给 iPhone / iPad 用 ----------------
+# iOS Safari 没有 MSE（iOS 17 之前的 iPhone 完全没有，之后的 ManagedMediaSource 也挑食），
+# 以前只能退到"一帧一张 JPEG"——在 1 秒往返的隧道上就是 1 帧/秒的幻灯片，又卡又糊。
+# Safari 天生会放 HLS，而我们本来就是"1 秒一个 keyframe"对齐的 fMP4 分片，
+# 顺手拼个滚动播放列表就能原生播，画质和帧率跟 MSE 那条路完全一样。
+def _hls_query(request):
+    q = request.url.query
+    return ("?" + q) if q else ""
+
+
+@app.get("/video/hls/index.m3u8")
+async def video_hls_playlist(request: Request, bars: int = 0, w: int = 0,
+                             fps: int = 0, kb: int = 0):
+    st = _video_stream(bars, w, fps, kb)
+    text = st.hls_playlist(extra=_hls_query(request))
+    return Response(text, media_type="application/vnd.apple.mpegurl",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.get("/video/hls/init.mp4")
+async def video_hls_init(bars: int = 0, w: int = 0, fps: int = 0, kb: int = 0):
+    st = _video_stream(bars, w, fps, kb)
+    t0 = time.time()
+    while not st.init and not st.stopped.is_set() and time.time() - t0 < 6:
+        await asyncio.sleep(0.05)
+    if not st.init:
+        return Response(status_code=503)
+    return Response(st.init, media_type="video/mp4",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.get("/video/hls/seg_{seq}.m4s")
+async def video_hls_seg(seq: int, bars: int = 0, w: int = 0, fps: int = 0, kb: int = 0):
+    st = _video_stream(bars, w, fps, kb)
+    blob = await asyncio.to_thread(st.hls_segment, seq)
+    if not blob:
+        return Response(status_code=404, headers={"Cache-Control": "no-store"})
+    return Response(blob, media_type="video/mp4", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1695,17 +1743,42 @@ def port_busy(host, port):
         return s.connect_ex((host, port)) == 0
 
 
+def lan_ipv4():
+    """本机在局域网里的地址（手机连同一个 WiFi 时该用这个，而不是穿透域名）。"""
+    ips = []
+    try:
+        for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
+            if not ip.startswith("127.") and ip not in ips:
+                ips.append(ip)
+    except OSError:
+        pass
+    try:                                  # 兜底：拿默认出口网卡的地址
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("223.5.5.5", 80))
+        ip = probe.getsockname()[0]
+        probe.close()
+        if not ip.startswith("127.") and ip not in ips:
+            ips.insert(0, ip)
+    except OSError:
+        pass
+    return ips
+
+
 if __name__ == "__main__":
-    url = f"http://{HOST}:{PORT}"
+    local = f"http://127.0.0.1:{PORT}"
     want_open = "--open" in sys.argv
 
-    if port_busy(HOST, PORT):
-        print(f"already running -> {url}")
+    if port_busy("127.0.0.1", PORT):
+        print(f"already running -> {local}")
         if want_open:
-            webbrowser.open(url)
+            webbrowser.open(local)
         raise SystemExit(0)
 
-    print(f"preview -> {url}   (Ctrl+C to stop)")
+    print(f"preview -> {local}   (Ctrl+C to stop)")
+    if HOST in ("0.0.0.0", "::"):
+        for ip in lan_ipv4():
+            tail = f"/?k={PREVIEW_TOKEN}" if PREVIEW_TOKEN else "/"
+            print(f"手机(同 WiFi) -> http://{ip}:{PORT}{tail}   ← 在家就用这个，最流畅")
     if want_open:
-        threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+        threading.Timer(1.2, lambda: webbrowser.open(local)).start()
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
