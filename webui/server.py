@@ -1390,6 +1390,10 @@ def _hls_query(request):
 async def video_hls_playlist(request: Request, bars: int = 0, w: int = 0,
                              fps: int = 0, kb: int = 0):
     st = _video_stream(bars, w, fps, kb)
+    # 冷启动时先等够一整段：空播放列表 Safari 会当成错误直接不播
+    t0 = time.time()
+    while len(st.frags) < video_mod.HLS_GROUP and not st.stopped.is_set() and time.time() - t0 < 4:
+        await asyncio.sleep(0.1)
     text = st.hls_playlist(extra=_hls_query(request))
     return Response(text, media_type="application/vnd.apple.mpegurl",
                     headers={"Cache-Control": "no-store"})
