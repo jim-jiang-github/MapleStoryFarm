@@ -158,6 +158,7 @@
   .rows select {
     font: inherit; font-size: 11.5px; color: var(--text); background: var(--surface);
     border: 1px solid var(--border); border-radius: 6px; padding: 1px 4px; cursor: pointer;
+    flex: 1 1 auto; min-width: 0;
   }
   /* 识别阈值：滑块占满剩余宽度，右边跟一个当前值 */
   .row.conf { align-items: center; }
@@ -419,6 +420,10 @@
             <div class="row conf">
               <span class="k">稳定帧数</span>
               <span class="v"><input id="hitRange" class="rng" type="range" min="1" max="12" step="1" value="4" title="累计命中这么多帧才允许第一次出现。调大更干净，调小更快但容易闪出假框"><b id="hitVal">4</b></span>
+            </div>
+            <div class="row conf">
+              <span class="k">检测频率</span>
+              <span class="v"><select id="fpsSel" title="每秒最多推理几次。YOLO 的单帧耗时是固定的（速度模式约 66ms），调低只省 CPU 占用，不会让单帧变快——画面上的框本来就只在每次推理后刷新一次"><option value="0">不限（跑满）</option><option value="20">20 帧/秒</option><option value="15">15 帧/秒</option><option value="12">12 帧/秒</option><option value="10">10 帧/秒</option><option value="8">8 帧/秒</option></select></span>
             </div>
             <div class="row conf">
               <span class="k">人物匹配</span>
@@ -1781,6 +1786,23 @@
     }
   });
 
+  /* 检测频率：给检测循环踩刹车。省的 CPU 占用，不是单帧耗时——单帧还是 66ms，
+     只是不再一秒跑 15 次。刹车期间画面保持上一次的框，本来就只在推理后刷新。 */
+  const fpsSel = $("fpsSel");
+  fpsSel.addEventListener("change", async () => {
+    fpsSel.disabled = true;
+    try {
+      const r = await (await fetch("/api/detect/fps?v=" + fpsSel.value,
+                                   { cache: "no-store" })).json();
+      fpsSel.value = String(r.max_fps);
+      toast(r.max_fps ? `检测频率上限 ${r.max_fps} 帧/秒` : "检测频率不限（跑满）");
+    } catch (e) {
+      toast("设置失败：" + e);
+    } finally {
+      fpsSel.disabled = false;
+    }
+  });
+
   /* 面板上两个实时参数：识别阈值（浮点）和稳定帧数（整数）。共用一套绑定：
      拖动时先改数字（立刻有反馈），停手 120ms 再发请求，避免每一像素都打一次后端。 */
   const confRange = $("confRange"), confVal = $("confVal");
@@ -1832,7 +1854,9 @@
       $("age").className = "v" + (age > 800 ? " warn" : "");
       $("detect").textContent = s.detect_enabled ? "识别: 开" : "识别: 关";
       $("detect").className = s.detect_enabled ? "on" : "";
-      $("dms").textContent = s.detect_ready && s.detect_enabled ? `${s.infer_ms} ms` : "—";
+      // 单帧耗时（这是 YOLO 的固定成本，调频率不会变）+ 实际推理帧率（调频率才会变）
+      $("dms").textContent = s.detect_ready && s.detect_enabled
+        ? `${s.infer_ms} ms · ${s.det_fps} 帧/秒` : "—";
       $("targets").textContent = s.detect_enabled ? s.targets : "—";
       // 两个滑块以后端为准（可能被别的标签页 / 重启后的存盘改过），但拖动期间不覆盖
       if (Date.now() > confLockUntil) {
@@ -1860,6 +1884,10 @@
       $("modeBtn").textContent = "模式: " + s.mode_label;
       $("modeBtn").className = s.mode === "accurate" ? "on" : "";
       if (maskOn !== s.mask) { maskOn = s.mask; updateMaskUI(); }   // 与后端保持一致
+      if (typeof s.max_fps === "number" && Number(fpsSel.value) !== s.max_fps) {
+        const opt = Array.from(fpsSel.options).some((o) => Number(o.value) === s.max_fps);
+        fpsSel.value = opt ? String(s.max_fps) : "0";   // 存盘里是自定义值时退回「不限」
+      }
       // 游戏窗口改尺寸 / 改分辨率后，画面比例跟着变，遮罩层要重新贴合。
       // MJPEG 的 naturalWidth 在部分 Chrome 版本上一直是 0，用服务端报的客户区尺寸兜底。
       const [fw0, fh0] = frameSize();

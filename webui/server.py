@@ -949,6 +949,8 @@ det_state = {
     "lock_box": None,    # 上次锁定的框：目标短暂丢失时用它就近接回，而不是跳去别的怪
     "lock_ts": 0.0,      # 最后一次锁上的时间（超过 3 秒就不再用 lock_box 找）
     "mask": True,        # UI 排除区开关：涂掉固定 UI 区域再推理
+    "max_fps": 0,        # 推理帧率上限：0=不限（跑满）；5~30 按目标帧率给循环踩刹车
+    "next_infer": 0.0,   # 下一帧推理的计划时刻（节流用，按计划推进以吸收 sleep 误差）
     "mode": "fast",      # fast(20+FPS) / accurate(精度优先)
     "show_conf": SHOW_CONF_DEFAULT,   # 显示门限：低于它的目标不画框/不计数
     "show_hits": SHOW_HITS_DEFAULT,   # 稳定帧数：累计命中这么多帧才允许第一次出现
@@ -975,6 +977,22 @@ def _clamp_hits(v) -> int:
     return min(12, max(1, v))
 
 
+def _clamp_fps(v) -> int:
+    """推理帧率上限：0 = 不限（检测循环跑满），否则钳到 5~30。
+
+    这个值不改变单帧耗时，只是让循环在两次推理之间睡一会儿——省的是 CPU 占用，
+    不是让某一次推理变快。降到 10 就是「每秒推理 10 次」，显示端本来也不是每帧
+    都刷新框，所以看上去差别很小。
+    """
+    try:
+        v = int(round(float(v)))
+    except (TypeError, ValueError):
+        return 0
+    if v <= 0:
+        return 0
+    return min(30, max(5, v))
+
+
 def _load_det_conf() -> dict:
     """读取上次调的显示参数；文件坏了/没写过就用默认值。"""
     try:
@@ -982,13 +1000,15 @@ def _load_det_conf() -> dict:
     except Exception:
         raw = {}
     return {"show_conf": _clamp_conf(raw.get("show_conf", SHOW_CONF_DEFAULT)),
-            "show_hits": _clamp_hits(raw.get("show_hits", SHOW_HITS_DEFAULT))}
+            "show_hits": _clamp_hits(raw.get("show_hits", SHOW_HITS_DEFAULT)),
+            "max_fps": _clamp_fps(raw.get("max_fps", 0))}
 
 
 def _save_det_conf() -> None:
     try:
         SHOW_CONF_FILE.write_text(json.dumps(
-            {"show_conf": det_state["show_conf"], "show_hits": det_state["show_hits"]}
+            {"show_conf": det_state["show_conf"], "show_hits": det_state["show_hits"],
+             "max_fps": det_state["max_fps"]}
         ), encoding="utf-8")
     except Exception:
         pass          # 落盘失败不影响当前会话，只是重启后回到旧值
@@ -1888,6 +1908,25 @@ def detect_loop():
             time.sleep(1.0)
             continue
 
+        # 推理节流：max_fps>0 时按目标帧率给循环踩刹车。刹车期间不抓帧、不跑跟踪器，
+        # 画面上保持上一次的标注（本来就只在每次推理后更新一次，不是每帧都变）。
+        # 排程按「下一帧的计划时刻」推进，而不是按「上次睡完的时刻」——Windows 的
+        # time.sleep 精度约 15.6ms，每睡一次都可能多睡一格；若拿实际时刻当基准，
+        # 这点误差会一帧一帧累加（实测设 15 只能跑到 7.9）。按计划时刻推进则下一帧
+        # 少睡一点就补回来了，平均速率才不会掉一半。
+        tgt = det_state["max_fps"]
+        if tgt > 0:
+            period = 1.0 / tgt
+            nxt = det_state["next_infer"]
+            now = time.perf_counter()
+            if not nxt or nxt < now - 1.0:      # 首次 / 刚从暂停恢复：重新对齐
+                nxt = now
+            if now < nxt:
+                time.sleep(min(nxt - now, 0.25))
+                continue
+            # 落后太多（推理本身比 period 还慢）就别攒欠账，从当前时刻重新起算
+            det_state["next_infer"] = max(nxt + period, now)
+
         frame = grabber.snapshot()
         tick = time.perf_counter()
         rects = mask_rects() if det_state["mask"] else None
@@ -2079,6 +2118,7 @@ async def stats():
         "targets": sum(counts.values()),
         "show_conf": det_state["show_conf"],
         "show_hits": det_state["show_hits"],
+        "max_fps": det_state["max_fps"],
         "pending": tracker.pending,
         "top_classes": [f"{k}×{v}" for k, v in top],
         "detect_error": det_state["error"],
@@ -2232,6 +2272,23 @@ async def detect_mask(on: int = 1):
     """UI 排除区开关：on=1 涂掉固定 UI 再推理（默认），on=0 全画面检测。"""
     det_state["mask"] = bool(on)
     return JSONResponse({"mask": det_state["mask"]})
+
+
+@app.get("/api/detect/fps")
+async def detect_fps(v: int = -1):
+    """推理帧率上限：0 = 不限（跑满），5~30 按目标帧率给检测循环踩刹车。
+
+    省的是 CPU 占用而不是单帧耗时：YOLO 的 imgsz 固定，单次推理永远是那么多计算量，
+    这个开关只是决定「每秒推理几次」。降到 10 约等于把检测线程的 CPU 砍到原来的
+    1/3（按实测 66ms/帧算，跑满约 15FPS）。不传 v 只读当前值。
+    """
+    if v >= 0:
+        val = _clamp_fps(v)
+        with det_lock:
+            det_state["max_fps"] = val
+            det_state["next_infer"] = 0.0    # 立刻按新节拍重新排程，不用等上一档走完
+        _save_det_conf()
+    return JSONResponse({"max_fps": det_state["max_fps"], "det_fps": round(det_state["det_fps"], 1)})
 
 
 # ---------- 排除区配置（WebUI 框选 / 选择 / 删除 / 持久化） ----------
