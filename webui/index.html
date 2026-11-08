@@ -250,6 +250,21 @@
     transition: opacity .18s, transform .18s;
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  /* ---- 人物模板：把截图拖进页面时铺一层提示（Ctrl+V 粘贴是瞬时的，不用这层） ---- */
+  .dropz {
+    position: fixed; inset: 0; z-index: 75;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(28,25,23,.42);
+    pointer-events: none;          /* 别抢 drop 事件，让 document 收 */
+  }
+  .dropz.open { display: flex; }
+  .dropz-card {
+    padding: 20px 30px; border-radius: 14px; text-align: center;
+    border: 2px dashed rgba(250,250,249,.85); color: #fafaf9;
+    background: rgba(28,25,23,.66);
+    font-size: 12.5px; line-height: 1.7;
+  }
+  .dropz-card b { display: block; font-size: 15px; margin-bottom: 3px; }
   .filterrow { margin-top: 10px; }
   .filterrow input {
     width: 100%;
@@ -348,7 +363,7 @@
           <button id="detect">识别: 关</button>
           <button id="modeBtn">模式: 速度</button>
           <button id="focusBtn" title="把游戏窗口抬到最前并给焦点（截图前必做）">前置游戏</button>
-          <button id="charUpBtn" title="上传一张人物名字牌的小图（截图裁出来的就行），后台按这张图在画面里找人物">上传人物图</button>
+          <button id="charUpBtn" title="上传 / Ctrl+V 粘贴 / 把图片拖进页面：用一张名字牌的小图当模板，后台按它在画面里找人物">上传人物图</button>
           <button id="charBtn" title="不想上传的话，也可以直接在画面上框一下名字牌">框选</button>
           <button id="charClear" hidden title="删掉名字牌模板，人物标记随之消失">清除人物</button>
           <input type="file" id="charFile" accept="image/*" hidden>
@@ -382,6 +397,7 @@
   </div>
 </div>
 
+<div class="dropz" id="dropz"><div class="dropz-card"><b>松手就用这张图当人物模板</b>只截名字牌那一小块最准；整张截图会被拒</div></div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -872,7 +888,7 @@
     if (!charCal) $("charBtn").textContent = "框选";
     if (c.dir && $("charDir").value !== c.dir) $("charDir").value = c.dir;
     if (!charHasTpl) {
-      $("charInfo").textContent = "未设置";
+      $("charInfo").textContent = "未设置 · 可 Ctrl+V 粘贴";
       $("charInfo").className = "v small";
       return;
     }
@@ -920,12 +936,13 @@
     });
   }
 
-  $("charUpBtn").addEventListener("click", () => $("charFile").click());
-
-  $("charFile").addEventListener("change", async (e) => {
-    const f = e.target.files && e.target.files[0];
-    e.target.value = "";                 // 允许同一张图再传一次
-    if (!f) return;
+  /* 一张图 → 人物模板。三个入口共用这一段：点按钮选文件 / Ctrl+V 粘贴 / 把图拖进页面。
+     截完名字牌直接 Ctrl+V 最顺手：不用存盘、不用翻路径。 */
+  let charBusy = false;
+  async function useCharImage(f) {
+    if (!f || charBusy) return;
+    if (f.type && !/^image\//.test(f.type)) { toast("只支持图片文件", true); return; }
+    charBusy = true;
     $("charUpBtn").disabled = true;
     $("charUpBtn").textContent = "上传中…";
     try {
@@ -935,7 +952,7 @@
       charHasTpl = true;
       $("charClear").hidden = false;
       const ok = res.score >= res.thresh;
-      toast(`已用上传图 ${res.size[0]}×${res.size[1]} 当模板，匹配分 ${res.score.toFixed(2)}`
+      toast(`已用这张图 ${res.size[0]}×${res.size[1]} 当模板，匹配分 ${res.score.toFixed(2)}`
             + (Math.abs(res.scale - 1) > 0.01 ? `（缩放 ${res.scale.toFixed(2)}×）` : "")
             + (ok ? "" : `，低于门限 ${res.thresh.toFixed(2)}：换个更清楚的名字牌截图，或把「人物匹配」调低`),
             !ok);
@@ -943,9 +960,59 @@
     } catch (err) {
       toast(err.message || "上传失败", true);
     } finally {
+      charBusy = false;
       $("charUpBtn").disabled = false;
       $("charUpBtn").textContent = "上传人物图";
     }
+  }
+
+  $("charUpBtn").addEventListener("click", () => $("charFile").click());
+
+  $("charFile").addEventListener("change", (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";                 // 清空 value，同一张图还能再传一次
+    if (f) useCharImage(f);
+  });
+
+  /* Ctrl+V：剪贴板里有图就直接当模板。焦点在输入框/文本域时不抢——那边粘文字是正事。 */
+  document.addEventListener("paste", (e) => {
+    const t = e.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    const cd = e.clipboardData;
+    if (!cd) return;
+    let file = null;
+    for (const it of (cd.items || [])) {
+      if (it.kind === "file" && /^image\//.test(it.type || "")) { file = it.getAsFile(); break; }
+    }
+    if (!file) return;
+    e.preventDefault();
+    useCharImage(file);
+  });
+
+  /* 把图拖进页面：整页都是落点，拖动过程中铺一层提示 */
+  let dragDepth = 0;
+  const dropz = $("dropz");
+  document.addEventListener("dragenter", (e) => {
+    if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes("Files")) return;
+    dragDepth++;
+    dropz.classList.add("open");
+  });
+  document.addEventListener("dragover", (e) => {
+    if (!dragDepth) return;
+    e.preventDefault();                       // 不拦的话浏览器会直接把图当页面打开
+    e.dataTransfer.dropEffect = "copy";
+  });
+  document.addEventListener("dragleave", () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) dropz.classList.remove("open");
+  });
+  document.addEventListener("drop", (e) => {
+    dragDepth = 0;
+    dropz.classList.remove("open");
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!f) return;
+    e.preventDefault();
+    useCharImage(f);
   });
 
   $("charDir").addEventListener("change", async (e) => {
@@ -957,13 +1024,20 @@
     }
   });
 
-  $("charClear").addEventListener("click", async () => {    try {
-      await fetch("/api/char/template", { method: "DELETE", cache: "no-store" });
+  /* 清除只删模板：人物标记、匹配分、框全部归零，找人线程留在原地等下一张图。
+     清完不会再自动「恢复」——没有模板就没有可匹配的东西，这是预期的。 */
+  $("charClear").addEventListener("click", async () => {
+    try {
+      const r = await (await fetch("/api/char/template",
+                                   { method: "DELETE", cache: "no-store" })).json();
       charHasTpl = false;
       $("charClear").hidden = true;
-      $("charBtn").textContent = "框人物";
-      $("charInfo").textContent = "未设置";
-      toast("已清除人物模板");
+      $("charBtn").textContent = "框选";
+      $("charInfo").textContent = "未设置 · 可 Ctrl+V 粘贴";
+      $("charInfo").className = "v small";
+      toast(r && r.thread === false
+            ? "已清除模板；找人线程刚才不在，已重新拉起"
+            : "已清除人物模板：Ctrl+V 粘一张名字牌截图就重新开始");
     } catch (e) {
       toast("清除失败", true);
     }

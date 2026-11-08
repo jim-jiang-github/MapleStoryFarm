@@ -1213,7 +1213,10 @@ char_state = {
     "misses": 0,
     "error": "",
 }
-char_started = [False]
+# 找人的线程句柄。以前用一个 [False] 布尔记「起过了」，一旦线程因为异常挂了，
+# 这个标记还是 True，之后就不再有人去匹配了 —— 表现就是「清掉模板之后再传图，
+# 人物标记再也不回来」。改成看 is_alive()，挂了能自己重新拉起来。
+char_thread = None
 
 
 def _clamp_thresh(v) -> float:
@@ -1580,10 +1583,11 @@ def char_loop():
         if not enabled or not has_tpl or not grabber.window_found:
             time.sleep(0.25)
             continue
-        frame = grabber.snapshot()
         try:
+            frame = grabber.snapshot()
             box, score = find_char(frame)
         except Exception as e:  # noqa: BLE001
+            # 整轮包起来：以前 snapshot 在 try 外面，取帧一抛异常线程就静悄悄死了
             with char_lock:
                 char_state["error"] = f"{type(e).__name__}: {e}"
             time.sleep(0.5)
@@ -1657,9 +1661,16 @@ def overlay_char(img):
 
 
 def ensure_char_thread():
-    if not char_started[0]:
-        char_started[0] = True
-        threading.Thread(target=char_loop, daemon=True).start()
+    """确保找人的线程活着。线程挂了（异常/被回收）就重新拉一个。
+
+    之前这里用一次性布尔标记，线程一死就再也不会有新的——模板明明在、开关也开着，
+    人物标记却永远不出现，看着就像「功能被我点坏了」。
+    """
+    global char_thread
+    if char_thread is not None and char_thread.is_alive():
+        return
+    char_thread = threading.Thread(target=char_loop, daemon=True)
+    char_thread.start()
 
 
 _load_char_conf()
@@ -2197,6 +2208,7 @@ async def char_status():
             "dir": char_state["dir"],
             "scale": char_state["scale"],
             "error": char_state["error"],
+            "thread": _char_thread_alive(),   # 找人线程是否活着（排查「标记不动了」）
         })
 
 
@@ -2272,6 +2284,10 @@ async def char_upload(payload: dict = Body(...)):
                          "scale": scale, "thresh": char_state["thresh"]})
 
 
+def _char_thread_alive():
+    return bool(char_thread is not None and char_thread.is_alive())
+
+
 @app.delete("/api/char/template")
 async def char_del_template():
     try:
@@ -2279,6 +2295,8 @@ async def char_del_template():
     except FileNotFoundError:
         pass
     with char_lock:
+        # 模板没了就什么都不剩：tpl/tpl_w/框/分数/计时全清空，否则刷新页面会带着
+        # 上次的框和分数出现（load_char_tpl 只在 tpl 为空时跳过，但 stats 会漏旧值）
         char_state["tpl"] = None
         char_state["tpl_w"] = None
         char_state["size"] = (0, 0)
@@ -2286,7 +2304,9 @@ async def char_del_template():
         char_state["score"] = 0.0
         char_state["ts"] = 0.0
         char_state["misses"] = 0
-    return JSONResponse({"ok": True})
+        char_state["error"] = ""
+    ensure_char_thread()     # 线程要是已经挂了，这里顺手拉回来
+    return JSONResponse({"ok": True, "thread": _char_thread_alive()})
 
 
 @app.get("/api/char/template.png")
