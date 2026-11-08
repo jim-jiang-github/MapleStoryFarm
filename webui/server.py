@@ -60,17 +60,22 @@ LOW_DETECT_CONF = 0.10
 SHOW_CONF_DEFAULT = float(os.environ.get("PREVIEW_SHOW_CONF") or 0.60)
 SHOW_HITS_DEFAULT = int(os.environ.get("PREVIEW_MIN_HITS") or 4)
 SHOW_CONF_FILE = Path(__file__).with_name("detconf.json")
-# 已经锁定的目标允许比阈值低一点点继续保留，避免置信度正好卡在边界时反复掉锁
-LOCK_CONF_GRACE = 0.08
 # ---- 显示稳定（解决「冒出来一两帧又消失」）----
 # 置信度高不等于目标真实：误检偶尔也会连着两帧拿到 0.7。原来「连续 2 帧」就确认，
 # 于是这种误检会被画两帧再消失。现在显示端另加三道闸：
 #   1) show_hits：累计命中这么多帧才允许第一次出现（默认 4 帧 ≈ 0.15~0.2 秒）
-#   2) DISPLAY_MIN_SHOW：一旦出现至少留 0.4 秒，压掉 1~2 帧的闪烁
+#   2) DISPLAY_WEAK_MAX：已经画出来的轨迹，最多再容忍连续 2 帧掉到门限下
+#      （专门压掉「闪一帧」；按帧数算，不按秒算——原来留 0.45 秒，
+#        实际会把 0.49 这种低分框挂上半秒，看上去就像门限没生效）
 #   3) DISPLAY_MAX_MISS：连续 2 帧没观测到就不再画，避免幽灵框停在原地
 # 跟踪器内部不受影响，仍然 max_age 帧内保留轨迹，随时可以接回。
-DISPLAY_MIN_SHOW = 0.45
+#
+# 门限对「显示」是硬约束：只有 conf >= show_conf 的轨迹会画框/计数/被锁定，
+# 没有锁定宽限（原来留 0.08 的宽限，等于允许显示 0.52 这种低于门限的值）。
+DISPLAY_WEAK_MAX = 2
 DISPLAY_MAX_MISS = 2
+# 两条轨迹框到同一只怪（检测偶尔分裂 / 类别名不一致）时，IoU 超过它就只留一条
+DUP_TRACK_IOU = 0.55
 # 两种部署配置，实测差异（30 帧真实画面，含 UI 排除+去重，对比 best.pt@960）：
 #   速度: INT8 384x672  ~44ms/22FPS  recall 83.6%  多检 0.8/帧
 #   精度: INT8 544x960  ~96ms/10FPS  recall 89.6%  多检 0.3/帧
@@ -1031,11 +1036,22 @@ def class_color(name):
     return PALETTE[h % len(PALETTE)]
 
 
-def dedupe_dets(dets, thr=0.6):
-    """同一类名的重叠框只保留置信度最高者（模型的类 ID 别名会重复检出同一只怪）。"""
+def dedupe_dets(dets, thr=0.6, dup_thr=0.85):
+    """重叠框只保留置信度最高者。
+
+    thr    ：同类名重叠到这个程度就算重复（模型的类 ID 别名会重复检出同一只怪）。
+    dup_thr：不同类名也可以判重复 —— 模型偶尔把同一只怪认成两种怪（树/蘑菇/石头），
+             两个框几乎重合，各跟一条轨迹，画面就是一只怪两个框、两个读数。
+    """
     out = []
     for d in sorted(dets, key=lambda d: -d[2]):
-        if all(d[1] != o[1] or overlap_min(d[0], o[0]) < thr for o in out):
+        dup = False
+        for o in out:
+            ov = overlap_min(d[0], o[0])
+            if (d[1] == o[1] and ov >= thr) or ov >= dup_thr:
+                dup = True
+                break
+        if not dup:
             out.append(d)
     return out
 
@@ -1129,36 +1145,57 @@ tracker = Tracker()
 
 
 def pick_visible(tracks, shown, now, show_conf, show_hits, prev_tid=None):
-    """这一帧该画出来的轨迹，同时就地维护 shown（tid -> {"ok": 最后一次达标, "last": 最后画出}）。
+    """这一帧该画出来的轨迹，同时就地维护 shown（tid -> 画框记录）。
 
-    三条件缺一不可（见 SHOW_HITS_DEFAULT 附近的说明）：
+    shown[tid] = {"ok": 最后一次达标的时刻, "last": 最后画出的时刻, "weak": 连续低于门限的帧数}
+
+    门限是硬约束（conf >= show_conf 才画），只保留两个压闪烁的例外：
       1) 首次出现要攒够 show_hits 帧命中 —— 连续两帧的误检攒不够；
-      2) 出现之后 0.45 秒内即使置信度掉到门限下也继续画 —— 压掉「闪一下」；
-      3) 连续 DISPLAY_MAX_MISS 帧没观测到就不再画 —— 不留停在原地的幽灵框。
-    锁定目标额外给 LOCK_CONF_GRACE 的宽限，避免门限边缘反复掉锁。
+      2) 已经画出来的轨迹最多容忍连续 DISPLAY_WEAK_MAX 帧掉分 —— 不是按秒，
+         所以不会再出现「0.49 挂在画面上半秒」；
+      3) 连续 DISPLAY_MAX_MISS 帧没观测到也不再画 —— 不留幽灵框。
+    另外同一只怪被两条轨迹重复框住时只留一条（见 DUP_TRACK_IOU）。
     """
-    vis = []
+    cand = []                       # [(轨迹, 这一帧的连续低分帧数)]
     for tr in tracks:
         tid, conf = tr["tid"], tr["conf"]
         rec = shown.get(tid)
         weak = conf < show_conf
-        gone = tr["misses"] > DISPLAY_MAX_MISS
-        recent = rec is not None and (now - rec["ok"]) < DISPLAY_MIN_SHOW
-        locked_ok = tid == prev_tid and conf >= show_conf - LOCK_CONF_GRACE
-        if rec is None:
-            ok = (not weak) and (not gone) and tr["hits"] >= show_hits
-        else:
-            ok = (not gone) and ((not weak) or recent or locked_ok)
-        if not ok:
-            shown.pop(tid, None)      # 撤掉记录：下次冒出来要重新攒够帧数
+        if tr["misses"] > DISPLAY_MAX_MISS:
             continue
-        if weak or gone:
-            rec["last"] = now         # 只刷新「还在画」，不动「最后一次达标」
+        if rec is None:
+            # 第一次出现：必须本帧达标，且累计命中够多
+            if weak or tr["hits"] < show_hits:
+                continue
+            cand.append((tr, 0))
         else:
-            shown[tid] = {"ok": now, "last": now}
+            n_weak = rec.get("weak", 0) + 1 if weak else 0
+            if n_weak > DISPLAY_WEAK_MAX:
+                continue            # 掉分太久，撤框；下次要重新攒够 show_hits
+            cand.append((tr, n_weak))
+
+    # 重复轨迹抑制：同一只怪只画一条框（锁定目标优先，其次置信度高的）
+    cand.sort(key=lambda p: (p[0]["tid"] != prev_tid, -p[0]["conf"]))
+    vis = []
+    for tr, n_weak in cand:
+        if any(iou(tr["box"], k["box"]) > DUP_TRACK_IOU for k in vis):
+            continue
         vis.append(tr)
-    for tid in [k for k, v in shown.items() if now - v["last"] > 2.0]:
-        shown.pop(tid, None)          # 轨迹已删除，记录别留着
+
+    keep = {tr["tid"] for tr in vis}
+    nw = {tr["tid"]: n for tr, n in cand}
+    for tr in vis:
+        tid = tr["tid"]
+        if tr["conf"] >= show_conf:
+            shown[tid] = {"ok": now, "last": now, "weak": 0}
+        else:
+            rec = shown.get(tid) or {"ok": now}
+            rec.update({"last": now, "weak": nw.get(tid, 0)})
+            shown[tid] = rec
+    for tid in [k for k in shown if k not in keep]:
+        # 这一帧没画出来（掉分超容忍 / 重复轨迹 / 轨迹已删）：清掉记录
+        if shown[tid].get("last") != now:
+            shown.pop(tid, None)
     return vis
 
 
