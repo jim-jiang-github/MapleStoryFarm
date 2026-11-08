@@ -81,7 +81,6 @@
 <div class="err" id="err"></div>
 
 <div class="foot">
-  <button class="btn" id="sizeBtn">清晰度：省流</button>
   <button class="btn" id="pauseBtn">暂停</button>
 </div>
 
@@ -91,16 +90,9 @@
   const $ = (id) => document.getElementById(id);
   const SHOT = $("shot"), DOT = $("dot"), STATUS = $("status");
 
-  /* 两种画质：省流 640/q60（约 12KB），清晰 1100/q75（约 55KB）。
-     手机上"挂机看一眼"根本不需要大图，默认省流，2 秒一张才 50kbps。 */
-  const SIZES = {
-    // interval 是"下载完到发下一张"的等待，一张本身还要 1~2 秒，
-    // 所以这里给 800ms，实际约 2~3 秒一张
-    low:  { w: 640,  q: 60, label: "省流", interval: 800 },
-    high: { w: 1100, q: 75, label: "清晰", interval: 1200 },
-  };
-  let sizeKey = localStorage.getItem("msfarm.m.size") || "low";
-  if (!SIZES[sizeKey]) sizeKey = "low";
+  /* 只有一档：640/q60 约 12KB 一张，下完等 800ms 再要下一张（含下载约 2~3 秒一张，
+     折合 50kbps 左右）。手机在外面看一眼挂机状态，不需要清晰度选项。 */
+  const SHOT_W = 640, SHOT_Q = 60, SHOT_GAP = 800;
   let paused = false;
   let fails = 0;
   let lastOk = 0;
@@ -116,9 +108,8 @@
   let shotTimer = null;
   function loadShot() {
     if (paused) return;
-    const s = SIZES[sizeKey];
     SHOT.classList.add("loading");
-    SHOT.src = "/api/snapshot?w=" + s.w + "&q=" + s.q + "&t=" + Date.now();
+    SHOT.src = "/api/snapshot?w=" + SHOT_W + "&q=" + SHOT_Q + "&t=" + Date.now();
   }
   SHOT.addEventListener("load", () => {
     SHOT.classList.remove("loading");
@@ -127,7 +118,7 @@
     setErr("");
     $("stamp").textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
     clearTimeout(shotTimer);
-    shotTimer = setTimeout(loadShot, SIZES[sizeKey].interval);
+    shotTimer = setTimeout(loadShot, SHOT_GAP);
   });
   SHOT.addEventListener("error", () => {
     SHOT.classList.remove("loading");
@@ -156,7 +147,9 @@
     setTimeout(poll, paused ? 4000 : 2000);
   }
 
-  function pct(v) { return Math.max(0, Math.min(100, Math.round((v || 0) * 1000) / 10)); }
+  // 服务端 /api/stats 的 bars 已经是百分数（hp: 64.2 就是 64.2%），这里只做钳位，
+  // 千万别再乘 100 —— 乘完 64.2 变 6420，被 clamp 成 100，三条全显示满格。
+  function pct(v) { return Math.max(0, Math.min(100, Math.round(v * 10) / 10)); }
 
   function render() {
     if (!stats) return;
@@ -176,17 +169,23 @@
     }
     DOT.className = cls;
     STATUS.textContent = text;
-    $("clock").textContent = st.capture_fps ? Math.round(st.capture_fps) + " fps" : "—";
 
     // 血条
     const bars = (st.bars && typeof st.bars === "object") ? st.bars : {};
     const val = (k) => {
       const v = bars[k];
-      if (v && typeof v === "object") return v.value != null ? v.value : 0;
-      return v || 0;
+      if (v === null || v === undefined) return null;
+      if (typeof v === "object") return v.value == null ? null : v.value;
+      return v;
     };
     [["hp", "hpFill", "hp"], ["mp", "mpFill", "mp"], ["exp", "expFill", "exp"]].forEach(([k, fill, out]) => {
-      const p = pct(val(k));
+      const v = val(k);
+      if (v === null) {                     // 没读到（窗口最小化/坐标没标定）就老实显示横杠
+        $(fill).style.width = "0%";
+        $(out).textContent = "—";
+        return;
+      }
+      const p = pct(v);
       $(fill).style.width = p + "%";
       $(out).textContent = p.toFixed(1) + "%";
     });
@@ -237,19 +236,15 @@
     ctx.fill();
   }
 
-  // ---- 按钮 ----
-  function renderSizeBtn() {
-    $("sizeBtn").textContent = "清晰度：" + SIZES[sizeKey].label;
-    $("sizeBtn").className = "btn" + (sizeKey === "high" ? " on" : "");
-  }
-  $("sizeBtn").addEventListener("click", () => {
-    sizeKey = sizeKey === "low" ? "high" : "low";
-    localStorage.setItem("msfarm.m.size", sizeKey);
-    renderSizeBtn();
-    clearTimeout(shotTimer);
-    loadShot();
-  });
+  // 右上角显示"这张图是几秒前拍的"。以前这里显示服务端采集 fps，和手机上
+  // 2~3 秒一张的实际观感对不上，看着像在骗人。
+  setInterval(() => {
+    if (!lastOk) { $("clock").textContent = "—"; return; }
+    const s = Math.max(0, (Date.now() - lastOk) / 1000);
+    $("clock").textContent = (s < 10 ? s.toFixed(1) : Math.round(s)) + " 秒前";
+  }, 500);
 
+  // ---- 按钮 ----
   $("pauseBtn").addEventListener("click", () => {
     paused = !paused;
     $("pauseBtn").textContent = paused ? "继续" : "暂停";
@@ -264,7 +259,6 @@
     else if (!paused) { loadShot(); }
   });
 
-  renderSizeBtn();
   loadShot();
   poll();
 })();

@@ -268,6 +268,7 @@ class Grabber(threading.Thread):
         self.client_size = (0, 0)
         self.capture_fps = 0.0
         self.stream_fps = 0.0
+        self.last_sent_wall = 0.0
         self.frames_sent = 0
         self.last_frame_ts = 0.0
         self.error = ""
@@ -331,6 +332,7 @@ class Grabber(threading.Thread):
 
     def note_sent(self):
         self.frames_sent += 1
+        self.last_sent_wall = time.time()
 
 
 grabber = Grabber()
@@ -625,6 +627,11 @@ def measure_bar(frame, rect, hue=None):
     if x2 - x1 < 8 or y2 - y1 < 2:
         return None
     sx1, sx2 = slot_bounds(frame, x1, y1, x2, y2)
+    # 深色皮肤的槽（EXP 常见：空槽是暗的、不"亮"）会让 slot_bounds 把"彩色填充段"
+    # 误当成整条槽 —— 分母缩到填充宽度，读数永远 100%。槽不可能比 ROI 还窄，
+    # 遇到这种明显缩水的就退回用 ROI 当分母。
+    if sx2 - sx1 < (x2 - x1) * 0.6:
+        sx1, sx2 = x1, x2
     x1, x2 = sx1 + 1, sx2                # 去掉左右 1px 边框，numpy 切片末端正好排掉右框
     if x2 - x1 < 4:
         return None
@@ -1380,6 +1387,10 @@ async def html_ver():
 @app.get("/api/stats")
 async def stats():
     age = (time.time() - grabber.last_frame_ts) * 1000 if grabber.last_frame_ts else -1
+    # 没人看流时 /stream 的计时循环不跑，stream_fps 会冻在上次的值上（看着像"还在推 30 帧"）。
+    # 用最后一帧发出的时间判断新鲜度，超过 1.5 秒就当 0。
+    sent_age = time.time() - grabber.last_sent_wall if grabber.last_sent_wall else -1
+    stream_fps = round(grabber.stream_fps, 1) if 0 <= sent_age < 1.5 else 0.0
     with det_lock:
         counts = dict(det_state["counts"])
     top = sorted(counts.items(), key=lambda kv: -kv[1])[:4]
@@ -1388,7 +1399,7 @@ async def stats():
         "window_title": WINDOW_TITLE,
         "client_size": list(grabber.client_size),
         "capture_fps": round(grabber.capture_fps, 1),
-        "stream_fps": round(grabber.stream_fps, 1),
+        "stream_fps": stream_fps,
         "frame_age_ms": round(age, 0),
         "error": grabber.error,
         "detect_enabled": det_state["enabled"],

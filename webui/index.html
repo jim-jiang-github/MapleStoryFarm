@@ -89,19 +89,33 @@
   .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--hint); }
   .dot.on { background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,.22); }
   .dot.off { background: #ef4444; }
-  .panel { display: flex; flex-direction: column; gap: 12px; }
-  /* ---- 状态条读数（HP / MP / EXP）---- */
-  .bars { display: flex; flex-direction: column; gap: 6px; }
-  .bar { display: flex; align-items: center; gap: 9px; }
+  /* ---- 一个窄面板：血条在左、指标在右，右侧留给按钮 ---- */
+  .low { display: flex; gap: 14px; align-items: flex-start; }
+  .side { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+  .panel {
+    flex: 0 0 440px;
+    display: flex; flex-direction: column; gap: 9px;
+    padding: 10px 12px 11px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: #fbfaf9;
+  }
+  /* 血条 | 指标 并排；手机屏（≤560px）自动退回上下排列 */
+  .gauge { display: flex; align-items: stretch; gap: 14px; }
+  /* 血条和右边的指标区等高，三条在竖直方向居中，右侧竖线贯穿整块 */
+  .bars { flex: 0 0 158px; display: flex; flex-direction: column; justify-content: center; gap: 5px; }
+  /* 标记顺序是 bk/btrack/bv，这里用 order 摆成"标签 - 轨道 - 数值" */
+  .bar { display: flex; align-items: center; gap: 8px; }
   .bk {
-    width: 30px; flex: 0 0 auto;
-    font-size: 11px; font-weight: 700; letter-spacing: .04em;
+    order: 1; width: 28px; flex: 0 0 auto;
+    font-size: 10.5px; font-weight: 700; letter-spacing: .06em;
     color: var(--muted);
   }
   .btrack {
-    flex: 1 1 auto; height: 8px; border-radius: 999px;
+    order: 2; flex: 1 1 auto;
+    height: 5px; border-radius: 999px;
     background: #e7e5e4; overflow: hidden;
-    box-shadow: inset 0 1px 2px rgba(0,0,0,.07);
+    box-shadow: inset 0 1px 1px rgba(0,0,0,.06);
   }
   .btrack i {
     display: block; height: 100%; width: 0;
@@ -112,30 +126,49 @@
   .bar[data-k="mp"] .btrack i { background: linear-gradient(90deg, #60c5f0, #2563eb); }
   .bar[data-k="exp"] .btrack i { background: linear-gradient(90deg, #d9f99d, #65a30d); }
   .bv {
-    width: 46px; flex: 0 0 auto; text-align: right;
-    font-size: 12px; color: var(--text);
+    order: 3; width: 44px; flex: 0 0 auto; text-align: right;
+    font-size: 11.5px; color: var(--text);
     font-variant-numeric: tabular-nums;
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
   .bar.low .btrack i { background: linear-gradient(90deg, #fca5a5, #dc2626); }
   .bar.low .bv { color: var(--bad); font-weight: 600; }
   .bar.off .bv { color: var(--hint); }
+  /* 指标：一行一项，标签在左、数值在右（并排时靠一条竖线和血条分开） */
   .rows {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 4px 22px;
+    flex: 1 1 auto; min-width: 0;
+    display: flex; flex-direction: column; gap: 2px;
+    padding-left: 13px;
+    border-left: 1px solid var(--border);
   }
-  .row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-  .k { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .k { font-size: 11px; color: var(--hint); white-space: nowrap; flex: 0 0 auto; }
   .v {
-    font-size: 13px; font-variant-numeric: tabular-nums;
+    font-size: 12px; color: var(--text);
+    font-variant-numeric: tabular-nums;
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    text-align: right;
   }
   .v.warn { color: var(--bad); }
-  .v.small { font-size: 11px; }
+  .v.small { font-size: 11.5px; }
+  /* EXP 走势：小折线，纵轴按数据自适应（固定 0~100 会因为涨得慢看成一条直线） */
+  .trend { padding-top: 8px; border-top: 1px solid var(--border); }
+  .trend .cap {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+    font-size: 10.5px; color: var(--hint); margin-bottom: 3px;
+  }
+  .trend .sub {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  #expChart { display: block; width: 100%; height: 46px; }
   button:disabled { opacity: .55; cursor: default; }
   button.on { background: #eaf3de; border-color: #b5cf8f; }
   .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  /* 包按钮用的 span：display:contents 让里面的按钮仍按 .actions 的 flex 排 */
+  #calBox { display: contents; }
+  #calBox[hidden] { display: none; }
   button {
     flex: 1;
     padding: 7px 10px;
@@ -209,10 +242,18 @@
     .actions button { flex: 0 0 auto; min-width: 104px; padding: 7px 16px; }
     .filterrow { max-width: 420px; }
   }
+  /* 窄屏：面板和按钮不再并排，面板铺满一行 */
+  @media (max-width: 860px) {
+    .low { flex-direction: column; }
+    .panel { flex: 1 1 auto; }
+  }
   @media (max-width: 560px) {
     body { padding: 16px 10px; }
     .wrap { --card-pad: 12px; }
-    .rows { grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 2px 14px; }
+    /* 手机屏：血条一行、指标一行，上下排列 */
+    .gauge { flex-direction: column; gap: 8px; }
+    .bars { flex: 0 0 auto; width: 100%; }
+    .rows { padding-left: 0; border-left: 0; padding-top: 8px; border-top: 1px solid var(--border); }
   }
 </style>
 </head>
@@ -228,42 +269,56 @@
       <canvas id="maskLayer" class="masklay"></canvas>
     </div>
 
-    <div class="panel">
-      <div class="bars" id="bars">
-        <div class="bar" data-k="hp"><span class="bk">HP</span><span class="btrack"><i></i></span><span class="bv">—</span></div>
-        <div class="bar" data-k="mp"><span class="bk">MP</span><span class="btrack"><i></i></span><span class="bv">—</span></div>
-        <div class="bar" data-k="exp"><span class="bk">EXP</span><span class="btrack"><i></i></span><span class="bv">—</span></div>
+    <div class="low">
+      <div class="panel">
+        <!-- 宽屏：血条在左、指标在右并排；手机屏（≤560px）自动变回上下排列 -->
+        <div class="gauge">
+          <div class="bars" id="bars">
+            <div class="bar" data-k="hp"><span class="bk">HP</span><span class="bv">—</span><span class="btrack"><i></i></span></div>
+            <div class="bar" data-k="mp"><span class="bk">MP</span><span class="bv">—</span><span class="btrack"><i></i></span></div>
+            <div class="bar" data-k="exp"><span class="bk">EXP</span><span class="bv">—</span><span class="btrack"><i></i></span></div>
+          </div>
+          <div class="rows">
+            <div class="row"><span class="k">客户区</span><span class="v" id="size">—</span></div>
+            <div class="row"><span class="k">采集</span><span class="v" id="cfps">—</span></div>
+            <div class="row"><span class="k">推送</span><span class="v" id="sfps">—</span></div>
+            <div class="row"><span class="k">帧延迟</span><span class="v" id="age">—</span></div>
+            <div class="row"><span class="k">检测耗时</span><span class="v" id="dms">—</span></div>
+            <div class="row"><span class="k">检出目标</span><span class="v" id="targets">—</span></div>
+            <div class="row"><span class="k">瞬现过滤</span><span class="v" id="pending">—</span></div>
+            <div class="row"><span class="k">推理模式</span><span class="v small" id="mode">—</span></div>
+            <div class="row"><span class="k">类别</span><span class="v small" id="classes">—</span></div>
+            <div class="row"><span class="k">锁定目标</span><span class="v small" id="lock">—</span></div>
+            <div class="row"><span class="k">条位置</span><span class="v small" id="barsrc">—</span></div>
+          </div>
+        </div>
+        <div class="trend">
+          <div class="cap"><span id="expCap">EXP 变化</span><span class="sub" id="expRange">—</span></div>
+          <canvas id="expChart"></canvas>
+        </div>
       </div>
-      <div class="rows">
-        <div class="row"><span class="k">条位置</span><span class="v small" id="barsrc">—</span></div>
-        <div class="row"><span class="k">客户区</span><span class="v" id="size">—</span></div>
-        <div class="row"><span class="k">采集帧率</span><span class="v" id="cfps">—</span></div>
-        <div class="row"><span class="k">推送帧率</span><span class="v" id="sfps">—</span></div>
-        <div class="row"><span class="k">帧延迟</span><span class="v" id="age">—</span></div>
-        <div class="row"><span class="k">检测耗时</span><span class="v" id="dms">—</span></div>
-        <div class="row"><span class="k">检出目标</span><span class="v" id="targets">—</span></div>
-        <div class="row"><span class="k">瞬现过滤</span><span class="v" id="pending">—</span></div>
-        <div class="row"><span class="k">类别</span><span class="v small" id="classes">—</span></div>
-        <div class="row"><span class="k">锁定目标</span><span class="v small" id="lock">—</span></div>
-        <div class="row"><span class="k">推理模式</span><span class="v small" id="mode">—</span></div>
-      </div>
-      <div class="actions">
-        <button id="toggle">暂停</button>
-        <button id="detect">识别: 关</button>
-        <button id="modeBtn">模式: 速度</button>
-        <button id="focusBtn" title="把游戏窗口抬到最前并给焦点（截图前必做）">前置游戏</button>
-        <button id="calBtn" title="依次框出 HP / MP / EXP 条的位置（沿条拖一下就行，会自动补齐整条槽）">标定条</button>
-        <button id="autoBtn" title="在画面底部自动找三条血/蓝/经验条；自动模式下换客户端、换分辨率会自己重新定位，一般不用点">自动定位</button>
-        <button id="ovBtn" title="在画面上画出三条的框：白框=参与判定的 ROI，洋红框=整条槽（百分比的分母），黄竖线=填充终点">标定框: 关</button>
-        <button id="snap">存快照</button>
-      </div>
-      <div class="filterrow">
-        <input id="filter" placeholder="只识别某类，如 Stump（留空 = 全部）" spellcheck="false" />
+
+      <div class="side">
+        <div class="actions">
+          <button id="toggle">暂停</button>
+          <button id="detect">识别: 关</button>
+          <button id="modeBtn">模式: 速度</button>
+          <button id="focusBtn" title="把游戏窗口抬到最前并给焦点（截图前必做）">前置游戏</button>
+          <!-- 标定/自动定位平时用不上：auto 定位在后台自己跑，坐标存在 webui/bars.json。
+               真要手动框的时候在地址后面加 ?cal=1 把这两个按钮放出来。 -->
+          <span id="calBox" hidden>
+            <button id="calBtn" title="依次框出 HP / MP / EXP 条的位置（沿条拖一下就行，会自动补齐整条槽）">标定条</button>
+            <button id="autoBtn" title="在画面底部自动找三条血/蓝/经验条；自动模式下换客户端、换分辨率会自己重新定位">自动定位</button>
+          </span>
+        </div>
+        <div class="filterrow">
+          <input id="filter" placeholder="只识别某类，如 Stump（留空 = 全部）" spellcheck="false" />
+        </div>
       </div>
     </div>
   </div>
 
-  <p class="note">双击选区进入编辑（拖动移动 · 拉角缩放 · 右上角 ✕ 删除）· 右键画面可添加排除区 · 改动即时保存到 webui/masks.json · 三条状态条默认自动定位（换客户端/换分辨率会自己重定位）；自动定位失效时才用「标定条」按 HP → MP → EXP 顺序沿条拖一个框（只框彩色部分也行，会自动补齐整条槽），手框过的坐标不再被自动覆盖</p>
+  <p class="note">双击选区进入编辑（拖动移动 · 拉角缩放 · 右上角 ✕ 删除）· 右键画面可添加排除区 · 改动即时保存到 webui/masks.json · 三条状态条由后台自动定位，换客户端/换分辨率会自己重定位；画面上始终画出定位框（白框=判定区，洋红框=整条槽，黄线=填充终点）。坐标真要手动框时，在地址后面加 <code>?cal=1</code> 放出「标定条」按钮</p>
 </div>
 
 <div class="ctx" id="ctxMenu"></div>
@@ -285,7 +340,7 @@
   const $ = (id) => document.getElementById(id);
   const view = $("view");
   let paused = false;
-  let overlayOn = false;          // 是否在画面上画出三条状态条的定位框
+  const overlayOn = true;         // 定位框常开：画面上一直画出三条状态条的判定框
 
   /* 画面只有一条路：MJPEG（/stream）。本地和局域网带宽充足，这条最省事、延迟最低，
      编辑屏蔽区 / 标定姿态条也靠它。
@@ -318,47 +373,14 @@
     return "/stream?w=" + curStreamW + "&q=85&t=" + Date.now() + (overlayOn ? "&bars=1" : "");
   }
 
-  function snapURL(big) {
-    const q = ["t=" + Date.now(), "fresh=0"];
-    if (overlayOn) q.push("bars=1");
-    if (!big) { q.push("w=1000", "q=68"); }
-    return "/api/snapshot?" + q.join("&");
-  }
-
-  let pollOn = false, pollNext = null, lastFrameAt = 0, streamStartAt = 0;
-
-  /* 兜底：极少数情况下 MJPEG 半死（有连接、不来帧），改成一帧一张 JPEG。
-     一张下完再要下一张 —— 用定时器换 src 会打断还没下完的那张，画面永远出不来。 */
-  function startPoll() {
-    pollOn = true;
-    if (!paused) view.src = snapURL(false);
-  }
-
-  function stopPoll() {
-    pollOn = false;
-    clearTimeout(pollNext);
-    pollNext = null;
-  }
-
-  function scheduleNextPoll() {
-    if (!pollOn || paused) return;
-    clearTimeout(pollNext);
-    pollNext = setTimeout(() => { if (pollOn && !paused) view.src = snapURL(false); }, 1800);
-  }
-
+  /* 只有一条路：MJPEG。别再往「逐帧轮询」上兜底 —— 曾经加过一个看门狗，
+     靠 img 的 load 事件判断"有没有来帧"，但 Chrome 对 multipart/x-mixed-replace
+     的 <img> 压根不触发 load，于是连接好端端的，6 秒后自己切到 1.8 秒一张，
+     本地看着就成了幻灯片。宁可不兜底：真断了按一下暂停/继续（或刷新）重连。 */
   function refresh() {
-    stopPoll();
     if (paused) { view.src = ""; return; }
-    streamStartAt = Date.now();
     view.src = streamURL();
   }
-
-  /* 看门狗：6 秒还没来帧，说明这条 MJPEG 被中介憋住了，切逐帧。 */
-  setInterval(() => {
-    if (paused || pollOn) return;
-    const since = lastFrameAt || streamStartAt;
-    if (since && Date.now() - since > 6000) startPoll();
-  }, 3000);
 
   /* ========== 排除区域：半透明遮罩 · 双击编辑 · 右键菜单 · 角上删除 ========== */
   const tile = $("tile");
@@ -758,11 +780,87 @@
     });
   }
 
+  /* ---- EXP 走势：每 2 秒记一个点，窗口 10 分钟 ----
+     经验条涨得慢，纵轴按窗口内的实际范围自适应；固定 0~100 会看成一条贴着
+     100% 的直线，什么都看不出来。 */
+  const EXP_WIN_MS = 10 * 60 * 1000;
+  const EXP_STEP_MS = 2000;
+  const expHist = [];             // [{t, v}]
+  let expLastAt = 0;
+
+  function recordExp(v) {
+    if (typeof v !== "number" || !isFinite(v)) return;
+    const now = Date.now();
+    if (expHist.length && now - expLastAt < EXP_STEP_MS) return;
+    expLastAt = now;
+    expHist.push({ t: now, v });
+    const cut = now - EXP_WIN_MS;
+    while (expHist.length && expHist[0].t < cut) expHist.shift();
+    drawExpChart();
+  }
+
+  function drawExpChart() {
+    const cv = $("expChart");
+    if (!cv) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const cw = cv.clientWidth || 320, ch = cv.clientHeight || 46;
+    const pw = Math.round(cw * dpr), ph = Math.round(ch * dpr);
+    if (cv.width !== pw || cv.height !== ph) { cv.width = pw; cv.height = ph; }
+    const ctx = cv.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+
+    const now = Date.now();
+    const x = (t) => Math.max(0, Math.min(cw, cw * (1 - (now - t) / EXP_WIN_MS)));
+    ctx.strokeStyle = "rgba(120,113,108,.18)";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, ch - 0.5); ctx.lineTo(cw, ch - 0.5); ctx.stroke();
+
+    if (expHist.length < 2) {
+      $("expRange").textContent = "采样中…";
+      return;
+    }
+    let rawLo = Infinity, rawHi = -Infinity;
+    expHist.forEach((p) => { rawLo = Math.min(rawLo, p.v); rawHi = Math.max(rawHi, p.v); });
+    let lo = rawLo, hi = rawHi;
+    if (hi - lo < 0.5) { lo -= 0.3; hi += 0.3; }      // 几乎没变化时给点纵向余量
+    const pad = 4;
+    const y = (v) => ch - pad - ((v - lo) / (hi - lo)) * (ch - pad * 2);
+    const line = (close) => {
+      ctx.beginPath();
+      expHist.forEach((p, i) => (i ? ctx.lineTo(x(p.t), y(p.v)) : ctx.moveTo(x(p.t), y(p.v))));
+      if (close) {
+        ctx.lineTo(x(expHist[expHist.length - 1].t), ch);
+        ctx.lineTo(x(expHist[0].t), ch);
+        ctx.closePath();
+      }
+    };
+    line(true);
+    const g = ctx.createLinearGradient(0, 0, 0, ch);
+    g.addColorStop(0, "rgba(101,163,13,.22)");
+    g.addColorStop(1, "rgba(101,163,13,0)");
+    ctx.fillStyle = g;
+    ctx.fill();
+    line(false);
+    ctx.strokeStyle = "#65a30d";
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+
+    const last = expHist[expHist.length - 1];
+    ctx.beginPath();
+    ctx.arc(x(last.t), y(last.v), 2.2, 0, Math.PI * 2);
+    ctx.fillStyle = "#65a30d";
+    ctx.fill();
+
+    $("expRange").textContent = `${rawLo.toFixed(1)}% → ${rawHi.toFixed(1)}%`;
+  }
+
   async function pollBars() {
     try {
       const r = await (await fetch("/api/bars", { cache: "no-store" })).json();
       barsCfg = r.bars || {};
       renderBars(r.values);
+      recordExp(r.values ? r.values.exp : null);
       const el = $("barsrc");
       if (el) {
         const src = r.source === "manual" ? "手动" : "自动";
@@ -772,19 +870,18 @@
     } catch (e) { /* 服务未就绪：保持上次读数 */ }
   }
 
-  $("ovBtn").addEventListener("click", (e) => {
-    overlayOn = !overlayOn;
-    const btn = e.currentTarget;
-    btn.textContent = "标定框: " + (overlayOn ? "开" : "关");
-    btn.classList.toggle("on", overlayOn);
-    refresh();
-    if (!paused) $("badge").textContent = overlayOn ? "实时 · 含定位框" : "实时";
-  });
+  /* 标定框一直画在画面上（白框=判定 ROI，洋红框=整条槽，黄线=填充终点），
+     不再给开关按钮。标定/自动定位两个按钮平时藏着，
+     需要手动框坐标时在地址后面加 ?cal=1 才放出来。 */
+  if (new URLSearchParams(location.search).has("cal")) $("calBox").hidden = false;
 
   $("calBtn").addEventListener("click", () => {
     if (barCal) cancelBarCal();
     else startBarCal();
   });
+
+  /* 标定/自动定位两个按钮平时藏着，需要手动框坐标时在地址后面加 ?cal=1 才放出来。 */
+  if (new URLSearchParams(location.search).has("cal")) $("calBox").hidden = false;
 
   $("autoBtn").addEventListener("click", async (e) => {
     const btn = e.currentTarget;
@@ -1046,32 +1143,26 @@
   /* 远端先测带宽再定码率；本机直连不用测（局域网几十兆，随便给）。
      这一步会多花 1~3 秒，但换来的是"码流永远小于链路"，才是真的不卡。 */
   refresh();
+  drawExpChart();                    // 先把画布按实际宽度铺好，别等第一个数据点
 
   if (window.ResizeObserver) new ResizeObserver(layoutLayer).observe(tile);
   let relinkTimer = null;
   window.addEventListener("resize", () => {
     layoutLayer();
+    drawExpChart();                  // 面板宽度会跟着变，画布要重设分辨率再画
     clearTimeout(relinkTimer);
     relinkTimer = setTimeout(() => {
-      if (paused || pollOn) return;
+      if (paused) return;
       if (wantStreamW() !== curStreamW) refresh();   // 只换尺寸，不动帧率
     }, 500);
   });
   loadMasks();
 
+  /* MJPEG 每来一帧都会触发 load（Chrome 里偶尔一次都不触发，所以这里只做
+     "有就顺手校正一下" 的事，不拿它当心跳）。badge 由 /api/stats 的轮询统一维护。 */
   view.addEventListener("load", () => {
-    lastFrameAt = Date.now();
-    $("badge").textContent = pollOn
-      ? "远程 · 逐帧"
-      : (overlayOn ? "实时 · 含定位框" : "实时");
-    // 只在画面比例真的变了才重排：每帧都 layoutLayer 会白白拖慢渲染
     const [fw, fh] = frameSize();
     if (fw && (fw !== lastNW || fh !== lastNH)) layoutLayer();
-    scheduleNextPoll();
-  });
-
-  view.addEventListener("error", () => {
-    scheduleNextPoll();     // 远端那张没拿到也要继续排下一张，别卡死
   });
 
   $("toggle").addEventListener("click", () => {
@@ -1079,13 +1170,6 @@
     $("toggle").textContent = paused ? "继续" : "暂停";
     refresh();
     if (paused) { $("badge").textContent = "已暂停"; $("dot").className = "dot"; }
-  });
-
-  $("snap").addEventListener("click", () => {
-    const a = document.createElement("a");
-    a.href = snapURL(true);
-    a.download = "snapshot.jpg";
-    a.click();
   });
 
   $("focusBtn").addEventListener("click", async () => {
@@ -1167,9 +1251,15 @@
       $("modeBtn").textContent = "模式: " + s.mode_label;
       $("modeBtn").className = s.mode === "accurate" ? "on" : "";
       if (maskOn !== s.mask) { maskOn = s.mask; updateMaskUI(); }   // 与后端保持一致
-      // 游戏窗口改尺寸 / 改分辨率后，画面比例跟着变，遮罩层要重新贴合
-      const [fw, fh] = frameSize();
-      if (fw && (fw !== lastNW || fh !== lastNH)) layoutLayer();
+      // 游戏窗口改尺寸 / 改分辨率后，画面比例跟着变，遮罩层要重新贴合。
+      // MJPEG 的 naturalWidth 在部分 Chrome 版本上一直是 0，用服务端报的客户区尺寸兜底。
+      const [fw0, fh0] = frameSize();
+      const fw = fw0 || (s.client_size && s.client_size[0]) || 0;
+      const fh = fh0 || (s.client_size && s.client_size[1]) || 0;
+      if (fw && fh && (fw !== lastNW || fh !== lastNH)) {
+        lastNW = fw; lastNH = fh;
+        layoutLayer();
+      }
       if (!paused) {
         $("badge").textContent = s.detect_loading ? "模型加载中"
           : (s.detect_enabled ? "识别中" : (found ? "实时" : "无信号"));
