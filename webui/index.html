@@ -360,6 +360,7 @@
   function qualitySpec() { return QUALITY[quality]; }
   let videoMode = false, videoKill = 0, videoUrl = null, videoFails = 0, videoFrags = 0;
   let videoPath = "";             // live=单连接直播 / seg=分片轮询（隧道缓冲时用）
+  let videoStalls = 0;            // 播放等待次数：网跟不上就自动降一档画质
 
   function videoOK() {
     return !!(window.MediaSource && MediaSource.isTypeSupported(VIDEO_MIME) && window.fetch);
@@ -507,6 +508,21 @@
       return chain;
     };
     const splitter = makeSplitter(enqueue);
+
+    // 卡顿监控：6 秒内出现 3 次以上缓冲等待，说明带宽不够，自动降一档
+    const mon = setInterval(() => {
+      if (kill !== videoKill) { clearInterval(mon); return; }
+      if (videoStalls >= 3 && quality !== "low") {
+        quality = quality === "high" ? "mid" : "low";
+        localStorage.setItem("msfarm.quality", quality);
+        renderQualityBtn();
+        toast("网速跟不上，已自动切到「" + qualitySpec().label + "」");
+        videoStalls = 0;
+        applyTransport();
+      } else {
+        videoStalls = 0;
+      }
+    }, 6000);
 
     // ① 先试长连接直播（最省事、延迟最低）
     let got = false;
@@ -1306,6 +1322,7 @@
     scheduleNextPoll();
   });
 
+  videoEl.addEventListener("waiting", () => { videoStalls++; });
   videoEl.addEventListener("loadedmetadata", () => { layoutLayer(); });
   videoEl.addEventListener("resize", () => { layoutLayer(); });
 
