@@ -265,6 +265,35 @@
     font-size: 12.5px; line-height: 1.7;
   }
   .dropz-card b { display: block; font-size: 15px; margin-bottom: 3px; }
+  /* ---- 人物模板：点「上传人物图」弹出的三合一落点（粘贴 / 拖入 / 选文件） ---- */
+  .pastebox {
+    position: fixed; inset: 0; z-index: 76;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(28,25,23,.38);
+  }
+  .pastebox.open { display: flex; }
+  .paste-card {
+    width: 352px; padding: 16px 16px 14px; border-radius: 12px;
+    background: #fff; box-shadow: 0 18px 44px rgba(0,0,0,.2);
+  }
+  .paste-t { font-size: 13.5px; font-weight: 600; margin-bottom: 10px; }
+  .paste-zone {
+    padding: 24px 14px; border-radius: 10px;
+    border: 2px dashed #d6d3d1; background: #fbfaf9;
+    text-align: center; cursor: pointer; outline: none;
+    transition: border-color .12s, background .12s;
+  }
+  .paste-zone:hover, .paste-zone:focus { border-color: #a8a29e; background: #f5f5f4; }
+  .paste-zone.over { border-color: var(--ok); background: #f0fdf4; }
+  .paste-zone .l1 { font-size: 13px; color: var(--text); }
+  .paste-zone .l1 b {
+    padding: 1px 5px; border-radius: 4px; font-weight: 600;
+    background: #f5f5f4; border: 1px solid var(--border);
+  }
+  .paste-zone .l2 { margin-top: 5px; font-size: 12px; color: var(--muted); }
+  .paste-hint { margin-top: 9px; font-size: 11px; color: var(--hint); line-height: 1.6; }
+  .paste-btns { margin-top: 12px; display: flex; justify-content: flex-end; }
+  .paste-btns button { flex: none; padding: 6px 14px; }
   .filterrow { margin-top: 10px; }
   .filterrow input {
     width: 100%;
@@ -394,6 +423,18 @@
       <button id="cCancel">取消</button>
       <button id="cOk" class="danger">删除</button>
     </div>
+  </div>
+</div>
+
+<div class="pastebox" id="pasteBox">
+  <div class="paste-card">
+    <div class="paste-t">截图找人物：用名字牌的小图当模板</div>
+    <div class="paste-zone" id="pasteZone" tabindex="0" role="button">
+      <div class="l1">点这里然后 <b>Ctrl+V</b> 粘贴截图</div>
+      <div class="l2">或把图片拖进来 / 点击选择文件</div>
+    </div>
+    <div class="paste-hint">只截「人物名字」那一小块最准（长条形，几厘米宽就够）；整张游戏截图会被拒。图也可以直接拖到页面任意位置。</div>
+    <div class="paste-btns"><button id="pasteCancel">取消</button></div>
   </div>
 </div>
 
@@ -951,6 +992,7 @@
       if (!res.ok) throw new Error(res.msg || "上传失败");
       charHasTpl = true;
       $("charClear").hidden = false;
+      closePaste();
       const ok = res.score >= res.thresh;
       toast(`已用这张图 ${res.size[0]}×${res.size[1]} 当模板，匹配分 ${res.score.toFixed(2)}`
             + (Math.abs(res.scale - 1) > 0.01 ? `（缩放 ${res.scale.toFixed(2)}×）` : "")
@@ -966,7 +1008,39 @@
     }
   }
 
-  $("charUpBtn").addEventListener("click", () => $("charFile").click());
+  /* 点「上传人物图」先弹一个落点面板：一个虚线框同时支持 粘贴 / 拖入 / 点选文件。
+     直接把文件对话框弹出来太硬——大部分人手里已经是剪贴板里的一张截图了。 */
+  const pasteBox = $("pasteBox"), pasteZone = $("pasteZone");
+  function openPaste() {
+    pasteBox.classList.add("open");
+    pasteZone.focus();                 // 焦点落在框上，Ctrl+V 一定粘到这里
+  }
+  function closePaste() {
+    pasteBox.classList.remove("open");
+    pasteZone.classList.remove("over");
+  }
+  $("charUpBtn").addEventListener("click", openPaste);
+  $("pasteCancel").addEventListener("click", closePaste);
+  pasteBox.addEventListener("mousedown", (e) => { if (e.target === pasteBox) closePaste(); });
+  pasteZone.addEventListener("click", () => $("charFile").click());
+  pasteZone.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("charFile").click(); }
+  });
+  /* 拖到虚线框里：只在本框内高亮，别让整页那层提示盖住它 */
+  ["dragenter", "dragover"].forEach((ev) => pasteZone.addEventListener(ev, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    pasteZone.classList.add("over");
+  }));
+  pasteZone.addEventListener("dragleave", () => pasteZone.classList.remove("over"));
+  pasteZone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    e.stopPropagation();             // 别让 document 的落点再处理一遍
+    pasteZone.classList.remove("over");
+    dropz.classList.remove("open");
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) useCharImage(f);
+  });
 
   $("charFile").addEventListener("change", (e) => {
     const f = e.target.files && e.target.files[0];
@@ -1427,6 +1501,9 @@
   maskLayer.addEventListener("pointercancel", () => { drag = null; drawMasks(); });
 
   document.addEventListener("keydown", (e) => {
+    if ($("pasteBox").classList.contains("open")) {
+      if (e.key === "Escape") { closePaste(); return; }
+    }
     if ($("confirmBox").classList.contains("open")) {
       if (e.key === "Escape") closeConfirm();
       return;
