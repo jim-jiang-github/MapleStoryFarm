@@ -2,7 +2,8 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<base href="http://127.0.0.1:8765/" />
+<!-- 不要写死 http://127.0.0.1:8765：页面被内网穿透/反代到别的域名时，写死的 base
+     会让所有相对请求跑回本机，外网打开就是一片空白 -->
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231c1917'/%3E%3Ccircle cx='8' cy='8' r='3.2' fill='%2322c55e'/%3E%3C/svg%3E" />
 <title>Capture 预览</title>
@@ -220,7 +221,7 @@
   <div class="card">
     <div class="tileWrap" id="tileWrap">
       <div class="tile" id="tile">
-        <img id="view" alt="游戏画面预览" src="/stream" />
+        <img id="view" alt="游戏画面预览" />
         <div class="badge"><span class="dot" id="dot"></span><span id="badge">等待画面</span></div>
       </div>
       <!-- 遮罩层放在 tile 外面：tile 有 overflow:hidden 会把贴边的把手裁掉 -->
@@ -285,11 +286,73 @@
   const view = $("view");
   let paused = false;
   let overlayOn = false;          // 是否在画面上画出三条状态条的定位框
+  /* 内网穿透（tunnelmole/ngrok/cloudflared…）会把 MJPEG 长连接憋住，而且很多免费隧道
+     只有一条到本机的连接：一旦开 /stream 就会把整条隧道堵死。所以——非本机访问时
+     一开始就用逐帧轮询，连试都不试。本地直连照旧走流，最省 CPU。 */
+  const LOCAL_HOSTS = ["localhost", "127.0.0.1", "::1", "[::1]", ""];
+  let remoteMode = !LOCAL_HOSTS.includes(location.hostname);
 
   function streamURL() {
     if (paused) return "";
     return "/stream?t=" + Date.now() + (overlayOn ? "&bars=1" : "");
   }
+
+  function snapURL(big) {
+    const q = ["t=" + Date.now(), "fresh=0"];
+    if (overlayOn) q.push("bars=1");
+    if (!big) { q.push("w=1000", "q=68"); }   // 远程模式：压小压瘦，省流量
+    return "/api/snapshot?" + q.join("&");
+  }
+
+  let pollOn = false, pollNext = null, lastFrameAt = 0, streamStartAt = 0;
+
+  /* 逐帧模式必须"一张拿完再要下一张"：穿透链路上单张要几百毫秒到几秒，
+     用 setInterval 定时换 src 会在上一张还没下载完时打断它，永远显示不出画面。 */
+  function startPoll() {
+    pollOn = true;
+    if (!paused) view.src = snapURL(false);
+  }
+
+  function stopPoll() {
+    pollOn = false;
+    clearTimeout(pollNext);
+    pollNext = null;
+  }
+
+  function scheduleNextPoll() {
+    if (!remoteMode || !pollOn || paused) return;
+    clearTimeout(pollNext);
+    pollNext = setTimeout(() => { if (remoteMode && pollOn && !paused) view.src = snapURL(false); }, 220);
+  }
+
+  function useRemoteMode() {
+    if (remoteMode) return;
+    remoteMode = true;
+    stopPoll();
+    startPoll();
+    $("badge").textContent = "远程模式 · 逐帧";
+    $("dot").className = "dot on";
+    toast("流式传输不通（多半是内网穿透缓冲了长连接），已切成逐帧刷新");
+  }
+
+  function applyTransport() {
+    if (paused) { view.src = ""; return; }
+    if (remoteMode) {
+      startPoll();
+      view.src = snapURL(false);
+      $("badge").textContent = "远程模式 · 逐帧";
+      $("dot").className = "dot on";
+    }
+    else { stopPoll(); streamStartAt = Date.now(); view.src = streamURL(); }
+  }
+
+  /* 看门狗：本地直连时 <img> 会不断触发 load（每帧一次）；走穿透时中间层把
+     多部分流憋住，一个字节都不给 -> 5 秒内没帧就自动切逐帧模式。 */
+  setInterval(() => {
+    if (paused || remoteMode) return;
+    const since = lastFrameAt || streamStartAt;
+    if (since && Date.now() - since > 5000) useRemoteMode();
+  }, 2000);
 
   /* 预览尺寸不用手动调：宽度完全跟着页面走（上限 1366，见 CSS --page-max），
      高度由画面真实比例算出来，窗口一变就自动等比缩放。 */
@@ -705,7 +768,7 @@
     const btn = e.currentTarget;
     btn.textContent = "标定框: " + (overlayOn ? "开" : "关");
     btn.classList.toggle("on", overlayOn);
-    view.src = streamURL();
+    applyTransport();
     if (!paused) $("badge").textContent = overlayOn ? "实时 · 含定位框" : "实时";
   });
 
@@ -971,25 +1034,35 @@
     updateMaskUI(); layoutLayer();
   }
 
+  applyTransport();       // 先定好用流还是逐帧（远端访问直接逐帧）
+
   if (window.ResizeObserver) new ResizeObserver(layoutLayer).observe(tile);
   window.addEventListener("resize", layoutLayer);
   loadMasks();
 
   view.addEventListener("load", () => {
-    $("badge").textContent = overlayOn ? "实时 · 含定位框" : "实时";
+    lastFrameAt = Date.now();
+    $("badge").textContent = remoteMode
+      ? "远程模式 · 逐帧"
+      : (overlayOn ? "实时 · 含定位框" : "实时");
     layoutLayer();          // 首帧到达后才知道真实画面比例，重新贴合遮罩层
+    scheduleNextPoll();
+  });
+
+  view.addEventListener("error", () => {
+    scheduleNextPoll();     // 远端那张没拿到也要继续排下一张，别卡死
   });
 
   $("toggle").addEventListener("click", () => {
     paused = !paused;
     $("toggle").textContent = paused ? "继续" : "暂停";
-    view.src = streamURL();
+    applyTransport();
     if (paused) { $("badge").textContent = "已暂停"; $("dot").className = "dot"; }
   });
 
   $("snap").addEventListener("click", () => {
     const a = document.createElement("a");
-    a.href = "/api/snapshot?t=" + Date.now() + (overlayOn ? "&bars=1" : "");
+    a.href = snapURL(true);
     a.download = "snapshot.jpg";
     a.click();
   });

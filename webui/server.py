@@ -7,6 +7,7 @@ Open: http://127.0.0.1:8765
 import asyncio
 import ctypes
 import json
+import os
 import re
 import socket
 import sys
@@ -1240,6 +1241,24 @@ app.add_middleware(
 )
 INDEX = Path(__file__).with_name("index.html")
 
+# 外网访问时的口令门（可选）：设了环境变量 PREVIEW_TOKEN 才生效，本地用不受影响。
+# 理由：这个页面等于"看你的屏幕 + 能把游戏窗口提到前台"，把 URL 直接公开风险太大。
+PREVIEW_TOKEN = (os.environ.get("PREVIEW_TOKEN") or "").strip()
+
+
+@app.middleware("http")
+async def _token_gate(request, call_next):
+    if not PREVIEW_TOKEN:
+        return await call_next(request)
+    if request.query_params.get("k") == PREVIEW_TOKEN:
+        resp = await call_next(request)
+        resp.set_cookie("pv", PREVIEW_TOKEN, max_age=7 * 86400, httponly=True, samesite="lax")
+        return resp
+    if request.cookies.get("pv") == PREVIEW_TOKEN:
+        return await call_next(request)
+    return Response("需要访问口令：在地址后面加 ?k=你的口令 再打开一次", status_code=401,
+                    media_type="text/plain; charset=utf-8")
+
 
 def encode(frame, width=None, quality=JPEG_QUALITY):
     h, w = frame.shape[:2]
@@ -1522,7 +1541,8 @@ async def window_focus():
 
 
 @app.get("/api/snapshot")
-async def snapshot(focus: int = 0, fresh: int = 1, bars: int = 0):
+async def snapshot(focus: int = 0, fresh: int = 1, bars: int = 0,
+                   w: int = 0, q: int = 0):
     """抓一张当前画面。
 
     focus=1 先前置游戏窗口，然后等到一帧"前置之后"的新画面再返回——否则拿到的
@@ -1538,7 +1558,7 @@ async def snapshot(focus: int = 0, fresh: int = 1, bars: int = 0):
     frame = grabber.snapshot()
     if bars:
         frame = await asyncio.to_thread(bars_overlay_frame, frame)
-    jpg = encode(frame, width=None, quality=92)
+    jpg = encode(frame, width=(w or None), quality=(q or 92))
     # 响应头只能是 latin-1，所以这里放英文状态；中文说明走 /api/window/focus 的 JSON
     state = "skip" if not focus else ("ok" if focus_ok else "fail")
     return Response(content=jpg, media_type="image/jpeg",
