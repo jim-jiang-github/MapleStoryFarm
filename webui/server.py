@@ -53,6 +53,14 @@ DETECT_CONF = 0.35
 # 检测器偶尔掉分（遮挡、特效、远处小目标）时不至于直接丢目标。
 # 界面上看到的框仍是跟踪器确认过的，噪声框不会冒出来。
 LOW_DETECT_CONF = 0.10
+# 显示门限：置信度低于这个值的轨迹不画框、不计数、不参与锁定。
+# 跟踪器内部仍用低分框续命（上面那段），所以「看不见」不等于「跟丢了」——
+# 阈值调高只是把 0.2/0.3 这种拿不准的框藏起来，不影响已经确认的目标继续被跟踪。
+# 这个值可以在页面上用滑块实时改（/api/detect/conf），存在同目录的 detconf.json。
+SHOW_CONF_DEFAULT = float(os.environ.get("PREVIEW_SHOW_CONF") or 0.60)
+SHOW_CONF_FILE = Path(__file__).with_name("detconf.json")
+# 已经锁定的目标允许比阈值低一点点继续保留，避免置信度正好卡在边界时反复掉锁
+LOCK_CONF_GRACE = 0.08
 # 两种部署配置，实测差异（30 帧真实画面，含 UI 排除+去重，对比 best.pt@960）：
 #   速度: INT8 384x672  ~44ms/22FPS  recall 83.6%  多检 0.8/帧
 #   精度: INT8 544x960  ~96ms/10FPS  recall 89.6%  多检 0.3/帧
@@ -928,10 +936,37 @@ det_state = {
     "lock_ts": 0.0,      # 最后一次锁上的时间（超过 3 秒就不再用 lock_box 找）
     "mask": True,        # UI 排除区开关：涂掉固定 UI 区域再推理
     "mode": "fast",      # fast(20+FPS) / accurate(精度优先)
+    "show_conf": SHOW_CONF_DEFAULT,   # 显示门限：低于它的目标不画框/不计数
     "error": "",
 }
 det_lock = threading.Lock()
 det_thread_started = [False]     # 检测线程只启动一次（内部按 mode 热切换模型）
+
+
+def _clamp_conf(v) -> float:
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return SHOW_CONF_DEFAULT
+    return round(min(0.95, max(0.05, v)), 2)
+
+
+def _load_show_conf() -> float:
+    """读取上次调的显示门限；文件坏了/没写过就用默认值。"""
+    try:
+        return _clamp_conf(json.loads(SHOW_CONF_FILE.read_text("utf-8"))["show_conf"])
+    except Exception:
+        return _clamp_conf(SHOW_CONF_DEFAULT)
+
+
+def _save_show_conf(v: float) -> None:
+    try:
+        SHOW_CONF_FILE.write_text(json.dumps({"show_conf": v}), encoding="utf-8")
+    except Exception:
+        pass          # 落盘失败不影响当前会话，只是重启后回到旧值
+
+
+det_state["show_conf"] = _load_show_conf()
 # Tracker（见 webui/track.py）实例化延后到导入之后
 
 BOX_COLOR = (96, 220, 64)      # BGR 亮绿
@@ -1153,21 +1188,33 @@ def detect_loop():
             prev = det_state["lock"]["tid"] if det_state["lock"] else None
             prev_box = det_state["lock_box"]
             stale = time.time() - det_state["lock_ts"] > 3.0
+            show_conf = det_state["show_conf"]
         if stale:                      # 锁定已经断了 3 秒，别再拿旧位置去找
             prev_box = None
-        locked_tid = pick_lock(tracks, prev, prev_box)
+
+        # 只保留置信度达标的目标：画框、计数、锁定都基于 vis。
+        # 跟踪器内部照样吃低分框（见 LOW_DETECT_CONF），所以某只怪偶尔掉到
+        # 0.5 只是这一两帧不显示，轨迹没断，分数回来就还是同一个 tid。
+        vis = [tr for tr in tracks if tr["conf"] >= show_conf]
+        if prev is not None:
+            for tr in tracks:          # 已锁定的目标带一点滞回，防在阈值附近反复掉锁
+                if tr["tid"] == prev and tr["conf"] >= show_conf - LOCK_CONF_GRACE:
+                    if not any(v["tid"] == prev for v in vis):
+                        vis.append(tr)
+                    break
+        locked_tid = pick_lock(vis, prev, prev_box)
 
         counts = {}
-        for tr in tracks:
+        for tr in vis:
             counts[tr["name"]] = counts.get(tr["name"], 0) + 1
         lock_info, lock_box = None, None
-        for tr in tracks:
+        for tr in vis:
             if tr["tid"] == locked_tid:
                 lock_info = {"tid": tr["tid"], "name": tr["name"],
                              "conf": round(tr["conf"], 2)}
                 lock_box = list(tr["box"])
 
-        annotated = draw_tracks(frame, tracks, locked_tid)
+        annotated = draw_tracks(frame, vis, locked_tid)
 
         with det_lock:
             det_state["annotated"] = annotated
@@ -1295,6 +1342,7 @@ async def stats():
         "infer_ms": round(det_state["infer_ms"], 0),
         "det_fps": round(det_state["det_fps"], 1),
         "targets": sum(counts.values()),
+        "show_conf": det_state["show_conf"],
         "pending": tracker.pending,
         "top_classes": [f"{k}×{v}" for k, v in top],
         "detect_error": det_state["error"],
@@ -1397,6 +1445,21 @@ async def detect_filter(name: str = ""):
     """设置类别过滤：name 为空显示全部，否则只画名字包含 name 的目标（不区分大小写）。"""
     det_state["filter"] = name.strip()
     return JSONResponse({"filter": det_state["filter"]})
+
+
+@app.get("/api/detect/conf")
+async def detect_conf(v: float = -1):
+    """显示门限（0.05~0.95）。不传 v 只读当前值，传了立即生效并存盘。
+
+    改的是「什么样的框算识别到」：低于门限的目标不画框、不计数、不参与锁定，
+    但跟踪器仍在内部跟着它，所以画面上不会出现「框跳来跳去」的抖动。
+    """
+    if v >= 0:
+        val = _clamp_conf(v)
+        with det_lock:
+            det_state["show_conf"] = val
+        _save_show_conf(val)
+    return JSONResponse({"show_conf": det_state["show_conf"]})
 
 
 @app.get("/api/detect/mask")
