@@ -298,10 +298,18 @@
   .paste-btns { margin-top: 12px; display: flex; justify-content: flex-end; }
   .paste-btns button { flex: none; padding: 6px 14px; }
   /* ---- 人物模板：有图显示缩略图（右上角红叉删），没图给一块显眼的虚线提示 ---- */
+  /* 血条列是固定宽度，投放位贴在列顶空白处，不参与三条血条的居中布局 */
+  .bars { position: relative; }
+  .charpot {
+    /* 三条血条在这一列里垂直居中，上方余量 = (列高 - 三条高) / 2。
+       投放位贴在这块余量的下沿（离血条 8px 左右），别飘到面板顶上。 */
+    position: absolute; left: 0; right: 0; bottom: calc(50% + 40px);
+    display: flex; justify-content: center;
+  }
   .cwrap { display: flex; align-items: center; justify-content: flex-end; gap: 7px; overflow: visible; }
   .ctpl { position: relative; display: inline-flex; flex: 0 0 auto; cursor: pointer; }
   .ctpl img {
-    height: 24px; width: auto; max-width: 160px; display: block;
+    height: 24px; width: auto; max-width: 140px; display: block;
     border: 1px solid var(--border); border-radius: 5px; background: #0c0a09;
     image-rendering: pixelated;   /* 名字牌是小图，放大后别糊成一团 */
   }
@@ -317,11 +325,10 @@
   }
   .ctpl .cdel:hover { background: #b91c1c; }
   .cneed {
-    display: inline-flex; align-items: center; gap: 4px;
-    padding: 3px 9px; border-radius: 999px; cursor: pointer;
-    font-size: 11px; font-weight: 600; color: #b45309;
+    display: inline-block; padding: 4px 9px; border-radius: 8px; cursor: pointer;
+    font-size: 10.5px; line-height: 1.5; font-weight: 600; color: #b45309;
     background: #fffbeb; border: 1px dashed #f59e0b;
-    white-space: nowrap;
+    text-align: center; white-space: normal; max-width: 100%;
   }
   .cneed:hover { background: #fef3c7; border-color: #d97706; }
   .cneed.busy { color: var(--muted); border-color: var(--border); background: #f5f5f4; }
@@ -353,6 +360,7 @@
     /* 手机屏：血条一行、指标一行，上下排列 */
     .gauge { flex-direction: column; gap: 8px; }
     .bars { flex: 0 0 auto; width: 100%; }
+    .charpot { position: static; margin-bottom: 6px; }
     .rows { padding-left: 0; border-left: 0; padding-top: 8px; border-top: 1px solid var(--border); }
   }
 </style>
@@ -374,6 +382,14 @@
         <!-- 宽屏：血条在左、指标在右并排；手机屏（≤560px）自动变回上下排列 -->
         <div class="gauge">
           <div class="bars" id="bars">
+            <!-- 人物模板的入口就放在血条上方这块空白里：没模板是提示块，有模板是缩略图 -->
+            <div class="charpot">
+              <span class="ctpl" id="charTpl" hidden title="当前人物模板：点图换一张">
+                <img id="charImg" alt="人物模板" />
+                <b class="cdel" id="charDel" title="删掉当前模板">×</b>
+              </span>
+              <b class="cneed" id="charNeed" title="点这里截图上传；也支持 Ctrl+V 粘贴 / 把图拖进来">⚠ 上传名字牌截图 · 点这里或 Ctrl+V</b>
+            </div>
             <div class="bar" data-k="hp"><span class="bk">HP</span><span class="bv">—</span><span class="btrack"><i></i></span></div>
             <div class="bar" data-k="mp"><span class="bk">MP</span><span class="bv">—</span><span class="btrack"><i></i></span></div>
             <div class="bar" data-k="exp"><span class="bk">EXP</span><span class="bv">—</span><span class="btrack"><i></i></span></div>
@@ -402,14 +418,7 @@
             <div class="row"><span class="k">类别</span><span class="v small" id="classes">—</span></div>
             <div class="row"><span class="k">锁定目标</span><span class="v small" id="lock">—</span></div>
             <div class="row"><span class="k">人物</span>
-              <span class="v small cwrap">
-                <span class="ctpl" id="charTpl" hidden title="当前人物模板：点图换一张">
-                  <img id="charImg" alt="人物模板" />
-                  <b class="cdel" id="charDel" title="删掉当前模板">×</b>
-                </span>
-                <b class="cneed" id="charNeed" title="点这里截图上传；也支持 Ctrl+V 粘贴 / 把图拖进来">⚠ 点这里上传名字牌截图</b>
-                <span id="charInfo"></span>
-              </span>
+              <span class="v small"><span id="charInfo">未设置</span></span>
             </div>
             <div class="row"><span class="k">箭头</span>
               <span class="v small"><select id="charDir" title="人物相对框的位置：名字牌在头顶 → 朝下指；名字画在脚下 → 朝上指">
@@ -928,8 +937,8 @@
     if (!!c.has_tpl !== charHasTpl) showCharTpl(!!c.has_tpl);
     if (c.dir && $("charDir").value !== c.dir) $("charDir").value = c.dir;
     if (!charHasTpl) {
-      $("charInfo").textContent = "";
-      $("charInfo").className = "small";
+      $("charInfo").textContent = "未设置";
+      $("charInfo").className = "";
       return;
     }
     const age = c.age;
@@ -1104,7 +1113,7 @@
       const r = await (await fetch("/api/char/template",
                                    { method: "DELETE", cache: "no-store" })).json();
       showCharTpl(false);
-      $("charInfo").textContent = "";
+      $("charInfo").textContent = "未设置";
       toast(r && r.thread === false
             ? "已删掉模板；找人线程刚才不在，已重新拉起"
             : "已删掉人物模板：再截一张名字牌粘进来就重新开始");
