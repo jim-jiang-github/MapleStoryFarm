@@ -473,6 +473,89 @@ def slot_bounds(frame, x1, y1, x2, y2):
     return wx1 + lo, wx1 + hi
 
 
+def _runs_of(mask, minlen=30):
+    """把布尔序列切成连续 True 段，返回 [(start, end)]（含端点）。"""
+    out, s = [], None
+    for i, b in enumerate(mask):
+        if b and s is None:
+            s = i
+        elif not b and s is not None:
+            if i - s >= minlen:
+                out.append((s, i - 1))
+            s = None
+    if s is not None and len(mask) - s >= minlen:
+        out.append((s, len(mask) - 1))
+    return out
+
+
+def find_bar_slots(frame):
+    """在画面底部自动找三条并排的细长槽（HP / MP / EXP 的固定排版）。
+
+    换客户端、换分辨率、换皮肤时不用手动标定——前提是"三条横排、等宽、靠屏幕下方"。
+    做法：在底部 20% 高度逐行找亮段（V>=110），挑三条宽度接近、间隔很小、细长
+    （宽高比>=5、高<=4.5%画面高）的相邻段，再按三条中心列向上/向下延伸出高度。
+    候选取"最贴底"的那组，所以状态条被 UI 抬高一点也照样能找到。
+
+    返回 [(x1, y1, x2, y2), ...]（像素，含边框，从左到右），找不到返回 None。
+    """
+    h, w = frame.shape[:2]
+    v = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)[..., 2]
+    best = None
+    for y in range(h - 1, int(h * 0.80) - 1, -1):
+        rs = [r for r in _runs_of(v[y] >= BAR_EDGE_V, 30) if r[1] - r[0] + 1 <= w * 0.4]
+        for i in range(len(rs) - 2):
+            trio = rs[i:i + 3]
+            ws = [t[1] - t[0] + 1 for t in trio]
+            gaps = [trio[j + 1][0] - trio[j][1] - 1 for j in range(2)]
+            if not all(0 <= g <= max(6, int(0.12 * max(ws))) for g in gaps):
+                continue
+            spread = max(ws) - min(ws)
+            if spread > 0.3 * max(ws) or sum(ws) < w * 0.12:
+                continue
+            cols = [(a + b) // 2 for a, b in trio]
+            y1 = y2 = y
+            while y1 - 1 >= 0 and all(v[y1 - 1, c] >= BAR_EDGE_V for c in cols):
+                y1 -= 1
+            while y2 + 1 < h and all(v[y2 + 1, c] >= BAR_EDGE_V for c in cols):
+                y2 += 1
+            hh = y2 - y1 + 1
+            if not (5 <= hh <= h * 0.045) or min(ws) / hh < 5:
+                continue
+            score = (abs(y2 - (h - 1)), spread / max(ws))   # 先求贴底，再求等宽
+            if best is None or score < best[0]:
+                best = (score, trio, y1, y2)
+    if not best:
+        return None
+    _, trio, y1, y2 = best
+    return [(a, y1, b, y2) for a, b in trio]
+
+
+def autolocate_bars(frame):
+    """自动定位三条槽，按 HP / MP / EXP 从左到右写入配置。返回 (ok, 说明, 配置)。"""
+    slots = find_bar_slots(frame)
+    if not slots:
+        return False, "没在画面底部找到三条并排的槽，请手动标定", None
+    h, w = frame.shape[:2]
+    cfg = {}
+    hues = {}
+    for kind, (x1, y1, x2, y2) in zip(BAR_KINDS, slots):
+        rect = {"x1": round(x1 / w, 4), "y1": round(y1 / h, 4),
+                "x2": round(x2 / w, 4), "y2": round(y2 / h, 4)}
+        hue = sample_bar_hue(frame, rect)
+        hues[kind] = hue
+        if hue is None:                       # 空条采样不到，退回该条默认色相
+            hue = DEFAULT_BARS[kind]["hue"]
+        cfg[kind] = {**rect, "hue": hue}
+    # 三条全采样不到颜色 -> 多半是把别的东西（白底对话框之类）当成了槽，别覆盖原配置
+    if all(v is None for v in hues.values()):
+        return False, "找到的三段没有填充色，可能是误判，请手动标定", None
+    with bar_lock:
+        BAR_CFG.clear()
+        BAR_CFG.update(cfg)
+    save_bars()
+    return True, "已自动定位", cfg
+
+
 def sample_bar_hue(frame, rect):
     """从条内左侧 1/4 采样填充色相。
 
@@ -1132,6 +1215,24 @@ async def bars_reset():
         BAR_CFG.update({k: dict(v) for k, v in DEFAULT_BARS.items()})
     save_bars()
     return JSONResponse({"ok": True, "bars": bar_snapshot()})
+
+
+@app.post("/api/bars/autolocate")
+async def bars_autolocate(focus: bool = True):
+    """在当前画面上自动找三条槽并写入配置（换客户端/换分辨率用）。
+
+    默认先前置游戏窗口——被别的窗口挡住时抓到的是遮挡窗口，底部根本没有那三条槽。
+    """
+    if focus:
+        stamp = grabber.stamp()
+        ok, _ = await asyncio.to_thread(bring_to_front)
+        if ok:
+            await asyncio.to_thread(grabber.wait_fresh, stamp, 1.5)
+        await asyncio.sleep(0.15)          # 等遮罩/过渡动画过去
+    ok, msg, cfg = await asyncio.to_thread(autolocate_bars, grabber.snapshot())
+    if not ok:
+        return JSONResponse({"ok": False, "msg": msg})
+    return JSONResponse({"ok": True, "msg": msg, "bars": cfg})
 
 
 @app.get("/api/bars/preview")

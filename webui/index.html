@@ -251,6 +251,7 @@
         <button id="modeBtn">模式: 速度</button>
         <button id="focusBtn" title="把游戏窗口抬到最前并给焦点（截图前必做）">前置游戏</button>
         <button id="calBtn" title="依次框出 HP / MP / EXP 条的位置（沿条拖一下就行，会自动补齐整条槽）">标定条</button>
+        <button id="autoBtn" title="在画面底部自动找三条血/蓝/经验条，换客户端或换分辨率后点一下就好">自动定位</button>
         <button id="snap">存快照</button>
       </div>
       <div class="filterrow">
@@ -688,6 +689,26 @@
   $("calBtn").addEventListener("click", () => {
     if (barCal) cancelBarCal();
     else startBarCal();
+  });
+
+  $("autoBtn").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    if (!grabberReady) { toast("还没抓到画面，先让游戏窗口在前台", true); return; }
+    if (barCal) cancelBarCal();
+    btn.disabled = true;
+    btn.textContent = "定位中…";
+    try {
+      const res = await postJSON("/api/bars/autolocate", {});
+      if (!res.ok) throw new Error(res.msg || "没找到");
+      barsCfg = res.bars || {};
+      toast("已自动定位三条槽");
+      await pollBars();
+    } catch (err) {
+      toast(err.message || "自动定位失败", true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "自动定位";
+    }
   });
 
   /* ---------- 删除二次确认弹窗 ---------- */
