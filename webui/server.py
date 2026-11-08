@@ -1326,13 +1326,18 @@ async def video_init(bars: int = 0, w: int = 0, fps: int = 0, kb: int = 0):
 
 @app.get("/video/seg")
 async def video_seg(i: int = 0, bars: int = 0, w: int = 0, fps: int = 0, kb: int = 0,
-                     wait: float = 2.0):
+                     wait: float = 2.0, n: int = 0):
     """取第 i 片起已经生成的分片。没有就挂最多 wait 秒（短连接，隧道能过）。
 
     返回 204 = 暂时没新片，按 X-Next 重试；409 = 客户端落后太多，分片已被回收，重连。
+
+    n>1 时一次凑够 n 片：免费隧道每请求的固定往返就有 1 秒上下，
+    1 秒一片永远追不上实时，必须一次搬 2 秒的量。
     """
     st = _video_stream(bars, w, fps, kb)
-    nxt, blob = await asyncio.to_thread(st.get_frags, i, min(max(wait, 0.1), 4.0))
+    want = n if n > 0 else st.hls_group
+    nxt, blob = await asyncio.to_thread(st.get_frags, i, min(max(wait, 0.1), 4.0),
+                                       min(max(want, 1), 6))
     if nxt is None:
         return Response(status_code=409, headers={"X-Resync": "1", "Cache-Control": "no-store"})
     headers = {"X-Next": str(nxt), "Cache-Control": "no-store"}
@@ -1392,7 +1397,7 @@ async def video_hls_playlist(request: Request, bars: int = 0, w: int = 0,
     st = _video_stream(bars, w, fps, kb)
     # 冷启动时先等够一整段：空播放列表 Safari 会当成错误直接不播
     t0 = time.time()
-    while len(st.frags) < video_mod.HLS_GROUP and not st.stopped.is_set() and time.time() - t0 < 4:
+    while len(st.frags) < st.hls_group and not st.stopped.is_set() and time.time() - t0 < 4:
         await asyncio.sleep(0.1)
     text = st.hls_playlist(extra=_hls_query(request))
     return Response(text, media_type="application/vnd.apple.mpegurl",
@@ -1426,6 +1431,16 @@ async def index():
         INDEX.read_text(encoding="utf-8"),
         headers={"Cache-Control": "no-store, max-age=0"},
     )
+
+
+@app.get("/api/px")
+async def speed_probe(bytes: int = 262144):
+    """测速用：返回一段**不可压缩**的随机字节，前端据此算出真实链路吞吐，
+    再决定给多少码率。免费隧道质量一天之内能从 1.5 Mbps 掉到 400 kbps，
+    写死码率的后果就是「昨天能看，今天一卡一卡的」。"""
+    n = max(16384, min(int(bytes), 2 * 1024 * 1024))
+    return Response(content=os.urandom(n), media_type="application/octet-stream",
+                    headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/ver")

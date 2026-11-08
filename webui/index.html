@@ -351,14 +351,46 @@
   /* 外网带宽是硬瓶颈：实测常见家用上行 + 免费隧道只有 1 Mbps 上下，
      所以默认 900k / 1000px / 15fps，画面在 MapleStory 这种平涂画面上够看。 */
   const QUALITY = {
+    udp:  { w: 600,  fps: 10, kb: 200,  label: "省流" },
     low:  { w: 800,  fps: 15, kb: 480,  label: "流畅" },
     mid:  { w: 1000, fps: 20, kb: 900,  label: "标准" },
     high: { w: 1280, fps: 25, kb: 1600, label: "高清" },
   };
-  const QKEYS = ["low", "mid", "high"];
+  const QKEYS = ["udp", "low", "mid", "high"];
+  // 用户自己点过画质按钮就不再自动改；没点过就按实测带宽选，别写死一档
+  const USER_PICKED = !!localStorage.getItem("msfarm.quality");
   let quality = localStorage.getItem("msfarm.quality") || "mid";
   if (!QUALITY[quality]) quality = "mid";
   function qualitySpec() { return QUALITY[quality]; }
+
+  /* 远端先量一次真实链路吞吐，再决定给多少码率。
+     免费隧道一天之内能从 1.5 Mbps 掉到 400 kbps（实测），写死 900k 等于只传得动
+     一半的码流：播放器隔几秒把缓冲吃空一次，看着就是"一直卡"。
+     128KB 不可压缩数据，慢的时候两三秒测完，比等一轮卡顿便宜。 */
+  async function measureKBps() {
+    const t0 = performance.now();
+    const ctl = new AbortController();
+    const to = setTimeout(() => ctl.abort(), 7000);
+    try {
+      const r = await fetch("/api/px?bytes=65536&t=" + Date.now(), { cache: "no-store", signal: ctl.signal });
+      if (!r.ok) return 0;
+      const n = (await r.arrayBuffer()).byteLength;
+      const dt = (performance.now() - t0) / 1000;
+      return dt > 0.05 && n ? n / 1024 / dt : 0;
+    } catch (e) { return 0; }
+    finally { clearTimeout(to); }
+  }
+
+  /* 阈值来自实测：免费隧道 TTFB 固定 1.1 秒，扣掉后纯吞吐 ~130 KB/s，
+     128KB 探针测出来大约是 62 KB/s —— 这已经把每段"过路费"摊进去了。
+     码流必须明显小于这个数（留 30%+ 余量），否则缓冲只会一点点被吃空。 */
+  function pickQualityByRate(kbs) {
+    if (!kbs) return null;
+    if (kbs >= 300) return "high";     // 实测 2.4 Mbps 以上
+    if (kbs >= 140) return "mid";      // 1Mbps 以上
+    if (kbs >= 80)  return "low";      // 640kbps 以上
+    return "udp";
+  }
   let videoMode = false, videoKill = 0, videoUrl = null, videoFails = 0, videoFrags = 0;
   let hlsFails = 0;
   let videoPath = "";             // live=单连接直播 / seg=分片轮询（隧道缓冲时用）
@@ -378,6 +410,18 @@
   function setPath(text) {
     const el = $("vpath");
     if (el) el.textContent = text;
+  }
+
+  let linkKbps = 0;               // 打开页面时测到的链路吞吐（KB/s），标在通道行末尾
+  function setVideoPathLabel() {
+    const spec = qualitySpec();
+    const mb = Math.round(spec.kb / 100) / 10;
+    const name = videoPath === "hls" ? "HLS 原生"
+               : videoPath === "live" ? "H.264 直播"
+               : videoPath === "seg" ? "H.264 分片" : "H.264";
+    let text = name + " " + spec.w + "p" + spec.fps + " · " + mb + "Mb";
+    if (linkKbps) text += " / 链路 " + Math.round(linkKbps * 8 / 100) / 10 + "Mb";
+    setPath(text);
   }
 
   function videoQuery() {
@@ -478,9 +522,10 @@
       const ahead = end - videoEl.currentTime;
       if (videoEl.currentTime > end) {
         videoEl.currentTime = Math.max(0, end - 0.3);          // 时间轴被裁掉了，跟回去
-      } else if (ahead > 2.5) {
-        // 落后太多才跳：每跳一次都会丢掉几帧，跳得越勤看着越卡
-        videoEl.currentTime = Math.max(0, end - 0.6);
+      } else if (ahead > 4.0) {
+        // 落后太多才跳：每跳一次都会丢掉几帧，跳得越勤看着越卡。
+        // 慢链路上宁可稳在"落后 2~3 秒"，也不要每 10 秒跳一次。
+        videoEl.currentTime = Math.max(0, end - 1.2);
       }
     };
     const feed = async (buf) => {
@@ -535,9 +580,9 @@
     const mon = setInterval(() => {
       if (kill !== videoKill) { clearInterval(mon); return; }
       if (Date.now() < warmup) { videoStalls = 0; return; }
-      if (videoStalls >= 3 && quality !== "low") {
-        quality = quality === "high" ? "mid" : "low";
-        localStorage.setItem("msfarm.quality", quality);
+      const lower = QKEYS[Math.max(0, QKEYS.indexOf(quality) - 1)];
+      if (videoStalls >= 3 && lower !== quality) {
+        quality = lower;
         renderQualityBtn();
         toast("网速跟不上，已自动切到「" + qualitySpec().label + "」");
         videoStalls = 0;
@@ -547,10 +592,14 @@
       }
     }, 6000);
 
-    // ① 先试长连接直播（最省事、延迟最低）
+    // ① 先试长连接直播（最省事、延迟最低）。
+    // 链路只有几百 kbps 的隧道基本养不住长连接，别在这儿白等 4 秒，直接走分片。
     let got = false;
+    if (linkKbps && linkKbps < 120) {
+      videoPath = "seg";   // 标记一下，下面的分片流程照常走
+    } else {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => { if (!got) ctrl.abort(); }, 6000);
+    const timer = setTimeout(() => { if (!got) ctrl.abort(); }, 4000);
     try {
       const res = await fetch("/video/live" + videoQuery(), { cache: "no-store", signal: ctrl.signal });
       if (res.ok && res.body) {
@@ -558,11 +607,7 @@
         while (kill === videoKill && !paused) {
           const { value, done } = await reader.read();
           if (done || !value) break;
-          if (!got) {
-            got = true; clearTimeout(timer); videoPath = "live";
-            const spec = qualitySpec();
-            setPath("H.264 直播 " + spec.w + "p" + spec.fps + " · " + Math.round(spec.kb / 100) / 10 + "Mb");
-          }
+          if (!got) { got = true; clearTimeout(timer); videoPath = "live"; setVideoPathLabel(); }
           splitter(value);
         }
       }
@@ -571,22 +616,31 @@
     } finally {
       clearTimeout(timer);
     }
+    }
     if (kill !== videoKill || paused) return;
     await chain;
     if (got) { markVideoReady(); return; }
 
     // ② 长连接不给数据（tunnelmole 这类会整段缓冲）→ 改用短请求逐片取
     videoPath = "seg";
+    let firstSeg = true;      // 首片只等 1 片，先出画面；之后每次 2 片追平实时
     const init = await fetch("/video/init" + videoQuery(), { cache: "no-store" });
     if (!init.ok) throw new Error("init HTTP " + init.status);
     let seq = parseInt(init.headers.get("X-Seq") || "0", 10) || 0;
     await feed(new Uint8Array(await init.arrayBuffer()));
     if (kill !== videoKill) return;
     markVideoReady();
+    setVideoPathLabel();
     while (kill === videoKill && !paused) {
       let r;
       try {
-        r = await fetch("/video/seg?i=" + seq + videoQuery(), { cache: "no-store" });
+        // 注意 videoQuery() 自带前导 "?"，这里必须换成 "&"，否则拼成 ?i=96?w=640
+        // 服务端解析不了 i，直接 422 —— 兜底通道会无限失败，画面一帧不动
+        // 首片只等 1 片（先把画面支起来），之后一次搬 2 秒的内容：
+        // 隧道每请求固定往返 ~1.1 秒，1 秒一片永远追不上实时
+        r = await fetch("/video/seg?i=" + seq + "&n=" + (firstSeg ? 1 : 2) +
+                        "&wait=" + (firstSeg ? 1.2 : 2.5) + "&" + videoQuery().slice(1),
+                        { cache: "no-store" });
       } catch (e) {
         await videoSleep(500);
         continue;
@@ -597,6 +651,7 @@
       if (r.status === 204) { seq = next; continue; }
       if (!r.ok) { await videoSleep(400); continue; }
       seq = next;
+      firstSeg = false;
       const age = parseInt(r.headers.get("X-Age") || "-1", 10);
       await feed(new Uint8Array(await r.arrayBuffer()));
       videoFrags++;
@@ -629,8 +684,7 @@
     });
     if (kill !== videoKill) return;
     markVideoReady();
-    const spec = qualitySpec();
-    setPath("HLS 原生 " + spec.w + "p" + spec.fps + " · " + Math.round(spec.kb / 100) / 10 + "Mb");
+    setVideoPathLabel();
   }
 
   async function startRemote() {
@@ -1366,7 +1420,28 @@
     updateMaskUI(); layoutLayer();
   }
 
-  applyTransport();       // 先定好用流还是逐帧（远端访问直接逐帧）
+  /* 远端先测带宽再定码率；本机直连不用测（局域网几十兆，随便给）。
+     这一步会多花 1~3 秒，但换来的是"码流永远小于链路"，才是真的不卡。 */
+  (async () => {
+    if (remoteMode) {
+      $("badge").textContent = "测速中…";
+      const kbs = await measureKBps();
+      const pick = pickQualityByRate(kbs);
+      if (pick) {
+        // 只降不升：用户手动选过的高档如果链路撑不住，照样降下来（不降就是一直卡）；
+        // 用户选过的低档则尊重他的选择，不偷偷升上去。
+        const iPick = QKEYS.indexOf(pick);
+        quality = QKEYS[USER_PICKED ? Math.min(iPick, QKEYS.indexOf(quality)) : iPick];
+      }
+      linkKbps = kbs || 0;
+      if (kbs) {
+        setPath("链路 " + Math.round(kbs) + " KB/s ≈ " + Math.round(kbs * 8 / 100) / 10 +
+                " Mbps · 定档「" + qualitySpec().label + "」");
+      }
+      renderQualityBtn();
+    }
+    applyTransport();     // 定好用流还是逐帧（远端访问直接逐帧）
+  })();
 
   if (window.ResizeObserver) new ResizeObserver(layoutLayer).observe(tile);
   window.addEventListener("resize", layoutLayer);

@@ -110,6 +110,10 @@ class VideoStream:
         self.bars = bool(bars)
         self.bitrate = bitrate or VIDEO_BITRATE
         self._kbps = _kbps(self.bitrate)
+        # 段长必须 >= 2 秒：隧道每次请求的固定往返就有 1.1 秒（实测 TTFB），
+        # 1 秒一段等于每段都要交 1.1 秒"过路费"，永远追不上实时。
+        # 2 秒一段时：480k 约 120KB，1.1 + 0.9 = 2.0 秒——刚好；260k 才有富余。
+        self.hls_group = HLS_GROUP
         self.key = (self.width, self.fps, self.bars)
 
         self.init = b""
@@ -177,11 +181,12 @@ class VideoStream:
     def hls_playlist(self, init_uri="init.mp4", seg_prefix="seg_", seg_ext=".m4s", extra=""):
         """滚动播放列表：最近几段 + EXT-X-MAP。iOS Safari 没有 MSE，但天生会放 HLS。"""
         with self.cond:
-            frags = list(self.frags)[-(HLS_WINDOW * HLS_GROUP):]
+            G = self.hls_group
+            frags = list(self.frags)[-(HLS_WINDOW * G):]
         lines = ["#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-INDEPENDENT-SEGMENTS"]
         # 只列"凑满一整段"的组，末组不满就先不给，免得播放器算错时长
-        groups = [frags[i:i + HLS_GROUP] for i in range(0, len(frags), HLS_GROUP)]
-        groups = [g for g in groups if len(g) == HLS_GROUP]
+        groups = [frags[i:i + G] for i in range(0, len(frags), G)]
+        groups = [g for g in groups if len(g) == G]
         if not groups:
             lines += ["#EXT-X-TARGETDURATION:3", "#EXT-X-MEDIA-SEQUENCE:0",
                       '#EXT-X-MAP:URI="%s%s"' % (init_uri, extra)]
@@ -191,7 +196,7 @@ class VideoStream:
         for i, f in enumerate(flat):
             d = (flat[i + 1][1] - f[1]) if i + 1 < len(flat) else VIDEO_FRAG_SEC
             durs.append(min(max(d, 0.2), 5.0))
-        seg_durs = [sum(durs[i * HLS_GROUP:(i + 1) * HLS_GROUP]) for i in range(len(groups))]
+        seg_durs = [sum(durs[i * G:(i + 1) * G]) for i in range(len(groups))]
         lines.append("#EXT-X-TARGETDURATION:%d" % max(2, int(math.ceil(max(seg_durs)))))
         lines.append("#EXT-X-MEDIA-SEQUENCE:%d" % groups[0][0][0])
         lines.append('#EXT-X-MAP:URI="%s%s"' % (init_uri, extra))
@@ -201,20 +206,25 @@ class VideoStream:
         return "\n".join(lines) + "\n"
 
     def hls_segment(self, seq):
-        """一段 = HLS_GROUP 个分片拼起来（每片自带 moof+mdat，直接接就行）。"""
+        """一段 = hls_group 个分片拼起来（每片自带 moof+mdat，直接接就行）。"""
         out = []
         with self.cond:
-            want = set(range(seq, seq + HLS_GROUP))
+            want = set(range(seq, seq + self.hls_group))
             got = {f[0]: f[2] for f in self.frags if f[0] in want}
             self.last_access = time.time()
-        if len(got) != HLS_GROUP:
+        if len(got) != self.hls_group:
             return None
-        for i in range(seq, seq + HLS_GROUP):
+        for i in range(seq, seq + self.hls_group):
             out.append(got[i])
         return b"".join(out)
 
-    def get_frags(self, since, timeout=1.2):
-        """等新分片。返回 (next_seq, 负载)。落后太多（已被丢弃）时返回 (None, None) 让客户端重连。"""
+    def get_frags(self, since, timeout=1.2, want=1):
+        """等新分片。返回 (next_seq, 负载)。落后太多（已被丢弃）时返回 (None, None) 让客户端重连。
+
+        want>1 时尽量凑够 want 片再返回：隧道每次请求固定要 ~1.1 秒往返，
+        1 秒一片等于每片都在倒贴时间，只有一次取 2 秒的内容才追得上实时。
+        等不到就先把已有的发出去，不让首帧多等。
+        """
         deadline = time.time() + timeout
         with self.cond:
             while True:
@@ -227,7 +237,7 @@ class VideoStream:
                     avail = [f for f in self.frags if f[0] >= since]
                     if len(avail) > 6:          # 落后太多就直接跳到最新，别追存储
                         avail = avail[-6:]
-                    if avail:
+                    if avail and (len(avail) >= want or time.time() >= deadline):
                         self.sent_frags += len(avail)
                         self.last_access = time.time()
                         self.last_ts = avail[-1][1]
