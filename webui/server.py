@@ -1192,13 +1192,15 @@ CHAR_THRESH_DEFAULT = 0.75
 CHAR_MIN_W, CHAR_MIN_H = 24, 8      # 比这还小的框多半是框歪了
 CHAR_LOST_AFTER = 0.6               # 超过这么久没命中就不再画标记（秒）
 CHAR_FPS = 15
+CHAR_SCALE_MIN_SCORE = 0.80     # 缩放标定要拿到这么高才信，否则保持 1:1
 
 char_lock = threading.Lock()
 char_state = {
     "enabled": True,
     "thresh": CHAR_THRESH_DEFAULT,
-    "tpl": None,          # 灰度模板（原尺寸，与截图像素一一对应）
-    "tpl_half": None,     # 半尺寸，粗搜用
+    "tpl": None,          # 模板原图（灰度，只用来重新派生）
+    "tpl_e": None,        # 模板的边缘幅值图：匹配用这个，比灰度稳得多
+    "tpl_e_half": None,   # 半尺寸边缘图，粗搜用
     "size": (0, 0),
     "box": None,          # 最近一次命中的框 [x1,y1,x2,y2]（全分辨率）
     "dir": "below",       # 人物在模板的下方(below)还是上方(above)，决定箭头方向
@@ -1223,7 +1225,7 @@ def _save_char_conf():
     try:
         CHAR_CONF_FILE.write_text(json.dumps(
             {"enabled": char_state["enabled"], "thresh": char_state["thresh"],
-             "dir": char_state["dir"]}
+             "dir": char_state["dir"], "scale": char_state["scale"]}
         ), encoding="utf-8")
     except Exception:
         pass
@@ -1237,15 +1239,33 @@ def _load_char_conf():
     char_state["enabled"] = bool(raw.get("enabled", True))
     char_state["thresh"] = _clamp_thresh(raw.get("thresh", CHAR_THRESH_DEFAULT))
     char_state["dir"] = "above" if raw.get("dir") == "above" else "below"
+    try:
+        char_state["scale"] = min(1.6, max(0.25, float(raw.get("scale", 1.0))))
+    except (TypeError, ValueError):
+        char_state["scale"] = 1.0
+
+
+def edge_mag(gray):
+    """梯度幅值图。
+
+    名字牌匹配为什么不用灰度直接算：名字是白字压在透明底上，底下是滚动的地面和
+    特效，同一行字在相邻两帧的灰度分数能从 1.00 掉到 0.77；换成梯度幅值后同样两帧
+    是 0.95 / 0.91 —— 文字边缘几乎不变，背景亮度变了也不影响。
+    """
+    g = cv2.GaussianBlur(gray, (3, 3), 0)
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+    return cv2.convertScaleAbs(cv2.magnitude(gx, gy))
 
 
 def _set_char_tpl(gray):
-    """装上模板（灰度图）。半尺寸那份是粗搜用的，一起算好省得每帧 resize 模板。"""
+    """装上模板。匹配用的是边缘图，半尺寸那份给粗搜用，一起算好省得每帧重算。"""
     h, w = gray.shape[:2]
     half = cv2.resize(gray, (max(8, w // 2), max(5, h // 2)), interpolation=cv2.INTER_AREA)
     with char_lock:
         char_state["tpl"] = gray
-        char_state["tpl_half"] = half
+        char_state["tpl_e"] = edge_mag(gray)
+        char_state["tpl_e_half"] = edge_mag(half)
         char_state["size"] = (w, h)
         char_state["box"] = None
         char_state["score"] = 0.0
@@ -1283,20 +1303,32 @@ def _char_scale_sweep(gray, frame_gray):
     匹配、不再多尺度烧 CPU。返回 (best_score, best_scale)。
     """
     H, W = frame_gray.shape[:2]
-    small = cv2.resize(frame_gray, (W // 2, H // 2), interpolation=cv2.INTER_AREA)
+    fe = edge_mag(frame_gray)
+    small = cv2.resize(fe, (W // 2, H // 2), interpolation=cv2.INTER_AREA)
     sh, sw = small.shape[:2]
-    th, tw = gray.shape[:2]
+    te = edge_mag(gray)
+    th, tw = te.shape[:2]
     best = (-1.0, 1.0)
+    at_one = -1.0
     for sc in np.arange(0.25, 1.61, 0.05):
         w, h = int(round(tw * sc / 2)), int(round(th * sc / 2))
-        if w < 6 or h < 4 or w >= sw or h >= sh:
+        # 太小的模板会在文字密集的 UI 上随机刷高分（多重比较），所以给个下限
+        if w < 16 or h < 8 or w >= sw or h >= sh:
             continue
-        t = cv2.resize(gray, (w, h), interpolation=cv2.INTER_AREA)
+        t = cv2.resize(te, (w, h), interpolation=cv2.INTER_AREA)
         r = cv2.matchTemplate(small, t, cv2.TM_CCOEFF_NORMED)
         _, mx, _, _ = cv2.minMaxLoc(r)
+        if abs(sc - 1.0) < 1e-6:
+            at_one = float(mx)
         if mx > best[0]:
             best = (float(mx), round(float(sc), 2))
-    return best
+    # 只有「分数确实很硬」才相信这个尺度：画面里根本没有这块图时，随机噪声也能
+    # 刷到 0.6~0.7，按它把模板压扁就彻底废了。1:1 已经很硬就直接用 1:1。
+    if at_one >= CHAR_SCALE_MIN_SCORE:
+        return at_one, 1.0
+    if best[0] >= CHAR_SCALE_MIN_SCORE:
+        return best
+    return at_one, 1.0
 
 
 def _install_char_tpl(gray):
@@ -1304,8 +1336,6 @@ def _install_char_tpl(gray):
     frame = grabber.snapshot()
     fg = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     score, scale = _char_scale_sweep(gray, fg)
-    if score < 0.35:          # 画面上没找到这块图，扫出来的尺度就是噪声，别信
-        scale = 1.0
     if scale != 1.0:          # 按标定出来的尺度重采样，之后每帧都是 1:1
         gray = cv2.resize(gray, (max(8, int(round(gray.shape[1] * scale))),
                                  max(5, int(round(gray.shape[0] * scale)))),
@@ -1313,6 +1343,7 @@ def _install_char_tpl(gray):
     _set_char_tpl(gray)
     with char_lock:
         char_state["scale"] = scale
+    _save_char_conf()
     # 立刻在整幅画面上跑一次，命中就把标记点上，前端马上能看到
     box, sc2 = find_char(frame)
     with char_lock:
@@ -1333,28 +1364,35 @@ def load_char_tpl():
         img = cv2.imdecode(buf, cv2.IMREAD_GRAYSCALE)
     except Exception:
         img = None
-    if img is not None and img.size and img.shape[1] >= CHAR_MIN_W:
-        _set_char_tpl(img)
+    if img is None or not img.size or img.shape[1] < CHAR_MIN_W:
+        return
+    sc = char_state["scale"]
+    if abs(sc - 1.0) > 0.01:      # 文件里存的是原图，按标定过的尺度在内存里重采样
+        img = cv2.resize(img, (max(8, int(round(img.shape[1] * sc))),
+                               max(5, int(round(img.shape[0] * sc)))),
+                         interpolation=cv2.INTER_AREA)
+    _set_char_tpl(img)
 
 
 def find_char(frame):
     """在当前画面里找名字牌。返回 (box, score)；box 为全分辨率像素坐标。"""
     with char_lock:
-        tpl, tpl_half = char_state["tpl"], char_state["tpl_half"]
-    if tpl is None:
+        tpl_e, tpl_e_half = char_state["tpl_e"], char_state["tpl_e_half"]
+    if tpl_e is None:
         return None, 0.0
     g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     H, W = g.shape[:2]
-    th, tw = tpl.shape[:2]
+    th, tw = tpl_e.shape[:2]
     if th >= H or tw >= W:
         return None, 0.0
+    fe = edge_mag(g)
 
     # 1) 半分辨率粗搜：把「在哪儿」先定到 ±4px 级别
     cx = cy = 0
     best = -1.0
-    if tpl_half.shape[0] < H // 2 and tpl_half.shape[1] < W // 2:
-        small = cv2.resize(g, (W // 2, H // 2), interpolation=cv2.INTER_AREA)
-        r = cv2.matchTemplate(small, tpl_half, cv2.TM_CCOEFF_NORMED)
+    if tpl_e_half.shape[0] < H // 2 and tpl_e_half.shape[1] < W // 2:
+        small = cv2.resize(fe, (W // 2, H // 2), interpolation=cv2.INTER_AREA)
+        r = cv2.matchTemplate(small, tpl_e_half, cv2.TM_CCOEFF_NORMED)
         _, best, _, loc = cv2.minMaxLoc(r)
         cx, cy = loc[0] * 2, loc[1] * 2
 
@@ -1362,9 +1400,9 @@ def find_char(frame):
     m = 10
     x1, y1 = max(0, cx - m), max(0, cy - m)
     x2, y2 = min(W, cx + tw + m), min(H, cy + th + m)
-    roi = g[y1:y2, x1:x2]
+    roi = fe[y1:y2, x1:x2]
     if roi.shape[0] >= th and roi.shape[1] >= tw:
-        r2 = cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED)
+        r2 = cv2.matchTemplate(roi, tpl_e, cv2.TM_CCOEFF_NORMED)
         _, score, _, loc2 = cv2.minMaxLoc(r2)
         return ([x1 + loc2[0], y1 + loc2[1], x1 + loc2[0] + tw, y1 + loc2[1] + th],
                 float(score))
@@ -2061,7 +2099,8 @@ async def char_del_template():
         pass
     with char_lock:
         char_state["tpl"] = None
-        char_state["tpl_half"] = None
+        char_state["tpl_e"] = None
+        char_state["tpl_e_half"] = None
         char_state["size"] = (0, 0)
         char_state["box"] = None
         char_state["score"] = 0.0
