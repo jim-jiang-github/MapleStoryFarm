@@ -1570,13 +1570,18 @@
     ctx.clearRect(0, 0, cw, ch);
 
     const now = Date.now();
-    const x = (t) => Math.max(0, Math.min(cw, cw * (1 - (now - t) / EXP_WIN_MS)));
+    // 数据还没攒满一个窗口时，横轴按实际跨度拉伸（最少 30 秒），
+    // 别让刚记的几个点全挤在最右边看成一条缝；攒满后自然回到真实时间轴。
+    const span = expHist.length ? now - expHist[0][0] : 0;
+    const eff = Math.min(EXP_WIN_MS, Math.max(span + 5000, 30000));
+    const x = (t) => Math.max(0, Math.min(cw, cw * (1 - (now - t) / eff)));
     ctx.strokeStyle = "rgba(120,113,108,.18)";
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(0, ch - 0.5); ctx.lineTo(cw, ch - 0.5); ctx.stroke();
 
     if (expHist.length < 2) {
-      $("expRange").textContent = "采样中…";
+      $("expRange").textContent = expHist.length
+        ? "采集中（每 5 秒一点，稍等）" : "采集中…";
       return;
     }
     let rawLo = Infinity, rawHi = -Infinity;

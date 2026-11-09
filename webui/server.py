@@ -845,10 +845,10 @@ bar_state = {
 _bar_thread_started = [False]
 
 # ---------- EXP 走势历史：服务端记录 + 落盘（保留 24h，页面刷新/重启都不丢） ----------
-# EXP 是慢变量：数值变了才记点，另外每 60 秒补一个锚点（画「没变化」的平线用）。
-# 一天通常几千点、几十 KB；文件按行追加（JSONL），每小时整一次（剪掉过期行）。
+# 每 5 秒固定记一个点（数值变了也立刻记），一天约 1.7 万点、几百 KB；
+# 文件按行追加（JSONL），每小时整一次（剪掉过期行）。
 EXP_KEEP_MS = 24 * 3600 * 1000
-EXP_ANCHOR_MS = 60 * 1000
+EXP_STEP_MS = 5000
 EXP_COMPACT_SEC = 3600.0
 EXP_FILE = apppaths.DATA_DIR / "explog.jsonl"
 exp_hist = []                   # [[t_ms, v], ...] 时间升序
@@ -893,9 +893,8 @@ def exp_record(v):
     if v is None:
         return
     now = int(time.time() * 1000)
-    last_v, last_t = _exp_last["v"], _exp_last["t"]
-    if last_v is not None and v == last_v and now - last_t < EXP_ANCHOR_MS:
-        return                  # 数值没变且还没到锚点间隔：不记
+    if now - _exp_last["t"] < EXP_STEP_MS:
+        return                  # 5 秒一个采样点，别把图表和文件塞太密
     pt = [now, v]
     with exp_lock:
         exp_hist.append(pt)
