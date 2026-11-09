@@ -227,6 +227,24 @@
   /* 识别阈值：滑块占满剩余宽度，右边跟一个当前值 */
   .row.conf { align-items: center; }
   .row.conf .v { display: flex; align-items: center; gap: 7px; flex: 1 1 auto; overflow: visible; }
+  /* 分组框：把同一类控制（识别开关 + 它的参数）圈在一块，左上角带个嵌在边框上的标题 */
+  .group {
+    position: relative;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 10px 10px 6px;
+    margin-bottom: 6px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .group::before {
+    content: attr(data-cap);
+    position: absolute; top: -8px; left: 10px;
+    padding: 0 7px; background: var(--surface);   /* 和卡片同底色，遮住穿过来的边框线 */
+    font-size: 10.5px; font-weight: 700; letter-spacing: .1em;
+    color: var(--muted);
+  }
+  /* 组里的开关按钮和滑块同宽，看起来是一套的 */
+  .group .row.conf .v button { padding: 4px 10px; font-size: 12px; }
   .rng {
     -webkit-appearance: none; appearance: none;
     flex: 1 1 auto; width: 100%; min-width: 46px;
@@ -495,17 +513,24 @@
             <div class="bar" data-k="exp"><span class="bk">EXP</span><span class="bv">—</span><span class="btrack"><i></i></span></div>
           </div>
           <div class="rows">
-            <div class="row conf">
-              <span class="k">识别阈值</span>
-              <span class="v"><input id="confRange" class="rng" type="range" min="0.05" max="0.95" step="0.05" value="0.8" title="低于这个置信度的框不算识别到（不画框、不计数）。拖动即时生效"><b id="confVal">0.80</b></span>
-            </div>
-            <div class="row conf">
-              <span class="k">稳定帧数</span>
-              <span class="v"><input id="hitRange" class="rng" type="range" min="1" max="12" step="1" value="6" title="累计命中这么多帧才允许第一次出现。调大更干净，调小更快但容易闪出假框"><b id="hitVal">6</b></span>
-            </div>
-            <div class="row conf">
-              <span class="k">检测频率</span>
-              <span class="v"><select id="fpsSel" title="每秒最多推理几次。YOLO 的单帧耗时是固定的（速度模式约 66ms），调低只省 CPU 占用，不会让单帧变快——画面上的框本来就只在每次推理后刷新一次"><option value="0">不限（跑满）</option><option value="20">20 帧/秒</option><option value="15">15 帧/秒</option><option value="12">12 帧/秒</option><option value="10">10 帧/秒</option><option value="8">8 帧/秒</option></select></span>
+            <!-- 识别一组：开关 + 参数圈在一个框里（它们控制的是同一件事） -->
+            <div class="group" data-cap="识别">
+              <div class="row conf">
+                <span class="k">识别开关</span>
+                <span class="v"><button id="detect" title="开关怪物识别。第一次打开要加载模型（冷启动 10 秒上下，按钮上有进度条），预热完成后秒开">识别: 关</button></span>
+              </div>
+              <div class="row conf">
+                <span class="k">识别阈值</span>
+                <span class="v"><input id="confRange" class="rng" type="range" min="0.05" max="0.95" step="0.05" value="0.8" title="低于这个置信度的框不算识别到（不画框、不计数）。拖动即时生效"><b id="confVal">0.80</b></span>
+              </div>
+              <div class="row conf">
+                <span class="k">稳定帧数</span>
+                <span class="v"><input id="hitRange" class="rng" type="range" min="1" max="12" step="1" value="6" title="累计命中这么多帧才允许第一次出现。调大更干净，调小更快但容易闪出假框"><b id="hitVal">6</b></span>
+              </div>
+              <div class="row conf">
+                <span class="k">检测频率</span>
+                <span class="v"><select id="fpsSel" title="每秒最多推理几次。YOLO 的单帧耗时是固定的（速度模式约 66ms），调低只省 CPU 占用，不会让单帧变快——画面上的框本来就只在每次推理后刷新一次"><option value="0">不限（跑满）</option><option value="20">20 帧/秒</option><option value="15">15 帧/秒</option><option value="12">12 帧/秒</option><option value="10">10 帧/秒</option><option value="8">8 帧/秒</option></select></span>
+              </div>
             </div>
             <div class="row conf">
               <span class="k">人物匹配</span>
@@ -523,7 +548,9 @@
               <span class="k">按键出口</span>
               <span class="v"><select id="inputSel" title="硬件 = CH9329F 小板：目标机收到的是真实 USB 键盘报文，反外挂和 DirectInput 都当真人；软件 = SendInput 注入，按键带注入标记，部分游戏会无视"><option value="auto">自动</option><option value="hid">硬件</option><option value="soft">软件</option></select><b class="sub" id="inputNow">—</b></span>
             </div>
-            <div class="row conf">
+            <!-- 血线/蓝线滑块不再显示：改用 HP/MP 条上的三角箭头直接拖动调（值照常落盘）。
+                 input 必须留在 DOM 里（隐藏），条上拖动和 JS 回显都读写它。 -->
+            <div class="row conf" style="display:none">
               <span class="k">血线</span>
               <span class="v"><input id="hpRange" class="rng" type="range" min="10" max="95" step="5" value="40" title="血量低于这个百分比就喝药；读不到血量（血条没标定）时不会瞎按。HP 血条下面那个三角箭头就是这条线"><b id="hpVal">40%</b></span>
             </div>
@@ -563,7 +590,7 @@
               <span class="k">蓝药用键</span>
               <span class="v"><button id="mpKeySlot" class="slot" data-hint="9" title="蓝量低于「蓝线」时按哪个键喝蓝药。点格子 → 按一个键即设置" data-cfg="mp_key" data-def="pot9"></button></span>
             </div>
-            <div class="row conf">
+            <div class="row conf" style="display:none">
               <span class="k">蓝线</span>
               <span class="v"><input id="mpRange" class="rng" type="range" min="10" max="95" step="5" value="30" title="蓝量低于这个百分比就喝蓝药；读不到蓝量（蓝条没标定）时不会瞎按"><b id="mpVal">30%</b></span>
             </div>
@@ -586,7 +613,6 @@
       <div class="side">
         <div class="actions">
           <button id="toggle">暂停</button>
-          <button id="detect">识别: 关</button>
           <button id="modeBtn">模式: 速度</button>
           <button id="botBtn" title="自动打怪：血低喝药、打范围内的怪、全程按 Z 拾取。只有游戏窗口在前台时才会发按键">挂机: 关</button>
           <button id="focusBtn" title="把游戏窗口抬到最前并给焦点（截图前必做）">前置游戏</button>
