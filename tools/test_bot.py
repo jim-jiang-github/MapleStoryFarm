@@ -7,10 +7,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webui"))
 import bot  # noqa: E402
 
 CHAR = [600, 300, 660, 320]          # 人物名字牌：中心 (630, 310)
-# 攻击/跳/拾取的键现在在面板上可配，断言一律从 DEFAULTS 取，别写死
-ATK = bot.DEFAULTS["atk_key"]        # ControlLeft
-JUMP = bot.DEFAULTS["jump_key"]      # AltLeft
-PICK = bot.DEFAULTS["pick_key"]      # KeyZ
+# 技能/跳/拾取的键现在在面板上可配，断言一律从 DEFAULTS 取，别写死
+ATK = bot.DEFAULTS["skills"][0]["key"]   # ControlLeft
+JUMP = bot.DEFAULTS["jump_key"]          # AltLeft
+PICK = bot.DEFAULTS["pick_key"]          # KeyZ
 calls = []
 
 
@@ -65,11 +65,12 @@ def check(title, cond, detail=""):
 
 print("[0] 出厂默认值（和面板/README 必须一致）")
 check("血线默认 40%", bot.DEFAULTS["hp_pct"] == 40.0, bot.DEFAULTS["hp_pct"])
-check("攻击距离默认 100px", bot.DEFAULTS["range_px"] == 100.0, bot.DEFAULTS["range_px"])
-check("攻击高度默认 120px", bot.DEFAULTS["range_h"] == 120.0, bot.DEFAULTS["range_h"])
-check("跳跃高度默认 140px", bot.DEFAULTS["jump_reach"] == 140.0, bot.DEFAULTS["jump_reach"])
+sk0 = bot.DEFAULTS["skills"][0]
+check("默认技能 1 个、键 ControlLeft", sk0["key"] == "ControlLeft", sk0)
+check("默认地面范围 左右100 上下60", sk0["ground"] == [100, 100, 60, 60], sk0["ground"])
+check("默认可跳放、跳放上扩 200", sk0["jump"] and sk0["jrect"][2] == 200, sk0["jrect"])
 check("喝药间隔默认 3.0s", bot.DEFAULTS["pot_sec"] == 3.0, bot.DEFAULTS["pot_sec"])
-check("攻击间隔默认 420ms", bot.DEFAULTS["atk_ms"] == 420, bot.DEFAULTS["atk_ms"])
+check("放技能间隔默认 420ms", bot.DEFAULTS["atk_ms"] == 420, bot.DEFAULTS["atk_ms"])
 check("喝药键默认 8", bot.DEFAULTS["pot_key"] == "pot8", bot.DEFAULTS["pot_key"])
 
 print("[1] 怪在攻击距离内 → 先转身，同一帧不出手")
@@ -86,11 +87,12 @@ c = step(b, m=mon)
 check("这一帧不出手", ATK not in down_keys(c), c)
 check("状态是等朝向生效", b.snapshot()[1]["act"] == "等朝向生效", b.snapshot()[1])
 
-print("[1c] 过了 130ms 才按 Ctrl")
+print("[1c] 过了 130ms 才按技能键")
 settle(b)
 c = step(b, m=mon)
-check("这一帧按了 Ctrl", down_keys(c) == [ATK], c)
-check("状态是攻击", b.snapshot()[1]["act"] == "攻击", b.snapshot()[1])
+check("这一帧按了技能键", down_keys(c) == [ATK], c)
+check("状态是放技能", b.snapshot()[1]["act"] == f"放技能 {bot._key_label(ATK)}",
+      b.snapshot()[1])
 
 print("[2] 攻击冷却：紧接着再来一帧不应重复攻击")
 c = step(b, m=mon)
@@ -130,15 +132,17 @@ check("不攻击上层怪", ATK not in down_keys(c), c)
 check("去巡逻/守株待兔", b.snapshot()[1]["act"] in ("巡逻找怪", "守株待兔"),
       b.snapshot()[1])
 
-print("[6b] 头顶差得不多的怪 → 跳起来打（不走路、不出手）")
+print("[6b] 头顶差得不多的怪 → 跳放：跳 → 100ms → 技能键（两侧技能不转身，直接跳）")
 b = make()
 top_mon = [{"name": "Snail", "box": [690, 130, 750, 190], "conf": 0.8}]   # 怪底 190，离攻击区顶 2.5px
 c = step(b, m=top_mon)
-check("按了跳 (Alt 键)", (JUMP, True) in c, c)
-check("没按方向/攻击", not any(k in (ATK, "left", "right") for k in down_keys(c)), c)
-check("状态是跳起攻击", b.snapshot()[1]["act"] == "跳起攻击", b.snapshot()[1])
+check("跳+技能键连招", down_keys(c) == [JUMP, ATK], c)
+check("没按方向（两侧技能跳放不转身，老行为）",
+      not any(k in ("left", "right") for k in down_keys(c)), c)
+check("状态是跳放", b.snapshot()[1]["act"] == f"跳放 {bot._key_label(ATK)}",
+      b.snapshot()[1])
 c = step(b, m=top_mon)
-check("跳跃冷却内不再按跳", (JUMP, True) not in c, c)
+check("跳跃冷却内不再跳", (JUMP, True) not in c, c)
 
 print("[6c] 头顶差太多的怪（超出跳跃判定框）→ 根本不进决策，去巡逻")
 b = make()
@@ -206,13 +210,30 @@ check("换向", b._held == -first, (first, b._held))
 
 print("[14] 配置钳位")
 cfg = bot.clamp_cfg({"hp_pct": 300, "pot_sec": 0, "atk_ms": 99999,
-                     "range_px": 5, "pot_key": "zzz", "pick": 0})
+                     "pot_key": "zzz", "pick": 0})
 check("hp_pct 钳到 95", cfg["hp_pct"] == 95.0, cfg)
 check("pot_sec 钳到 0.5", cfg["pot_sec"] == 0.5, cfg)
 check("atk_ms 钳到 3000", cfg["atk_ms"] == 3000, cfg)
-check("range_px 钳到 40", cfg["range_px"] == 40.0, cfg)
 check("非法药键退回默认", cfg["pot_key"] == "pot8", cfg)
 check("pick 转布尔", cfg["pick"] is False, cfg)
+
+sc = bot.clamp_cfg({"skills": [{"key": "Nope", "type": "zzz",
+                                "ground": [9999, -5, "x", 60],
+                                "jump": 1, "jrect": [1, 2]}]})["skills"][0]
+check("非法技能键清空", sc["key"] == "", sc)
+check("非法类型退回 aoe", sc["type"] == "aoe", sc)
+check("ground 逐项钳位（坏值退默认）", sc["ground"] == [600.0, 0.0, 60.0, 60.0], sc["ground"])
+check("jrect 不是 4 个数退回默认",
+      sc["jrect"] == bot.DEFAULTS["skills"][0]["jrect"], sc["jrect"])
+check("技能超过 8 个截断",
+      len(bot.clamp_cfg({"skills": [{"key": "KeyA"}] * 20})["skills"]) == 8)
+check("旧配置（atk_key+距离/高度）自动换成第一个技能",
+      bot.clamp_cfg({"atk_key": "KeyX", "range_px": 80, "range_h": 100,
+                     "jump_reach": 120})["skills"] ==
+      [{"key": "KeyX", "type": "aoe", "ground": [80.0, 80.0, 50.0, 50.0],
+        "jump": True, "jrect": [80.0, 80.0, 170.0, 50.0]}])
+check("技能列表允许清空（= 不攻击，只喝药拾取）",
+      bot.clamp_cfg({"skills": []})["skills"] == [])
 
 print("[15] 失焦只在第一轮松键，之后不再重复发抬起")
 b = make()
@@ -228,23 +249,26 @@ b = make()
 c = step(b, fg=False)
 check("没有抬起事件", c == [], c)
 
-print("[17] 攻击方向：正前方模式的矩形只朝一侧展开")
-BOTH_Z = [530.0, 192.5, 730.0, 312.5]      # CHAR → 身体中心 (630, 252.5)，宽 100 高 120
-check("默认两侧", bot.DEFAULTS["range_side"] == "both")
-check("正前方朝右：从身体中心往右",
-      bot.attack_zone(CHAR, 100, 120, 1, "front") == [630.0, 192.5, 730.0, 312.5],
-      bot.attack_zone(CHAR, 100, 120, 1, "front"))
-check("正前方朝左：从身体中心往左",
-      bot.attack_zone(CHAR, 100, 120, -1, "front") == [530.0, 192.5, 630.0, 312.5],
-      bot.attack_zone(CHAR, 100, 120, -1, "front"))
-check("朝向未知（0）时按两侧算，别假装知道",
-      bot.attack_zone(CHAR, 100, 120, 0, "front") == BOTH_Z)
-check("两侧模式与朝向无关",
-      bot.attack_zone(CHAR, 100, 120, -1, "both") == BOTH_Z)
+print("[17] skill_rects：偏移矩形以人物身体中心为原点（默认技能 = 老攻击区域）")
+g, j = bot.skill_rects(bot.DEFAULTS["skills"][0], CHAR)
+check("地面框：中心 ± 左右100 / 上下60（和老 range_px=100 × range_h=120 一致）",
+      g == [530.0, 192.5, 730.0, 312.5], g)
+check("跳放框：上边扩到 200（= 老上下60 + jump_reach 140）",
+      j == [530.0, 52.5, 730.0, 312.5], j)
+g2, j2 = bot.skill_rects({"key": "KeyA", "type": "single", "ground": [0, 180, 60, 60],
+                          "jump": False, "jrect": [0, 0, 0, 0]}, CHAR)
+check("只盖右边的技能：框从身体中心往右（= 老正前方朝右）",
+      g2 == [630.0, 192.5, 810.0, 312.5], g2)
+check("跳放关了就没有第二个框", j2 is None, j2)
+g3, _ = bot.skill_rects({"key": "KeyA", "type": "single", "ground": [180, 0, 60, 60],
+                         "jump": False, "jrect": [0, 0, 0, 0]}, CHAR)
+check("只盖左边的技能：框从身体中心往左（= 老正前方朝左）",
+      g3 == [450.0, 192.5, 630.0, 312.5], g3)
 
-print("[18] 正前方模式：怪在身后但够得着 → 转身，不是走过去")
+print("[18] 单侧技能：怪在够得着的那一侧 → 转身后出手，不是走过去")
 b = make()
-b.cfg["range_side"] = "front"
+b.cfg["skills"] = [{"key": "KeyA", "type": "single", "ground": [180, 0, 60, 60],
+                    "jump": False, "jrect": [180, 0, 200, 60]}]
 t = 5000.0
 c = step(b, now=t, m=left_mon)
 check("第一帧点左方向", down_keys(c) == ["left"], c)
@@ -252,27 +276,88 @@ check("状态是转身朝目标（没判成太远）",
       b.snapshot()[1]["act"] == "转身朝目标", b.snapshot()[1])
 check("状态里带真实朝向", b.snapshot()[1]["face"] == -1, b.snapshot()[1])
 c = step(b, now=t + 0.2, m=left_mon)
-check("对正后出刀", down_keys(c) == [ATK], c)
+check("对正后出技能 KeyA", down_keys(c) == ["KeyA"], c)
 
-print("[19] 正前方模式每刀前重新对正（记忆说朝对了也要再点一次）")
+print("[19] 单侧技能每刀前重新对正（记忆说朝对了也要再点一次）")
 c = step(b, now=t + 0.3, m=left_mon)          # 冷却中
 check("冷却中不重复转身", down_keys(c) == [], c)
 c = step(b, now=t + 0.7, m=left_mon)          # 420ms 冷却到
 check("冷却好了先重新对正", down_keys(c) == ["left"], c)
 c = step(b, now=t + 0.85, m=left_mon)
-check("对正之后才出刀", down_keys(c) == [ATK], c)
+check("对正之后才出技能", down_keys(c) == ["KeyA"], c)
 
-print("[20] 正前方模式 + 头顶的怪：先对正再起跳，别跳起来砍反方向")
+print("[20] 单侧技能 + 头顶的怪：先对正再起跳，别跳起来打反方向")
 b = make()
-b.cfg["range_side"] = "front"
-c = step(b, m=top_mon)
-check("先转身对正", down_keys(c) == ["right"], c)
-c = step(b, m=top_mon)
-check("对正后按跳", (JUMP, True) in c, c)
+b.cfg["skills"] = [{"key": "KeyA", "type": "single", "ground": [180, 0, 60, 60],
+                    "jump": True, "jrect": [180, 0, 200, 60]}]
+top_left = [{"name": "Snail", "box": [540, 130, 600, 190], "conf": 0.8}]
+c = step(b, m=top_left)
+check("先转身对正", down_keys(c) == ["left"], c)
+settle(b)
+c = step(b, m=top_left)
+check("对正后跳放：跳+技能键", down_keys(c) == [JUMP, "KeyA"], c)
 
-print("[21] 攻击方向的取值校验")
-check("front 合法", bot.clamp_cfg({"range_side": "front"})["range_side"] == "front")
-check("乱写的值退回两侧", bot.clamp_cfg({"range_side": "up"})["range_side"] == "both")
+print("[21] 怪多优先群攻、单只优先单体、同类型排前面的先用")
+b = make()
+b.cfg["skills"] = [
+    {"key": "KeyS", "type": "single", "ground": [200, 200, 60, 60],
+     "jump": False, "jrect": [200, 200, 120, 60]},
+    {"key": "KeyD", "type": "aoe", "ground": [200, 200, 60, 60],
+     "jump": False, "jrect": [200, 200, 120, 60]},
+]
+two = [{"name": "A", "box": [690, 300, 750, 360], "conf": 0.9},
+       {"name": "B", "box": [520, 300, 580, 360], "conf": 0.9}]
+c = step(b, m=two)
+settle(b)
+c = step(b, m=two)
+check("两只怪 → 群攻 KeyD", down_keys(c) == ["KeyD"], c)
+one = [two[0]]
+c = step(b, m=one)
+check("目标换到另一边 → 先转身（face=-1 → 右）", down_keys(c) == ["right"], c)
+settle(b)
+b._t_atk -= 1.0                     # 拨开冷却
+c = step(b, m=one)
+check("单只怪 → 单体 KeyS", down_keys(c) == ["KeyS"], c)
+
+print("[21b] 同类型按列表顺序：第一个群攻先用")
+b = make()
+b.cfg["skills"] = [
+    {"key": "KeyQ", "type": "aoe", "ground": [200, 200, 60, 60],
+     "jump": False, "jrect": [200, 200, 120, 60]},
+    {"key": "KeyD", "type": "aoe", "ground": [200, 200, 60, 60],
+     "jump": False, "jrect": [200, 200, 120, 60]},
+]
+c = step(b, m=one)
+settle(b)
+c = step(b, m=one)
+check("排在前面的 KeyQ 先用", down_keys(c) == ["KeyQ"], c)
+
+print("[21c] 前面的技能罩不到、后面的罩得到 → 用后面的（顺序 = 优先级，不阻塞）")
+b = make()
+b.cfg["skills"] = [
+    {"key": "KeyQ", "type": "aoe", "ground": [0, 40, 60, 60],        # 只盖右边 40px
+     "jump": False, "jrect": [0, 40, 120, 60]},
+    {"key": "KeyD", "type": "aoe", "ground": [200, 200, 60, 60],
+     "jump": False, "jrect": [200, 200, 120, 60]},
+]
+far_left = [{"name": "C", "box": [460, 300, 520, 360], "conf": 0.9}]   # 中心 490，dx=-140
+c = step(b, m=far_left)
+settle(b)
+c = step(b, m=far_left)
+check("第一个技能够不着 → 用第二个 KeyD", down_keys(c) == ["KeyD"], c)
+
+print("[21d] 技能没录按键 → 跳过，不算候选")
+b = make()
+b.cfg["skills"] = [
+    {"key": "", "type": "aoe", "ground": [500, 500, 200, 200],
+     "jump": False, "jrect": [500, 500, 300, 200]},
+    {"key": "KeyD", "type": "aoe", "ground": [200, 200, 60, 60],
+     "jump": False, "jrect": [200, 200, 120, 60]},
+]
+c = step(b, m=one)
+settle(b)
+c = step(b, m=one)
+check("没键的技能被跳过，用 KeyD", down_keys(c) == ["KeyD"], c)
 
 print("[22] 喝药链：主键按了血量没涨 → 按备用 1→4 换着喝")
 pot_presses = lambda c: [n for n, d in c if d and (n.startswith("pot") or n in ("KeyA", "KeyS"))]

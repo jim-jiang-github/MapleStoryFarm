@@ -188,6 +188,38 @@
   .slot.set { color: var(--text); font-weight: 600; }
   .slot.rec { border-color: #dc2626; background: #fef2f2; color: #dc2626; }
   .slot.rec::after { content: " 按键…"; }
+  /* 技能卡片：⠿ 拖动排序、格子录键、下拉选类型、画面上拖框调范围 */
+  .skcard {
+    border: 1px solid var(--border); border-radius: 8px;
+    background: #fff; padding: 7px 9px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .skcard + .skcard { margin-top: 6px; }
+  .skcard.sel { border-color: #16a34a; box-shadow: 0 0 0 1px #16a34a; }
+  .skcard.dragging { opacity: .4; }
+  .skhead { display: flex; align-items: center; gap: 7px; }
+  .skhnd { cursor: grab; color: var(--hint); font-size: 13px; padding: 0 1px; user-select: none; }
+  .skhnd:active { cursor: grabbing; }
+  .skhead .slot { flex: 0 0 58px; height: 20px; line-height: 18px; }
+  .skhead select {
+    font: inherit; font-size: 11.5px; color: var(--text); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 6px; padding: 1px 4px; cursor: pointer;
+  }
+  .sktag { font-size: 10px; color: var(--hint); font-variant-numeric: tabular-nums; }
+  .skdel { margin-left: auto; border: 0; background: none; color: var(--hint);
+           cursor: pointer; font-size: 12px; padding: 2px 4px; font-family: inherit; }
+  .skdel:hover { color: #dc2626; }
+  .skrow { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--hint); }
+  .skrow .skv {
+    color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .skjump { display: flex; align-items: center; gap: 5px; font-size: 11px;
+            color: var(--muted); cursor: pointer; user-select: none; }
+  .skjump input { margin: 0; }
+  .skjbox { border: 1px dashed var(--border); border-radius: 6px; padding: 6px 8px;
+            display: flex; flex-direction: column; gap: 6px; }
   .btrack i {
     display: block; height: 100%; width: 0;
     border-radius: 999px;
@@ -591,46 +623,22 @@
               <span class="k">血线</span>
               <span class="v"><input id="hpRange" class="rng" type="range" min="10" max="95" step="5" value="40" title="血量低于这个百分比就喝药；读不到血量（血条没标定）时不会瞎按。HP 血条下面那个三角箭头就是这条线"><b id="hpVal">40%</b></span>
             </div>
+            <!-- 攻击距离/方向/高度三行不要了：技能系统里每个技能有自己的范围框（画面上拖） -->
             <div class="row conf">
-              <span class="k">攻击距离</span>
-              <span class="v"><input id="rngRange" class="rng" type="range" min="60" max="500" step="10" value="100" title="攻击区域的宽度：两侧模式左右各这么多像素；正前方模式只朝身前展开这么多"><b id="rngVal">100px</b></span>
+              <span class="k">放技能间隔</span>
+              <span class="v"><input id="atkRange" class="rng" type="range" min="150" max="1200" step="10" value="420" title="两次放技能的最小间隔（毫秒）。太小会一直按着打不出伤害，太大浪费输出"><b id="atkVal">420ms</b></span>
             </div>
             <div class="row conf">
-              <span class="k">攻击方向</span>
-              <span class="v"><select id="sideSel" title="两侧：身前身后都能打到（多数技能），画面上的框左右对称。正前方：单体技能只能打身前，框只画朝向那一侧；因为读不到人物朝向，正前方模式每刀前都会先轻点一次方向键重新对正（转身时间塞在攻击冷却里，几乎不损攻速）"><option value="both">两侧</option><option value="front">正前方</option></select></span>
-            </div>
-            <div class="row conf">
-              <span class="k">攻击高度</span>
-              <span class="v"><input id="hgtRange" class="rng" type="range" min="40" max="400" step="10" value="120" title="攻击区域的垂直范围，以人物身体为中心上下各占一半。画面上画的那个矩形（ATK 宽x高）就是攻击区域：怪物框和它有交集才会出手。上下层的怪够不着就调小"><b id="hgtVal">120px</b></span>
-            </div>
-            <div class="row conf">
-              <span class="k">攻击间隔</span>
-              <span class="v"><input id="atkRange" class="rng" type="range" min="150" max="1200" step="10" value="420" title="两次攻击的最小间隔（毫秒）。太小会一直按着打不出伤害，太大浪费输出"><b id="atkVal">420ms</b></span>
-            </div>
-            <div class="row conf">
-              <span class="k">拾取 Z</span>
-              <span class="v"><button id="pickBtn" class="mini on" title="全程无脑按 Z 捡东西，跟打怪互不影响">开</button><b class="sub">130ms 一次</b></span>
+              <span class="k">拾取</span>
+              <span class="v"><button id="pickBtn" class="mini on" title="全程无脑按拾取键捡东西，跟打怪互不影响">开</button><button id="pickKey" class="slot" data-hint="Z" title="捡东西按的键，跟游戏里的「拾取」对应。点格子 → 按一个键即设置" data-cfg="pick_key" data-def="KeyZ"></button><b class="sub">130ms</b></span>
             </div>
             <div class="row conf">
               <span class="k">巡逻找怪</span>
               <span class="v"><button id="patrolBtn" class="mini on" title="视野里没有怪时左右来回走；关掉就站在原地等">开</button><b class="sub">2.5s 换向</b></span>
             </div>
-              </div>
-            </details>
-            <details class="group" data-cap="键位">
-              <summary><b>键位</b><span class="gsum" id="sumKeys">—</span></summary>
-              <div class="gbody">
-            <div class="row conf">
-              <span class="k">攻击键</span>
-              <span class="v"><button id="atkKey" class="slot" data-hint="Ctrl" title="出刀按的键，跟游戏里键盘设置的「攻击」对应。点格子 → 按一个键即设置；Del 清空退回默认、Esc 取消" data-cfg="atk_key" data-def="ControlLeft"></button></span>
-            </div>
             <div class="row conf">
               <span class="k">跳跃键</span>
-              <span class="v"><button id="jumpKey" class="slot" data-hint="Alt" title="头顶的怪跳起来打时按的键，跟游戏里的「跳跃」对应。点格子 → 按一个键即设置" data-cfg="jump_key" data-def="AltLeft"></button></span>
-            </div>
-            <div class="row conf">
-              <span class="k">拾取键</span>
-              <span class="v"><button id="pickKey" class="slot" data-hint="Z" title="挂机全程按这个键捡东西，跟游戏里的「拾取」对应。点格子 → 按一个键即设置" data-cfg="pick_key" data-def="KeyZ"></button></span>
+              <span class="v"><button id="jumpKey" class="slot" data-hint="Alt" title="跳放技能（空中施放）的连招键：先按它起跳，约 100ms 后按技能键。跟游戏里的「跳跃」对应。点格子 → 按一个键即设置" data-cfg="jump_key" data-def="AltLeft"></button></span>
             </div>
             <div class="row conf">
               <span class="k">红药用键</span>
@@ -643,6 +651,16 @@
             <div class="row conf" style="display:none">
               <span class="k">蓝线</span>
               <span class="v"><input id="mpRange" class="rng" type="range" min="10" max="95" step="5" value="30" title="蓝量低于这个百分比就喝蓝药；读不到蓝量（蓝条没标定）时不会瞎按"><b id="mpVal">30%</b></span>
+            </div>
+              </div>
+            </details>
+            <details class="group" data-cap="技能">
+              <summary><b>技能</b><span class="gsum" id="sumSkills">—</span></summary>
+              <div class="gbody">
+            <div id="skillList"></div>
+            <div class="row conf">
+              <span class="k"></span>
+              <span class="v" style="justify-content:flex-start"><button id="addSkillBtn" class="mini" title="加一个技能：录快捷键 → 选群攻/单体 → 点「画面调整」在画面上拖出攻击范围">+ 添加技能</button><b class="sub">⠿ 拖动卡片换释放顺序</b></span>
             </div>
               </div>
             </details>
@@ -671,7 +689,7 @@
     </div>
   </div>
 
-  <p class="note">双击选区进入编辑（拖动移动 · 拉角缩放 · 右上角 ✕ 删除）· 右键画面可添加排除区 · 改动即时保存到 webui/masks.json · 三条状态条由后台自动定位，换客户端/换分辨率会自己重定位；画面上始终画出定位框（白框=判定区，洋红框=整条槽，黄线=填充终点）。坐标真要手动框时，在地址后面加 <code>?cal=1</code> 放出「标定条」按钮</p>
+  <p class="note">双击选区进入编辑（拖动移动 · 拉角缩放 · 右上角 ✕ 删除）· 右键画面可添加排除区 · 改动即时保存到 webui/masks.json · 三条状态条由后台自动定位，换客户端/换分辨率会自己重定位；画面上始终画出定位框（白框=判定区，洋红框=整条槽，黄线=填充终点）。技能攻击范围在「技能」分组里点「画面调整」，在画面上拖绿框（地面）/橙虚框（跳放）调整，锚点是人物身体中心（蓝十字）。坐标真要手动框时，在地址后面加 <code>?cal=1</code> 放出「标定条」按钮</p>
 </div>
 
 <div class="ctx" id="ctxMenu"></div>
@@ -950,7 +968,7 @@
     mctx.clearRect(0, 0, maskLayer.clientWidth, maskLayer.clientHeight);
     if (roiCal) { drawRoiBand(); return; }   // 调范围时只看这条带，别叠选区
     drawBarRects();
-    if (!maskOn) return;
+    if (!maskOn) { drawSkillOverlay(); return; }   // 技能范围编辑不依赖屏蔽区开关
 
     masks.forEach((m, i) => {
       const x = X(m.x1), y = Y(m.y1);
@@ -1012,6 +1030,7 @@
       mctx.strokeRect(X(r.x1), Y(r.y1), (r.x2 - r.x1) * L.w, (r.y2 - r.y1) * L.h);
       mctx.setLineDash([]);
     }
+    drawSkillOverlay();                      // 技能范围编辑框（开了才有内容）
   }
 
   function toNorm(e) {
@@ -1784,10 +1803,22 @@
 
   maskLayer.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
-    if (!maskOn && !barCal && !roiCal) return;
+    if (!maskOn && !barCal && !roiCal && skillSel < 0) return;
     e.preventDefault();
     maskLayer.setPointerCapture(e.pointerId);
     const p = toNorm(e);
+    if (skillSel >= 0) {
+      // 技能范围编辑模式：只响应两个范围框（把手=缩放，框内=平移），
+      // 点到框外什么都不做，绝不误改屏蔽区
+      const rects = skillRectsNorm();
+      const hit = rects && skillHitRect(rects, p);
+      if (hit) {
+        drag = { mode: "skill", which: hit.rect, handle: hit.handle,
+                 start: p, orig: { ...rects[hit.rect] } };
+      }
+      drawMasks();
+      return;
+    }
     if (roiCal) {                        // 调范围：拖上边界 / 下边界 / 整条带走
       drag = { mode: "roi", edge: roiHit(p) || "band", start: p, orig: { ...roi } };
       drawMasks();
@@ -1832,8 +1863,26 @@
   });
 
   maskLayer.addEventListener("pointermove", (e) => {
-    if (!maskOn && !barCal && !roiCal) return;
+    if (!maskOn && !barCal && !roiCal && skillSel < 0) return;
     const p = toNorm(e);
+    if (skillSel >= 0) {
+      if (drag && drag.mode === "skill") {
+        const o = drag.orig;
+        const r = drag.handle < 0          // 整框平移，宽高不变
+          ? { x1: o.x1 + (p.x - drag.start.x), x2: o.x2 + (p.x - drag.start.x),
+              y1: o.y1 + (p.y - drag.start.y), y2: o.y2 + (p.y - drag.start.y) }
+          : resizeRect(o, drag.handle, p);
+        applySkillRect(drag.which, r);
+        updateSkillStrs();                 // 卡片上的 左右上下 数字实时跟
+        drawMasks();
+      } else {
+        const rects = skillRectsNorm();
+        const hit = rects && skillHitRect(rects, p);
+        maskLayer.style.cursor = hit
+          ? (hit.handle >= 0 ? HANDLE_CURSORS[hit.handle] : "move") : "default";
+      }
+      return;
+    }
     if (roiCal) {
       if (drag && drag.mode === "roi") {
         const o = drag.orig;
@@ -1898,6 +1947,10 @@
     if (!drag) return;
     const d = drag;
     drag = null;
+    if (d.mode === "skill") {
+      commitSkills();                      // 松手落库：后端马上按新范围判定
+      return;
+    }
     if (d.mode === "roi") {
       const moved = ["x1", "y1", "x2", "y2"].some((k) => Math.abs(roi[k] - d.orig[k]) > 1e-4);
       if (moved) saveRoi();             // 松手即存：后端立刻按新范围重找，能马上看到效果
@@ -2120,8 +2173,6 @@
   const botUI = {
     hp: [$("hpRange"), $("hpVal"), "hp_pct", (v) => `${Math.round(v)}%`],
     mp: [$("mpRange"), $("mpVal"), "mp_pct", (v) => `${Math.round(v)}%`],
-    rng: [$("rngRange"), $("rngVal"), "range_px", (v) => `${Math.round(v)}px`],
-    hgt: [$("hgtRange"), $("hgtVal"), "range_h", (v) => `${Math.round(v)}px`],
     atk: [$("atkRange"), $("atkVal"), "atk_ms", (v) => `${Math.round(v)}ms`],
   };
   let botLockUntil = 0;
@@ -2153,6 +2204,18 @@
     d.addEventListener("toggle", () => localStorage.setItem(key, d.open ? "1" : "0"));
   });
 
+  /* 技能列表的状态（模块实现在后面「技能列表」一段）。提前声明：
+     paintGroupSums 在脚本加载时就跑第一次，得让它读得到。 */
+  let skillsNow = [];            // 当前技能配置（和后端 cfg.skills 同步）
+  let skillLockUntil = 0;        // 本地刚改过技能：这段时间别让轮询覆盖
+  let skillDragEl = null;        // 正在拖动排序的卡片
+  let skillSel = -1;             // 正在画面上编辑范围的技能下标（-1 = 没在编辑）
+  let skillAnchor = null;        // 编辑期间冻结的人物身体中心（全分辨率像素）
+  let skillFrame = [0, 0];       // 画面尺寸（像素偏移 ↔ 归一化坐标换算用）
+  let skillSnap = "";            // 上次同步的 skills JSON（没变不重画）
+  let lastBodyC = null;          // 最近一次轮询到的人物身体中心
+  let lastFrameW = 0, lastFrameH = 0;
+
   function paintGroupSums() {
     const key = (id) => { const el = $(id); const s = el ? el.textContent.trim() : ""; return s || (el && el.dataset.hint) || "—"; };
     const opt = (id) => { const el = $(id); return el && el.selectedOptions[0] ? el.selectedOptions[0].textContent : "—"; };
@@ -2163,12 +2226,13 @@
     ].join(" · "));
     set("sumBot", [
       "血 " + key("hpVal"), "蓝 " + key("mpVal"),
-      "攻 " + key("rngVal").replace("px", "") + "×" + key("hgtVal").replace("px", ""),
-      key("atkVal"), opt("inputSel") + "出口",
+      key("atkVal") + "间隔", opt("inputSel") + "出口",
       "拾取" + ($("pickBtn").classList.contains("on") ? "开" : "关"),
       "巡逻" + ($("patrolBtn").classList.contains("on") ? "开" : "关"),
     ].join(" · "));
-    set("sumKeys", [key("atkKey"), key("jumpKey"), key("pickKey"), "红" + key("potKeySlot"), "蓝" + key("mpKeySlot")].join(" "));
+    set("sumSkills", skillsNow.length
+      ? skillsNow.length + " 个 · " + skillsNow.map((s) => potKeyLabel(s.key) || "?").join(" ")
+      : "未设置");
   }
   paintGroupSums();
 
@@ -2323,9 +2387,9 @@
     CHAINS.forEach((c) => paintChain(c, cfg ? cfg[c.key] : null));
   }
 
-  // 动作键：单格，存 atk_key / jump_key / pick_key / pot_key / mp_key
+  // 动作键：单格（攻击键已并入技能列表，不在这里）
   const ACTION_SLOTS = {};
-  [["atkKey", "atk_key", "ControlLeft"], ["jumpKey", "jump_key", "AltLeft"],
+  [["jumpKey", "jump_key", "AltLeft"],
    ["pickKey", "pick_key", "KeyZ"], ["potKeySlot", "pot_key", "pot8"],
    ["mpKeySlot", "mp_key", "pot9"]].forEach(([id, cfgKey, dflt]) => {
     const el = $(id);
@@ -2381,9 +2445,6 @@
     slot.paint();
     slot.commit();
   });
-  $("sideSel").addEventListener("change", () => {
-    setBot({ range_side: $("sideSel").value }).catch(botFail);
-  });
   $("inputSel").addEventListener("change", () => {
     setBot({ input: $("inputSel").value }).catch(botFail);
   });
@@ -2414,14 +2475,12 @@
     if (Date.now() > botLockUntil) {        // 正在拖滑块的这一下不覆盖
       $("hpRange").value = cfg.hp_pct;
       $("mpRange").value = cfg.mp_pct;
-      $("rngRange").value = cfg.range_px;
-      $("hgtRange").value = cfg.range_h;
       $("atkRange").value = cfg.atk_ms;
-      $("sideSel").value = cfg.range_side || "both";
       $("inputSel").value = cfg.input;
       paintBotVals();
       paintChains(cfg);                   // 红/蓝备用药水键显示成键名
-      paintActionKeys();                  // 攻击/跳跃/拾取/红蓝药主键
+      paintActionKeys();                  // 跳跃/拾取/红蓝药主键
+      syncSkills(cfg);                    // 技能卡片（没变不重画）
     }
     $("pickBtn").classList.toggle("on", !!cfg.pick);
     $("pickBtn").textContent = cfg.pick ? "开" : "关";
@@ -2435,12 +2494,271 @@
     try {
       const r = await botFetch("/api/bot/toggle", { method: "POST" });
       paintBotBtn(r.cfg);
-      toast(r.on ? "挂机已开启：血低喝药 · 打范围内的怪 · 全程按 Z（记得把游戏切回前台）"
+      toast(r.on ? "挂机已开启：血低喝药 · 按技能列表打范围内的怪（记得把游戏切回前台）"
                  : "挂机已关闭，按键已全部松开");
     } catch (e) {
       toast("切换失败：" + (e && e.message ? e.message : e));
     } finally {
       $("botBtn").disabled = false;
+    }
+  });
+
+  /* ================= 技能列表 =================
+     键位分组整个换成了技能：每个技能一张卡（快捷键 / 群攻单体 / 可跳放），
+     卡片顺序 = 释放优先级（⠿ 拖动换位）；范围框在画面上拖（点「画面调整」），
+     以人物身体中心为锚点，绿色实线 = 地面范围、橙色虚线 = 跳放范围。 */
+  const skillList = $("skillList");
+  const SK_DFLT = { key: "", type: "aoe", ground: [150, 150, 50, 40],
+                    jump: false, jrect: [210, 210, 120, 40] };
+
+  const skillRectStr = (r) =>
+    `左${Math.round(r[0])} 右${Math.round(r[1])} 上${Math.round(r[2])} 下${Math.round(r[3])}`;
+
+  function commitSkills() {
+    skillLockUntil = Date.now() + 1200;
+    skillSnap = JSON.stringify(skillsNow);
+    setBot({ skills: skillsNow }).catch(botFail);
+  }
+
+  function syncSkills(cfg) {
+    if (!Array.isArray(cfg.skills)) return;
+    if (skillDragEl || skillSel >= 0) return;   // 正在排序 / 编辑范围：别动
+    if (rec && rec.skSkill) return;             // 正在录快捷键
+    if (Date.now() < skillLockUntil) return;    // 本地刚改过，等回包
+    const snap = JSON.stringify(cfg.skills);
+    if (snap === skillSnap) return;             // 没变别重画（重画会闪）
+    skillSnap = snap;
+    skillsNow = cfg.skills.map((s) => ({
+      key: s.key || "", type: s.type || "aoe",
+      ground: [...(s.ground || SK_DFLT.ground)],
+      jump: !!s.jump, jrect: [...(s.jrect || SK_DFLT.jrect)],
+    }));
+    renderSkills();
+  }
+
+  function renderSkills() {
+    if (!skillList) return;
+    if (rec && rec.skSkill) return;             // 录键期间别把格子重建了
+    skillList.textContent = "";
+    skillsNow.forEach((s, i) => {
+      const card = document.createElement("div");
+      card.className = "skcard" + (i === skillSel ? " sel" : "");
+      card.dataset.i = i;
+      card.innerHTML = `
+        <div class="skhead">
+          <span class="skhnd" title="按住拖动，调整释放顺序（排前面的先匹配）">⠿</span>
+          <button class="slot skkey" type="button" data-hint="按键" title="这个技能的快捷键，跟游戏里的技能键位对应。点格子 → 按一个键即设置；Del 清空、Esc 取消"></button>
+          <select class="sktype" title="群攻：范围内怪 ≥2 时优先用；单体：只有 1 只时优先用。同类型里排前面的先用"><option value="aoe">群攻</option><option value="single">单体</option></select>
+          <span class="sktag">SK${i + 1}</span>
+          <button class="skdel" type="button" title="删除这个技能">✕</button>
+        </div>
+        <div class="skrow">
+          <span>范围</span><span class="skv gstr"></span>
+          <button class="mini skedit" type="button" title="在画面上拖框调整：框内拖动 = 移动，拉边角 = 缩放，以人物身体中心为锚点（蓝十字）">画面调整</button>
+        </div>
+        <label class="skjump"><input type="checkbox" class="skjp"> 可跳放（空中施放：跳 → 100ms → 技能键）</label>
+        <div class="skjbox">
+          <div class="skrow">
+            <span>跳放</span><span class="skv jstr"></span>
+            <button class="mini skgrow" type="button" title="以地面范围为基础放大生成跳放范围，再手动微调">= 地面放大</button>
+          </div>
+        </div>`;
+      const at = () => skillsNow[i];
+      // 快捷键格子：接进统一的键位录制（makeSlot）
+      const keyEl = card.querySelector(".skkey");
+      const slot = makeSlot(keyEl,
+        () => at() && at().key,
+        (v) => { if (at()) at().key = v; },
+        () => { if (at()) commitSkills(); });
+      slot.skSkill = true;
+      slot.paint();
+      card.querySelector(".sktype").value = s.type;
+      card.querySelector(".skjp").checked = !!s.jump;
+      card.querySelector(".skjbox").style.display = s.jump ? "" : "none";
+      card.querySelector(".gstr").textContent = skillRectStr(s.ground);
+      card.querySelector(".jstr").textContent = skillRectStr(s.jrect);
+
+      card.querySelector(".sktype").addEventListener("change", (e) => {
+        if (!at()) return;
+        at().type = e.target.value;
+        commitSkills();
+      });
+      card.querySelector(".skjp").addEventListener("change", (e) => {
+        if (!at()) return;
+        at().jump = e.target.checked;
+        card.querySelector(".skjbox").style.display = e.target.checked ? "" : "none";
+        commitSkills(); drawMasks();
+      });
+      card.querySelector(".skdel").addEventListener("click", () => {
+        skillsNow.splice(i, 1);
+        if (skillSel === i) skillSel = -1;
+        else if (skillSel > i) skillSel--;
+        commitSkills(); renderSkills(); drawMasks();
+      });
+      card.querySelector(".skgrow").addEventListener("click", () => {
+        if (!at()) return;
+        const g = at().ground;
+        at().jrect = [Math.round(g[0] * 1.35), Math.round(g[1] * 1.35),
+                      Math.round(g[2] * 1.5 + 20), Math.round(g[3] * 1.35)];
+        commitSkills(); renderSkills(); drawMasks();
+      });
+      card.querySelector(".skedit").addEventListener("click", () => {
+        skillSel = (skillSel === i) ? -1 : i;
+        if (skillSel >= 0) {
+          // 冻结当前人物身体中心当锚点：编辑期间角色动了也不让框漂移
+          skillAnchor = lastBodyC ? [...lastBodyC] : null;
+          skillFrame = [lastFrameW || 0, lastFrameH || 0];
+          if (!skillAnchor) toast("还没定位到人物：先上传名字牌模板，等画面上出现 ME 框", true);
+        }
+        renderSkills(); drawMasks();
+      });
+
+      // ⠿ 拖动排序：按住把手才允许拖整卡（下拉/格子不受影响）
+      const hnd = card.querySelector(".skhnd");
+      hnd.addEventListener("mousedown", () => { card.draggable = true; });
+      card.addEventListener("dragstart", (e) => {
+        skillDragEl = card;
+        card.classList.add("dragging");
+        e.dataTransfer.effectAllowed = "move";
+        try { e.dataTransfer.setData("text/plain", String(i)); } catch (_) {}
+      });
+      card.addEventListener("dragend", () => {
+        card.classList.remove("dragging");
+        card.draggable = false;
+        skillDragEl = null;
+        if (rec && rec.skSkill) return;         // 录键期间排序作废（下次渲染会摆回去）
+        const old = skillsNow.slice();
+        const cards = [...skillList.querySelectorAll(".skcard")];
+        skillsNow = cards.map((c) => old[+c.dataset.i]);
+        const myNew = cards.indexOf(card);
+        if (skillSel >= 0) skillSel = myNew;
+        commitSkills(); renderSkills(); drawMasks();
+      });
+      skillList.appendChild(card);
+    });
+  }
+
+  skillList.addEventListener("dragover", (e) => {
+    if (!skillDragEl) return;
+    e.preventDefault();
+    for (const c of skillList.querySelectorAll(".skcard")) {
+      if (c === skillDragEl) continue;
+      const r = c.getBoundingClientRect();
+      if (e.clientY < r.top + r.height / 2) {
+        skillList.insertBefore(skillDragEl, c);
+        return;
+      }
+    }
+    skillList.appendChild(skillDragEl);
+  });
+
+  $("addSkillBtn").addEventListener("click", () => {
+    skillsNow.push({ ...SK_DFLT, ground: [...SK_DFLT.ground], jrect: [...SK_DFLT.jrect] });
+    commitSkills(); renderSkills();
+  });
+
+  function updateSkillStrs() {
+    const card = skillList && skillList.querySelector(`.skcard[data-i="${skillSel}"]`);
+    const s = skillsNow[skillSel];
+    if (!card || !s) return;
+    card.querySelector(".gstr").textContent = skillRectStr(s.ground);
+    card.querySelector(".jstr").textContent = skillRectStr(s.jrect);
+  }
+
+  /* ---- 画面上的范围框编辑（画在 maskLayer 上，锚定人物身体中心） ---- */
+  const SK_G_LINE = "#16a34a", SK_G_FILL = "rgba(22,163,74,.14)";
+  const SK_J_LINE = "#d97706", SK_J_FILL = "rgba(217,119,6,.10)";
+
+  function skillRectsNorm() {
+    const s = skillsNow[skillSel];
+    if (skillSel < 0 || !s || !skillAnchor || !skillFrame[0]) return null;
+    const [cx, cy] = skillAnchor, [W, H] = skillFrame;
+    const mk = (r) => ({ x1: (cx - r[0]) / W, y1: (cy - r[2]) / H,
+                         x2: (cx + r[1]) / W, y2: (cy + r[3]) / H });
+    return { g: mk(s.ground), j: s.jump ? mk(s.jrect) : null };
+  }
+
+  function skillHitRect(rects, p) {
+    for (const key of ["g", "j"]) {          // 先看把手（把手优先于框体）
+      const r = rects[key];
+      if (!r) continue;
+      const h = hitHandle(r, p);             // 复用选区的九点柄判定
+      if (h >= 0) return { rect: key, handle: h };
+    }
+    for (const key of ["g", "j"]) {          // 地面框优先（通常在里面、更常用）
+      const r = rects[key];
+      if (r && inside(r, p)) return { rect: key, handle: -1 };
+    }
+    return null;
+  }
+
+  function applySkillRect(which, r) {
+    const s = skillsNow[skillSel];
+    if (!s || !skillAnchor || !skillFrame[0]) return;
+    const [cx, cy] = skillAnchor, [W, H] = skillFrame;
+    const c0 = (v) => Math.max(0, Math.round(v));
+    const four = [c0(cx - r.x1 * W), c0(r.x2 * W - cx),
+                  c0(cy - r.y1 * H), c0(r.y2 * H - cy)];
+    if (which === "g") s.ground = four;
+    else s.jrect = four;
+  }
+
+  function drawSkillOverlay() {
+    if (skillSel < 0 || !skillsNow[skillSel]) return;
+    const rects = skillRectsNorm();
+    if (!rects) return;
+    // 先画跳放（虚线橙），地面框叠在上面
+    for (const [r, line, fill, dash, tag] of [
+      [rects.j, SK_J_LINE, SK_J_FILL, [6, 4], "跳放"],
+      [rects.g, SK_G_LINE, SK_G_FILL, [], "地面"],
+    ]) {
+      if (!r) continue;
+      const x = X(r.x1), y = Y(r.y1);
+      const w = (r.x2 - r.x1) * L.w, h = (r.y2 - r.y1) * L.h;
+      if (w < 4 || h < 4) continue;
+      mctx.fillStyle = fill;
+      mctx.fillRect(x, y, w, h);
+      mctx.setLineDash(dash);
+      mctx.lineWidth = 1.5;
+      mctx.strokeStyle = line;
+      mctx.strokeRect(x + .5, y + .5, w - 1, h - 1);
+      mctx.setLineDash([]);
+      mctx.font = "600 10px ui-monospace, Menlo, Consolas, monospace";
+      mctx.fillStyle = line;
+      mctx.fillText(tag, x + 4, y + 11);
+    }
+    // 把手：地面框八点（中心不算，拖中心=拖整框）、跳放框四角
+    for (const [r, line, all] of [[rects.g, SK_G_LINE, true], [rects.j, SK_J_LINE, false]]) {
+      if (!r) continue;
+      const pts = handlePts(r);
+      pts.forEach(([nx, ny], idx) => {
+        if (idx === 4) return;
+        if (!all && idx % 2 === 1) return;   // 只画四角 0/2/6/8
+        const hx = X(nx), hy = Y(ny);
+        mctx.fillStyle = "#fff";
+        mctx.fillRect(hx - 3.5, hy - 3.5, 7, 7);
+        mctx.strokeStyle = line;
+        mctx.lineWidth = 1.25;
+        mctx.strokeRect(hx - 3.5, hy - 3.5, 7, 7);
+      });
+    }
+    // 锚点：人物身体中心（蓝十字），框都以它为基准
+    const ax = X(skillAnchor[0] / skillFrame[0]);
+    const ay = Y(skillAnchor[1] / skillFrame[1]);
+    mctx.strokeStyle = "#185fa5";
+    mctx.lineWidth = 1.5;
+    mctx.beginPath();
+    mctx.moveTo(ax - 7, ay); mctx.lineTo(ax + 7, ay);
+    mctx.moveTo(ax, ay - 7); mctx.lineTo(ax, ay + 7);
+    mctx.stroke();
+  }
+
+  // Esc 退出范围编辑（录键的 Esc 由录制逻辑自己处理，这里让开）
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && skillSel >= 0 && !rec) {
+      skillSel = -1;
+      renderSkills();
+      drawMasks();
     }
   });
 
@@ -2553,6 +2871,12 @@
         }
       }
       paintChar(s.char);          // 人物定位状态（有无模板 / 匹配分 / 是否已定位）
+      // 技能范围编辑的锚点：人物身体中心（全分辨率像素）+ 画面尺寸
+      if (s.char && Array.isArray(s.char.body_c)) lastBodyC = s.char.body_c;
+      if (s.client_size && s.client_size[0]) {
+        lastFrameW = s.client_size[0];
+        lastFrameH = s.client_size[1];
+      }
       $("modeBtn").textContent = "模式: " + s.mode_label;
       $("modeBtn").className = s.mode === "accurate" ? "on" : "";
       if (maskOn !== s.mask) { maskOn = s.mask; updateMaskUI(); }   // 与后端保持一致

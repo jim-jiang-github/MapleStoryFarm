@@ -54,14 +54,15 @@ check("牌高翻倍身体等比放大", abs((b2[3] - b2[1]) / (b[3] - b[1]) - 2)
 b3 = char_body_box([10, 100, 30, 100])
 check("高度 0 的牌框也能算", b3[3] > b3[1] and b3[2] > b3[0])
 
-# ---- 攻击区域：矩形求交，与画面上画的完全一致 ----
-R, H = 100, 120      # 和 DEFAULTS 的 range_px / range_h 一致
+# ---- 技能攻击范围：矩形求交，与画面上画的完全一致 ----
+# 默认技能 ground=[100,100,60,60]（左右各 100、上下各 60 = 老 range_px/range_h）
+SK0 = bot.DEFAULTS["skills"][0]
 CB = char_body_box([684, 412, 738, 427])          # 人物身体框
 
 
-def zone_hit(mbox):
-    z = bot.attack_zone([684, 412, 738, 427], R, H)
-    return z[0] < mbox[2] and mbox[0] < z[2] and z[1] < mbox[3] and mbox[1] < z[3]
+def zone_hit(mbox, skill=None):
+    g, _ = bot.skill_rects(skill or SK0, [684, 412, 738, 427])
+    return g[0] < mbox[2] and mbox[0] < g[2] and g[1] < mbox[3] and mbox[1] < g[3]
 
 
 check("身体框内的怪 → 在攻击区域内", zone_hit([CB[0] + 4, CB[1] + 4, CB[2] - 4, CB[3] - 4]))
@@ -72,10 +73,13 @@ check("上一层够不着的怪 → 不在区域内（高度交不上）",
 check("下一层够不着的怪 → 不在区域内",
       not zone_hit([CB[0], CB[3] + 90, CB[2], CB[3] + 150]))
 check("高度恰好搭边 → 在攻击区域内", zone_hit([CB[0], CB[3] - 2, CB[2], CB[3] + 50]))
-check("in_attack_zone 与手算一致",
-      bot.in_attack_zone([684, 412, 738, 427], [CB[2] + 40, CB[1], CB[2] + 90, CB[3]], R, H))
-check("出厂攻击高度默认 120", bot.DEFAULTS["range_h"] == 120.0)
-check("出厂跳跃高度默认 140", bot.DEFAULTS["jump_reach"] == 140.0)
+# 只盖一边的技能：身后的怪不算
+right_only = {"key": "KeyA", "type": "single", "ground": [0, 100, 60, 60],
+              "jump": False, "jrect": [0, 100, 120, 60]}
+check("单侧技能：前方够得着", zone_hit([CB[2] + 40, CB[1], CB[2] + 90, CB[3]], right_only))
+check("单侧技能：身后够不着", not zone_hit([CB[0] - 90, CB[1], CB[0] - 40, CB[3]], right_only))
+check("出厂默认技能地面范围 = 老攻击区域 (100,100,60,60)", SK0["ground"] == [100, 100, 60, 60])
+check("出厂默认跳放框上扩 = 老上下60 + jump_reach140", SK0["jrect"][2] == 200)
 
 # ---- 人物重叠过滤 ----
 

@@ -2053,69 +2053,49 @@ def _dash(img, p1, p2, color, thick=1, seg=9):
 char_body_box = botmod.char_body_box
 
 
-def draw_attack_range(img, box):
-    """在人物旁边画出攻击区域：以身体中心为原点、上下各 range_h/2 的矩形
-    （上下边虚线、左右实线）。
+def draw_skill_ranges(img, box):
+    """把每个技能的攻击范围画在人物旁边：地面框实线、跳放框虚线。
 
-    横向按攻击方向展开：`both` 左右各 range_px；`front` 只朝人物**当前朝向**
-    那一侧展开（单体技能只能打身前）。朝向来自 bot 状态里的 `face`，读不到
-    （0）就画成两侧——不知道朝哪就别假装知道。
-
-    画的不是「水平够得着多远」的示意带了——bot 出不出手就是按这个矩形与怪物
-    框求交判断的（in_attack_zone），所见即所打。上下层够不着的怪，把高度调小
-    就不会再被打。
+    框 = 人物身体中心 ± [左,右,上,下] 偏移（bot.skill_rects 换算），bot 出手
+    就是按这些矩形与怪物框求交判断的——所见即所打。标签 SK1/SK2… 对应面板
+    技能列表的顺序（= 释放优先级），带 J 的是跳放框（怪在里面但不在实线框里
+    时会跳起来放）。最多画 6 个，再多糊成一团。
     """
     cfg, st = game_bot.snapshot()
-    r = int(cfg["range_px"])
-    rh = int(cfg["range_h"])
-    if r <= 0 or rh <= 0:
+    skills = [s for s in (cfg.get("skills") or []) if s.get("key")]
+    if not skills:
         return img
-    mode = cfg.get("range_side", "both")
-    face = int(st.get("face") or 0)
     on = cfg["on"]
     color = BOT_RANGE_ON if on else BOT_RANGE_OFF
-    thick = 2 if on else 1
     h, w = img.shape[:2]
     b = char_body_box(box)
     cx = int((b[0] + b[2]) / 2)
     cy = int((b[1] + b[3]) / 2)
-    half = rh // 2
-    if mode == "front" and face:
-        if face > 0:                      # 朝右：从身体中心往右
-            left, right = cx, cx + r
-        else:                             # 朝左
-            left, right = cx - r, cx
-    else:
-        left, right = cx - r, cx + r
-    left, right = max(2, left), min(w - 3, right)
-    if right - left < 6:                  # 贴着画面边缘时别画成一条线
-        right = min(w - 3, left + 6)
-    top, bot = max(2, cy - half), min(h - 3, cy + half)
-    _dash(img, (left, top), (right, top), color, thick)
-    _dash(img, (left, bot), (right, bot), color, thick)
-    # 两端竖线用实线，一眼能看出边界在哪
-    cv2.line(img, (left, top - 6), (left, bot + 6), color, thick, cv2.LINE_AA)
-    cv2.line(img, (right, top - 6), (right, bot + 6), color, thick, cv2.LINE_AA)
-    cv2.line(img, (cx, cy - 5), (cx, cy + 5), color, thick, cv2.LINE_AA)
-    # 箭头表示打哪边：两侧 / 朝右 / 朝左 / 朝向未知（正前方模式还没转身）
-    arrow = ""
-    if mode == "front":
-        arrow = " ->" if face > 0 else (" <-" if face < 0 else " ?")
-    # 「关」不能用中文：cv2 内置字体画不了 CJK，会渲染成一串 "???" 像乱码
-    tag = f"ATK {r}x{rh}{arrow}" if on else f"ATK {r}x{rh}{arrow} (OFF)"
-    (tw_, th_), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
-    # 标签贴在矩形外侧的空地上：正前方模式只有半个框，往里放会压住人物本体
-    if mode == "front" and face > 0:
-        tx = right + 6
-    elif mode == "front" and face < 0:
-        tx = left - tw_ - 6
-    else:
-        tx = left + 4
-    tx = max(4, min(tx, w - tw_ - 6))
-    ty = min(bot - 2, max(th_ + 3, cy + th_ // 2))
-    cv2.rectangle(img, (tx - 3, ty - th_ - 3), (tx + tw_ + 3, ty + 2), TXT_BG, -1)
-    cv2.putText(img, tag, (tx, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
-                color, 1, cv2.LINE_AA)
+    for i, sk in enumerate(skills[:6]):
+        tag = f"SK{i + 1}"
+        rects = [(False, sk["ground"])]
+        if sk.get("jump"):
+            rects.append((True, sk["jrect"]))
+        for is_jump, (l, r, u, d) in rects:
+            x1, y1 = max(2, int(cx - l)), max(2, int(cy - u))
+            x2, y2 = min(w - 3, int(cx + r)), min(h - 3, int(cy + d))
+            if x2 - x1 < 6 or y2 - y1 < 6:
+                continue                   # 贴边/太扁就别画成一坨
+            thick = 2 if (on and not is_jump) else 1
+            if is_jump:
+                _dash(img, (x1, y1), (x2, y1), color, thick)
+                _dash(img, (x1, y2), (x2, y2), color, thick)
+                _dash(img, (x1, y1), (x1, y2), color, thick)
+                _dash(img, (x2, y1), (x2, y2), color, thick)
+            else:
+                cv2.rectangle(img, (x1, y1), (x2, y2), color, thick, cv2.LINE_AA)
+            label = tag + ("J" if is_jump else "")
+            (tw_, th_), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+            tx = max(4, min(x1 + 4, w - tw_ - 6))
+            ty = y1 - 4 if y1 - 4 > th_ else y2 + th_ + 4
+            cv2.rectangle(img, (tx - 3, ty - th_ - 3), (tx + tw_ + 3, ty + 2), TXT_BG, -1)
+            cv2.putText(img, label, (tx, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                        color, 1, cv2.LINE_AA)
     return img
 
 
@@ -2149,9 +2129,9 @@ def overlay_char(img):
     cv2.rectangle(img, (x1 - 4, ty - th_ - 4), (x1 - 4 + tw_ + 4, ty + 2), TXT_BG, -1)
     cv2.putText(img, tag, (x1 - 2, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                 CHAR_COLOR, 1, cv2.LINE_AA)
-    # 攻击范围：挂在人物标记上一起画，所以手机上看到的就是后台真正用的那个距离
+    # 技能攻击范围：挂在人物标记上一起画，所以手机上看到的就是后台真正用的那个距离
     try:
-        draw_attack_range(img, box)
+        draw_skill_ranges(img, box)
     except Exception:  # noqa: BLE001
         pass                     # 画不画得出来都不该影响推流
     return img
@@ -2553,6 +2533,10 @@ async def stats():
             "scale": char_state["scale"],
             "guard": char_state["guard"],   # >0：疑似跳变，正在攒帧确认
             "roi": list(char_state["roi"]),   # 搜索范围（归一化 x1,y1,x2,y2）
+            # 身体中心（全分辨率像素）：技能范围框以它为锚点，前端画布编辑用
+            "body_c": (lambda b: [round((b[0] + b[2]) / 2, 1), round((b[1] + b[3]) / 2, 1)]
+                       )(char_body_box(char_state["box"]))
+                      if char_state["box"] else None,
         },
     })
 

@@ -8,13 +8,13 @@
 
 优先级（每 20ms 一轮）：
   1) 血低于门限 → 喝药（有独立冷却，默认 3 秒）
-  2) 全程按 Z 拾取（默认 130ms 一次，无脑一直按）
-  3) 有目标且与攻击区域相交（宽 range_px × 高 range_h 的矩形，画面上画的就是
-     它，与怪物框有交集才出手）→ 转向 + 攻击（攻击有冷却，默认 420ms）。
-     头顶差得不多的怪（<= jump_reach）会先跳起来（Alt）再打。
-     range_side=front（单体技能只打身前）时矩形只朝目标那侧展开，且每刀前都
-     重新点一次方向键对正——朝向读不到，宁可按一下也不空砍
-  4) 有目标但在范围外 → 朝它走（只按左右，这个场景没有纵向移动）
+  2) 全程按拾取键（默认 130ms 一次，无脑一直按）
+  3) 技能选择：按列表顺序（= 优先级）逐个算判定框（skill_rects，画面上画的
+     就是它们，与怪物框有交集才算罩到）。怪 ≥2 优先群攻、只有 1 只优先单体。
+     地面框罩到 → 转向 + 按技能键（默认 420ms 冷却）；只在跳放框里 →
+     跳（Alt）→ 100ms → 技能键。范围只盖一边的技能每刀前重新点一次方向键
+     对正——朝向读不到，宁可按一下也不空放
+  4) 有目标但所有技能都罩不到 → 朝它走（只按左右，这个场景没有纵向移动）
   5) 视野内没目标 → 左右巡逻（可选，默认开）
 
 安全前提，必须遵守：
@@ -103,6 +103,7 @@ def _key_label(name):
 TURN_SETTLE_MS = 130
 TURN_TAP_MS = 50          # 转身时方向键按住多久：够游戏认一次转向，又不至于真的迈一步
 JUMP_COOLDOWN_MS = 900    # 两次跳的最小间隔：起跳+落地+站稳要这么久，比这快就是原地抽搐
+JUMP_CAST_MS = 100        # 跳放连招：按下跳键后隔这么久再按技能键（起跳到能出手的手感值）
 
 KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
@@ -335,20 +336,28 @@ DEFAULTS = {
     "mp_key": "pot9",    # 用哪个键喝蓝药：pot8 / pot9 / pot0
     "mp_chain": ["", "", "", ""],
     # ↑ 备用蓝药键 1~4：主键按了蓝量没回到线以上就按这个顺序换着喝
-    "atk_key": "ControlLeft",   # 攻击键（KeyboardEvent.code 名，面板上可改）
-    "jump_key": "AltLeft",      # 跳跃键
+    "jump_key": "AltLeft",      # 跳跃键（跳放连招用）
     "pick_key": "KeyZ",         # 拾取键
-    "range_px": 100.0,   # 攻击区域宽：人物中心左右各这么多像素
-    "range_h": 120.0,    # 攻击区域高：以人物身体为中心上下各占一半（画面上画的就是它）
-    "range_side": "both",  # 攻击方向：both 左右两侧 / front 只打身前（单体技能）
-    "jump_reach": 140.0, # 跳跃可攻击高度：头顶的怪离攻击区不超过它就跳起来打
-    "atk_ms": 420,       # 两次攻击的最小间隔（毫秒）
+    # 技能列表：顺序 = 释放优先级（面板上 ⠿ 拖动排序）。
+    #   key    快捷键（KeyboardEvent.code 名，空 = 还没录，决策时跳过）
+    #   type   aoe 群攻 / single 单体：范围内怪 ≥2 优先群攻，只有 1 只优先单体，
+    #          同类型里排前面的先用
+    #   ground 地面攻击范围 [左, 右, 上, 下]：相对人物身体中心的像素偏移，
+    #          怪物框和这个矩形有交集就站原地直接放
+    #   jump   可跳放（空中施放）；jrect 跳放范围：怪在 jrect 内、ground 外
+    #          就按「跳 → 100ms → 技能键」的连招打
+    "skills": [
+        {"key": "ControlLeft", "type": "aoe",
+         "ground": [100, 100, 60, 60],
+         "jump": True, "jrect": [100, 100, 200, 60]},
+    ],
+    "atk_ms": 420,       # 两次放技能的最小间隔（毫秒）
     "pick": True,        # 全程按 Z 拾取
     "pick_ms": 130,      # 拾取按键间隔（毫秒）
     "patrol": True,      # 视野里没怪时左右来回走
     "patrol_sec": 2.5,   # 巡逻换向间隔（秒）
-    "move": True,        # 怪在攻击距离外时走过去
-    "dy_tol": 150,       # 纵向容差：同一条平台上的怪才算目标（像素）
+    "move": True,        # 怪在技能范围外时走过去
+    "dy_tol": 150,       # 纵向容差：目标候选带在技能范围并集之下再扩这么多（像素）
     "input": "auto",     # 按键出口：auto 优先硬件 / hid 只认硬件 / soft 只用软件注入
     "hid_port": "",      # 硬件串口，留空自动扫描（CH9329 通常挂在 CH343 那个口上）
 }
@@ -357,17 +366,14 @@ DEFAULTS = {
 # 药水键兼容旧的 pot8/pot9/pot0（VK 名），新的都用 KeyboardEvent.code 名
 _KEY_NAMES = tuple(CODE_VK) + POT_KEYS
 ENUMS = {"pot_key": _KEY_NAMES, "mp_key": _KEY_NAMES,
-         "atk_key": tuple(CODE_VK), "jump_key": tuple(CODE_VK),
+         "jump_key": tuple(CODE_VK),
          "pick_key": tuple(CODE_VK),
-         "input": ("auto", "hid", "soft"), "range_side": ("both", "front")}
+         "input": ("auto", "hid", "soft")}
 
 CLAMP = {
     "hp_pct": (10.0, 95.0),
     "mp_pct": (10.0, 95.0),
     "pot_sec": (0.5, 30.0),
-    "range_px": (40.0, 600.0),
-    "range_h": (40.0, 400.0),
-    "jump_reach": (60.0, 300.0),
     "atk_ms": (120, 3000),
     "pick_ms": (60, 2000),
     "patrol_sec": (0.5, 20.0),
@@ -375,13 +381,62 @@ CLAMP = {
 }
 
 
+def _clamp_rect4(v, dflt):
+    """[左,右,上,下] 四个偏移：坏值退回默认，范围钳到 0~600px。"""
+    if not isinstance(v, (list, tuple)) or len(v) != 4:
+        return list(dflt)
+    out = []
+    for x, d in zip(v, dflt):
+        try:
+            x = float(x)
+        except (TypeError, ValueError):
+            x = float(d)
+        out.append(round(min(600.0, max(0.0, x)), 1))
+    return out
+
+
+def _clamp_skills(v, dflt):
+    """技能列表：逐项校验，最多 8 个（再多人也按不过来，画面也画不下）。"""
+    base = dflt[0]
+    out = []
+    if isinstance(v, list):
+        for s in v[:8]:
+            if not isinstance(s, dict):
+                continue
+            key = s.get("key")
+            out.append({
+                "key": key if key in CODE_VK else "",
+                "type": s.get("type") if s.get("type") in ("aoe", "single") else "aoe",
+                "ground": _clamp_rect4(s.get("ground"), base["ground"]),
+                "jump": bool(s.get("jump")),
+                "jrect": _clamp_rect4(s.get("jrect"), base["jrect"]),
+            })
+    return out
+
+
 def clamp_cfg(raw):
     """整理一份配置：非法值退回默认，数值钳到合理区间。"""
+    raw = dict(raw or {})
+    # 旧配置（单一攻击键 + 距离/高度/跳跃高度）自动换成第一个技能，行为不变
+    if "skills" not in raw:
+        rp = float(raw.get("range_px", 100.0) or 100.0)
+        rh = float(raw.get("range_h", 120.0) or 120.0)
+        jr = float(raw.get("jump_reach", 140.0) or 140.0)
+        raw["skills"] = [{
+            "key": raw.get("atk_key") or "ControlLeft",
+            "type": "aoe",
+            "ground": [rp, rp, rh / 2.0, rh / 2.0],
+            "jump": True,
+            "jrect": [rp, rp, rh / 2.0 + jr, rh / 2.0],
+        }]
     out = dict(DEFAULTS)
     for k, dv in DEFAULTS.items():
         if k not in raw:
             continue
         v = raw[k]
+        if k == "skills":
+            out[k] = _clamp_skills(v, dv)
+            continue
         if isinstance(dv, bool):
             out[k] = bool(v)
         elif isinstance(dv, list):
@@ -405,7 +460,7 @@ def clamp_cfg(raw):
                 continue
             lo, hi = CLAMP.get(k, (dv, dv))
             out[k] = round(min(hi, max(lo, v)), 2)
-    for k in ("atk_ms", "pick_ms", "dy_tol", "range_h", "jump_reach"):   # 毫秒/像素：整数更好读
+    for k in ("atk_ms", "pick_ms", "dy_tol"):   # 毫秒/像素：整数更好读
         out[k] = int(out[k])
     return out
 
@@ -460,56 +515,53 @@ def _intersects(a, b):
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
-def attack_zone(char_box, range_px, range_h, face=0, side="both"):
-    """攻击判定区：以人物身体中心为原点、上下各 range_h/2 的矩形。
+def skill_rects(skill, char_box):
+    """一个技能的两个判定框（全画面坐标 [x1,y1,x2,y2]）。
 
-    横向按攻击方向展开：
-      side="both"  左右各 range_px（多数技能，两侧都能打到）
-      side="front" 只朝 face 那一侧展开 range_px（单体技能只能打正前方）。
-                   face=0（朝向未知）时按两侧算——不知道朝哪就别假装知道，
-                   让判定宽一点，等转身后再按单侧精确算。
-    server 的 draw_attack_range 画在画面上的就是它——所见即所打。
+    ground/jrect 存的是相对人物身体中心的偏移 [左, 右, 上, 下]，
+    这里换算成画面上的绝对矩形。跳放没开就没有第二个框。
+    server 的 draw_skill_ranges 画在画面上的就是它——所见即所打。
     """
     b = char_body_box(char_box)
     cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
-    hh = float(range_h) / 2.0
-    w = float(range_px)
-    if side == "front" and face:
-        if face > 0:
-            return [cx, cy - hh, cx + w, cy + hh]
-        return [cx - w, cy - hh, cx, cy + hh]
-    return [cx - w, cy - hh, cx + w, cy + hh]
+    l, r, u, d = (float(v) for v in skill["ground"])
+    ground = [cx - l, cy - u, cx + r, cy + d]
+    jump = None
+    if skill.get("jump"):
+        jl, jr, ju, jd = (float(v) for v in skill["jrect"])
+        jump = [cx - jl, cy - ju, cx + jr, cy + jd]
+    return ground, jump
 
 
-def in_attack_zone(char_box, mon_box, range_px, range_h, face=0, side="both"):
-    return _intersects(attack_zone(char_box, range_px, range_h, face, side), mon_box)
+def _nearest_box(monsters, cx):
+    """列表里水平离 cx 最近的一只怪的框（monsters 元素带 box）。"""
+    best, best_d = None, None
+    for m in monsters:
+        d = abs(_cx(m["box"]) - cx)
+        if best_d is None or d < best_d:
+            best, best_d = m["box"], d
+    return best
 
 
-def pick_target(char_box, monsters, range_px, range_h, jump_reach, dy_tol):
-    """挑一个「值得处理」的目标：带内按水平距离排序，同距取分数高的。
-
-    纵向候选带 = 攻击区域向上扩 jump_reach（跳起来也够得着的层）、向下扩
-    dy_tol（下一层：走下平台沿也算一条路）。带外的怪压根不进入决策——
-    隔着两层平台的怪当成目标，只会让角色对着空气挥刀或者原地发呆。
-    到了带内**打不打**由 _step 的攻击区域矩形判断（头顶够得着的会跳）。
-    """
-    if not char_box or not monsters:
+def _band_target(char_box, monsters, band, dy_tol):
+    """技能范围罩不到时的走路目标：候选带（所有技能判定框的并集，往下再扩
+    dy_tol 容下一层平台）里最近的一只。带外的怪不追——隔着两层平台追过去
+    只会对着空气挥刀。"""
+    if band is None or not monsters:
         return None
-    zone = attack_zone(char_box, range_px, range_h)
-    v_top = zone[1] - float(jump_reach)
-    v_bot = _cy(char_box) + float(dy_tol)
     cx = _cx(char_box)
+    top = band[1]
+    bot = band[3] + float(dy_tol)
     best, best_d = None, None
     for m in monsters:
         box = m.get("box")
         if not box or len(box) != 4:
             continue
-        if not (box[1] < v_bot and box[3] > v_top):
+        if not (box[1] < bot and box[3] > top):
             continue
         d = abs(_cx(box) - cx)
-        score = (d, -float(m.get("conf", 0)))
-        if best_d is None or score < best_d:
-            best, best_d = m, score
+        if best_d is None or d < best_d:
+            best, best_d = m, d
     return best
 
 
@@ -810,11 +862,48 @@ class Bot:
             self._set_status(act="找不到人物", target="")
             return
 
-        tgt = pick_target(char, st.get("monsters") or [],
-                          cfg["range_px"], cfg["range_h"], cfg["jump_reach"], cfg["dy_tol"])
-        if not tgt:
+        # 3) 技能选择：逐个技能算判定框（skill_rects），数框里的怪。
+        #    列表顺序 = 优先级；某个技能框里怪 ≥2 → 优先群攻，只有 1 只 → 优先
+        #    单体；同类型里排前面的先用。地面框罩到 = 直接放；只在跳放框里 =
+        #    跳 → 100ms → 技能键。全部技能都罩不到 → 走路 / 巡逻。
+        monsters = st.get("monsters") or []
+        cands = []          # (skill, 地面框, 跳放框, 地面怪, 跳放怪)
+        band = None         # 所有判定框的并集：走路目标的候选带
+        for sk in cfg.get("skills") or []:
+            if not sk.get("key"):
+                continue                     # 还没录按键的技能不参与
+            g, j = skill_rects(sk, char)
+            gm = [m for m in monsters if m.get("box") and _intersects(g, m["box"])]
+            jm = [m for m in monsters if j and m.get("box") and _intersects(j, m["box"])]
+            if gm or jm:
+                cands.append((sk, g, j, gm, jm))
+            for rect in ([g] if j is None else [g, j]):
+                band = rect if band is None else [
+                    min(band[0], rect[0]), min(band[1], rect[1]),
+                    max(band[2], rect[2]), max(band[3], rect[3])]
+
+        if not cands:
+            # 没有技能罩得住的怪：像以前一样朝最近的目标走 / 巡逻
             self._set_status(target="")
-            if cfg["patrol"]:
+            tgt = _band_target(char, monsters, band, cfg["dy_tol"])
+            if tgt:
+                tb = tgt["box"]
+                dx = _cx(tb) - _cx(char)
+                side = 1 if dx >= 0 else -1
+                self._set_status(target=f"{tgt.get('name', '?')} {int(abs(dx))}px")
+                if band[0] < tb[2] and tb[0] < band[2]:
+                    # 水平上已经挨着技能带了，只是高度差太多（下一层/头顶太高）
+                    # → 站住：再走过去也打不着，别白走
+                    self._set_dir(0)
+                    self._set_status(act="高度够不着")
+                elif cfg["move"]:
+                    self._set_dir(side)
+                    self._face = side
+                    self._set_status(act="走向目标")
+                else:
+                    self._set_dir(0)
+                    self._set_status(act="目标太远")
+            elif cfg["patrol"]:
                 if now - self._t_patrol >= cfg["patrol_sec"]:
                     self._patrol_dir = -self._patrol_dir
                     self._t_patrol = now
@@ -826,85 +915,71 @@ class Bot:
                 self._set_status(act="守株待兔")
             return
 
-        name = tgt.get("name", "?")
-        dx = _cx(tgt["box"]) - _cx(char)
-        side = 1 if dx >= 0 else -1
-        dist = abs(dx)
-        self._set_status(target=f"{name} {int(dist)}px")
+        # 怪多优先群攻、单只优先单体（按技能自己的框数怪，跳放框里的也算）；
+        # 想要的类型里没有能用的，就退回任意可用技能
+        def _n(gm, jm):
+            seen = {id(m) for m in gm}
+            return len(gm) + sum(1 for m in jm if id(m) not in seen)
+        want = "aoe" if any(_n(gm, jm) >= 2 for _, _, _, gm, jm in cands) else "single"
+        pool = [c for c in cands if c[0]["type"] == want] or cands
+        sk, g, j, gm, jm = pool[0]
 
-        # 出不出手看攻击区域：画面上那个矩形（宽 range_px × 高 range_h）与怪物
-        # 框有交集才打。之前只比水平中心距，上下层的怪水平上很近、实际够不着，
-        # 人物就朝空气挥刀。现在拆开看：
-        #   水平交不上 → 走过去；
-        #   水平挨着、怪物悬在头顶且差得不多（<= jump_reach）→ 跳起来打：跳完
-        #     人物升高、攻击区域跟着上移，交上集就走下面的正常攻击流程；
-        #   水平挨着但高度交不上（下一层/差太多）→ 站住，走过去也白走。
-        #
-        # 攻击方向 front（单体技能只能打身前）：矩形只朝目标那一侧展开。判定
-        # 用 side（假设已面向目标），绘制用真实朝向（server 读 status["face"]）——
-        # 出招前那一步「对正」就是把假设变成事实。
-        mode = cfg["range_side"]
-        zone = attack_zone(char, cfg["range_px"], cfg["range_h"], side, mode)
-        mb = tgt["box"]
-        x_hit = zone[0] < mb[2] and mb[0] < zone[2]
-        y_hit = zone[1] < mb[3] and mb[1] < zone[3]
+        mb = _nearest_box(gm or jm, _cx(char))
+        dx = _cx(mb) - _cx(char)
+        side = 1 if dx >= 0 else -1
+        self._set_status(target=f"{_key_label(sk['key'])} 技能 · {int(abs(dx))}px")
+
         atk_ready = (now - self._t_atk) * 1000.0 >= cfg["atk_ms"]
         settling = (now - self._t_turn) * 1000.0 < TURN_SETTLE_MS
         # 上一次转身之后还没出过手 = 朝向只是「记得对」，不是「刚确认过」。
-        # 被击退、复活、你自己手动走两步都会让记忆失准；单侧攻击失准就是空砍，
-        # 所以正前方模式下每刀前都重新点一次方向键对正（转身 50ms + 等 130ms
-        # 本来就塞得进 420ms 的攻击冷却里，几乎不损攻速）。
+        # 被击退、复活、手动走两步都会让记忆失准；范围只盖一边的技能失准就是
+        # 空放，所以单侧技能每刀前都重新点一次方向键对正（转身 50ms + 等 130ms
+        # 塞得进攻击冷却里，几乎不损攻速）。
         calibrated = self._t_turn > self._t_atk
-        if not (x_hit and y_hit):
-            if x_hit:
-                gap = zone[1] - mb[3]        # >0：怪物整个悬在攻击区上方
-                if 0 < gap <= cfg["jump_reach"]:
-                    self._set_dir(0)
-                    jump_ready = (now - self._t_jump) * 1000.0 >= JUMP_COOLDOWN_MS
-                    # 跳起来那一刀也是朝正前方的：正前方模式先对正再起跳，
-                    # 别跳起来砍反方向。两侧模式朝向不影响命中，直接跳更干脆。
-                    if jump_ready and mode == "front" and (self._face != side
-                                                           or not calibrated):
-                        self._tap("right" if side > 0 else "left", TURN_TAP_MS)
-                        self._face = side
-                        self._t_turn = now
-                        self._set_status(act="转身朝目标", err="")
-                        return
-                    if jump_ready:
-                        self._tap(cfg["jump_key"])
-                        self._t_jump = now
-                        self._count("jmp")
-                    self._set_status(act="跳起攻击", err="")
-                else:
-                    self._set_dir(0)
-                    self._set_status(act="高度够不着")
-            elif cfg["move"]:
-                self._set_dir(side)
-                self._face = side
-                self._set_status(act="走向目标")
-            else:
-                self._set_dir(0)
-                self._set_status(act="目标太远")
-            return
+        one_sided = (sk["ground"][0] <= 0) != (sk["ground"][1] <= 0)  # 只盖一边
 
-        # 进范围了：先站住，再转向目标，然后按节奏攻击
+        # 进范围了：先站住，再转向目标，然后出手
         self._set_dir(0)
-        if self._face != side or (mode == "front" and atk_ready and not calibrated):
-            # 这个游戏只能靠按方向键转身。轻点一下位置几乎不动，但朝向会变。
-            # 转完这一轮**不打**：转身和攻击挨着发，游戏会按旧朝向出招。
-            self._tap("right" if side > 0 else "left", TURN_TAP_MS)
-            self._face = side
-            self._t_turn = now
-            self._set_status(act="转身朝目标", err="")
-            return
-        if settling:
-            # 刚转完身，等游戏把朝向渲染出来再出手
-            self._set_status(act="等朝向生效")
-            return
-        if atk_ready:
-            self._tap(cfg["atk_key"])
-            self._t_atk = now
-            self._count("atk")
-            self._set_status(act="攻击", err="")
+        if gm:
+            # 地面框里有怪：站原地按技能键（转身 → 等朝向生效 → 出手，老流程原样）
+            if self._face != side or (one_sided and atk_ready and not calibrated):
+                # 这个游戏只能靠按方向键转身。轻点一下位置几乎不动，但朝向会变。
+                # 转完这一轮**不打**：转身和攻击挨着发，游戏会按旧朝向出招。
+                self._tap("right" if side > 0 else "left", TURN_TAP_MS)
+                self._face = side
+                self._t_turn = now
+                self._set_status(act="转身朝目标", err="")
+                return
+            if settling:
+                # 刚转完身，等游戏把朝向渲染出来再出手
+                self._set_status(act="等朝向生效")
+                return
+            if atk_ready:
+                self._tap(sk["key"])
+                self._t_atk = now
+                self._count("atk")
+                self._set_status(act=f"放技能 {_key_label(sk['key'])}", err="")
+            else:
+                self._set_status(act="等冷却")
         else:
-            self._set_status(act="等冷却")
+            # 怪只在跳放框里（头顶 / 更远）：起跳 → 空中按技能键。
+            # 两侧技能朝向不影响命中，直接跳（老行为）；单侧技能先对正再起跳，
+            # 别跳起来打反方向。
+            jump_ready = (now - self._t_jump) * 1000.0 >= JUMP_COOLDOWN_MS
+            if one_sided and jump_ready and (self._face != side or not calibrated):
+                self._tap("right" if side > 0 else "left", TURN_TAP_MS)
+                self._face = side
+                self._t_turn = now
+                self._set_status(act="转身朝目标", err="")
+                return
+            if not jump_ready or not atk_ready:
+                self._set_status(act="等跳跃冷却" if not jump_ready else "等冷却")
+                return
+            self._tap(cfg["jump_key"])
+            time.sleep(JUMP_CAST_MS / 1000.0)
+            self._tap(sk["key"])
+            self._t_jump = now
+            self._t_atk = now
+            self._count("jmp")
+            self._count("atk")
+            self._set_status(act=f"跳放 {_key_label(sk['key'])}", err="")
