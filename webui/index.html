@@ -512,9 +512,6 @@
                 <button id="roiBtn" class="mini" title="在画面上拖动四条边线，把范围收到人物可能出现的那一块">调整</button>
               </span>
             </div>
-            <div class="row"><span class="k">条位置</span><span class="v small" id="barsrc">—</span></div>
-
-            <div class="row"><span class="k">挂机</span><span class="v small" id="botAct">—</span></div>
             <div class="row conf">
               <span class="k">按键出口</span>
               <span class="v"><select id="inputSel" title="硬件 = CH9329F 小板：目标机收到的是真实 USB 键盘报文，反外挂和 DirectInput 都当真人；软件 = SendInput 注入，按键带注入标记，部分游戏会无视"><option value="auto">自动</option><option value="hid">硬件</option><option value="soft">软件</option></select><b class="sub" id="inputNow">—</b></span>
@@ -1537,12 +1534,6 @@
       barsCfg = r.bars || {};
       renderBars(r.values);
       recordExp(r.values ? r.values.exp : null);
-      const el = $("barsrc");
-      if (el) {
-        const src = r.source === "manual" ? "手动" : "自动";
-        el.textContent = r.note ? `${src} · ${r.note}` : src;
-        el.title = r.note || "";
-      }
     } catch (e) { /* 服务未就绪：保持上次读数 */ }
   }
 
@@ -2272,24 +2263,19 @@
       const res = await fetch("/api/bot", { cache: "no-store" });
       if (!res.ok) {
         // 接口 404 = 服务进程还是旧代码（页面已经更新了，进程没重启）
-        $("botAct").textContent = res.status === 404 ? "服务在跑旧代码，重启后可用" : `接口 ${res.status}`;
-        $("botAct").className = "v small warn";
+        $("botBtn").title = res.status === 404
+          ? "服务在跑旧代码，重启后可用" : `接口 ${res.status}`;
         return;
       }
       const r = await res.json();
       if (!r.cfg) return;
       paintBotCfg(r.cfg);
       const st = r.status || {};
-      let txt = st.act || "—";
-      if (st.target) txt += ` · ${st.target}`;
-      if (st.pot || st.atk) txt += `（药${st.pot} 攻${st.atk}）`;
-      $("botAct").textContent = txt;
-      // 失焦是「脚本在跑但碰不到键盘」，属于要提醒的状态，跟出错一样标红
-      const warn = !!st.err || (r.cfg.on && st.act === "游戏不在前台");
-      $("botAct").className = "v small" + (warn ? " warn" : "");
-      $("botAct").title = st.err
+      // 状态行已删，异常状态（出错/失焦/识别没开）挂到挂机按钮的悬浮提示上，不占面板
+      const warn = st.err
         || (r.detect_on ? "" : "识别没开，脚本看不到怪（只会巡逻）")
         || (r.cfg.on && !r.foreground ? "只有游戏窗口在前台时才能发按键：切回游戏就会自己继续" : "");
+      $("botBtn").title = (st.act ? `当前：${st.act}${st.target ? ` · ${st.target}` : ""}\n` : "") + warn;
 
       // 按键出口：真用上硬件才显示端口号，退到软件注入就明说（降级要看得见）
       const inp = r.input || {};
