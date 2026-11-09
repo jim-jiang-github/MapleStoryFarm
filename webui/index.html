@@ -1526,13 +1526,20 @@
     $("expRange").textContent = `${rawLo.toFixed(1)}% → ${rawHi.toFixed(1)}%`;
   }
 
+  let barsFail = 0;
   async function pollBars() {
     try {
       const r = await (await fetch("/api/bars", { cache: "no-store" })).json();
       barsCfg = r.bars || {};
       renderBars(r.values);
       recordExp(r.values ? r.values.exp : null);
-    } catch (e) { /* 服务未就绪：保持上次读数 */ }
+      barsFail = 0;
+      try { sessionStorage.removeItem("selfReload"); } catch (e) {}
+    } catch (e) {
+      /* 服务未就绪：保持上次读数。连续失败 10 秒（25 次）说明页面本身坏了，
+         交 selfReload 自愈刷新一次（selfReload 定义在文件末尾，函数声明会提升）。 */
+      if (++barsFail > 25) selfReload("血条轮询连续失败");
+    }
   }
 
   /* 标定框一直画在画面上（白框=判定 ROI，洋红框=整条槽，黄线=填充终点），
@@ -2394,6 +2401,26 @@
 
   pollBars();                       // 血蓝经验条读数：独立轮询，比统计信息快一档
   setInterval(pollBars, 400);
+
+  /* 自愈：轮询的 try/catch 会把错误全吞掉，脚本挂了页面就僵在旧状态
+     （比如血条一直「—」）。两路兜底，连续出问题就自动刷新一次：
+       1) window error —— 未捕获异常（多半是浏览器缓存的旧 JS 配上刚改的 HTML）
+       2) pollBars 连续失败 10 秒 —— 轮询本身坏了
+     防死循环：sessionStorage 记号，刷过一次后必须等一轮「健康」才允许再刷。 */
+  function selfReload(reason) {
+    if (sessionStorage.getItem("selfReload")) return;
+    try { sessionStorage.setItem("selfReload", "1"); } catch (e) { /* 隐私模式 */ }
+    console.warn("页面异常，自动刷新自愈：" + reason);
+    location.reload();
+  }
+  let jsErrs = 0, jsErrTimer = null;
+  window.addEventListener("error", (e) => {
+    if (!e || !e.message) return;
+    jsErrs += 1;
+    clearTimeout(jsErrTimer);
+    jsErrTimer = setTimeout(() => { jsErrs = 0; }, 5000);
+    if (jsErrs >= 3) selfReload("脚本连续出错");
+  });
 
   /* 页面热更新：index.html 一改（mtime/size 变化）就自动刷新，
      避免对着浏览器的旧缓存误以为改动没生效。 */
