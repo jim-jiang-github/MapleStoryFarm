@@ -566,18 +566,10 @@
             <details class="group" data-cap="人物">
               <summary><b>人物</b><span class="gsum" id="sumChar">—</span></summary>
               <div class="gbody">
-            <div class="row conf">
-              <span class="k">人物匹配</span>
-              <span class="v"><input id="charRange" class="rng" type="range" min="0.40" max="0.98" step="0.01" value="0.80" title="名字牌模板的匹配分门限。名字牌这种固定字体稳定在 0.95 以上，低于 0.85 基本是认错地方；标记忽有忽无就往下调一点"><b id="charVal">0.80</b></span>
-            </div>
-            <div class="row"><span class="k">人物</span>
-              <span class="v small"><span id="charInfo">未设置</span></span>
-            </div>
-            <div class="row"><span class="k">人物范围</span>
-              <span class="v small">
-                <span id="charRoi" title="程序找「你的人物」时只在画面上的这一块里找（X 是左右、Y 是上下，都是占画面的百分比）。点血条上方的「人物识别区」按钮可以在画面上拖出来改">整宽 · 8%~90%</span>
-              </span>
-            </div>
+                <div class="row conf">
+                  <span class="k">匹配条</span>
+                  <span class="v"><input id="charRange" class="rng" type="range" min="0.40" max="0.98" step="0.01" value="0.80" title="名字牌模板的匹配分门限。名字牌这种固定字体稳定在 0.95 以上，低于 0.85 基本是认错地方；标记忽有忽无就往下调一点"><b id="charVal">0.80</b></span>
+                </div>
               </div>
             </details>
             <details class="group" data-cap="挂机">
@@ -1253,25 +1245,7 @@
       if (r) paintRoi();
     }
     if (!!c.has_tpl !== charHasTpl) showCharTpl(!!c.has_tpl);
-    if (!charHasTpl) {
-      $("charInfo").textContent = "未设置";
-      $("charInfo").className = "";
-      return;
-    }
-    const age = c.age;
-    const live = age !== null && age < 1.0 && c.score >= (c.thresh || 0);
-    const size = c.size && c.size[0] ? ` ${c.size[0]}×${c.size[1]}` : "";
-    const sc = (typeof c.scale === "number" && Math.abs(c.scale - 1) > 0.01)
-      ? ` ×${c.scale.toFixed(2)}` : "";
-    // guard > 0：这一帧匹配到的地方离上一帧太远（>90px），后端先按住旧框、攒帧确认，
-    // 不直接把标记甩过去。文字换成「校准中」，别让人以为框卡住了。
-    const hold = live && c.guard > 0;
-    $("charInfo").textContent =
-      `${c.score.toFixed(2)} · ${live ? (hold ? "校准中" : "已定位") : "未找到"}${size}${sc}`;
-    $("charInfo").className = "small" + (live ? (hold ? " hold" : "") : " warn");
-    $("charInfo").title = hold
-      ? "匹配位置离上一帧超过 90px，先按住旧框，连续几帧都落在同一处才切过去（防被别处的同名文字引走）"
-      : "";
+    if (!charHasTpl) return;
     if (Date.now() > charLockUntil) {
       const inp = $("charRange");
       if (typeof c.thresh === "number" && Math.abs(parseFloat(inp.value) - c.thresh) > 0.001) {
@@ -1286,12 +1260,8 @@
      同名文字天然被排除，误检和全搜耗时一起降。范围存在后端（跟着窗口尺寸归一化），
      换分辨率不用重调。 */
   function paintRoi() {
-    const fullW = roi.x1 < 0.01 && roi.x2 > 0.99;
-    const xTxt = fullW ? "整宽" : `${Math.round(roi.x1 * 100)}%~${Math.round(roi.x2 * 100)}%`;
-    const yTxt = `${Math.round(roi.y1 * 100)}%~${Math.round(roi.y2 * 100)}%`;
-    $("charRoi").textContent = `${xTxt} · ${yTxt}`;
-    $("charRoi").title =
-      `程序找「你的人物」时只在画面 X ${xTxt}、Y ${yTxt} 这一块里找。点血条上方的「人物识别区」按钮可以在画面上拖出来改`;
+    /* 面板上的「人物范围」行已删（用户只要一个匹配条），这里留空占位：
+       ROI 数据本身还在（识别区拖动/后端存储都依赖它），只是不再显示文字。 */
   }
 
   async function saveRoi() {
@@ -1482,7 +1452,6 @@
       const r = await (await fetch("/api/char/template",
                                    { method: "DELETE", cache: "no-store" })).json();
       showCharTpl(false);
-      $("charInfo").textContent = "未设置";
       toast(r && r.thread === false
             ? "已删掉模板；找人线程刚才不在，已重新拉起"
             : "已删掉人物模板：再截一张名字牌粘进来就重新开始");
@@ -2153,7 +2122,7 @@
       key("detect").replace("识别: ", ""),
       key("confVal"), key("hitVal") + "帧", opt("fpsSel").replace("（跑满）", ""),
     ].join(" · "));
-    set("sumChar", key("charInfo") + " · 匹配 " + key("charVal"));
+    set("sumChar", "匹配 " + key("charVal"));
     set("sumBot", [
       "血 " + key("hpVal"), "蓝 " + key("mpVal"),
       "攻 " + key("rngVal").replace("px", "") + "×" + key("hgtVal").replace("px", ""),
