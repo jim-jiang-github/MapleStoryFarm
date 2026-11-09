@@ -2233,8 +2233,8 @@
         : (s.error || "未找到游戏窗口") + (mini ? "\n点这里还原窗口" : "");
       $("badge").classList.toggle("clickable", !found && mini);
       $("size").textContent = s.client_size[0] ? `${s.client_size[0]}×${s.client_size[1]}` : "—";
-      $("cfps").textContent = found ? s.capture_fps.toFixed(1) : "—";
-      $("sfps").textContent = found ? s.stream_fps.toFixed(1) : "—";
+      $("cfps").textContent = found ? `${s.capture_fps.toFixed(1)} 帧/秒` : "—";
+      $("sfps").textContent = found ? `${s.stream_fps.toFixed(1)} 帧/秒` : "—";
       const age = s.frame_age_ms;
       $("age").textContent = age >= 0 ? `${Math.round(age)} ms` : "—";
       $("age").className = "v" + (age > 800 ? " warn" : "");
