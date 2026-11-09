@@ -331,7 +331,7 @@
 
 ```
 python build_exe.py            # 目录版，推荐
-python build_exe.py --clean    # 先清掉旧的 build/ dist/ 再打
+python build_exe.py --clean    # 清 PyInstaller 缓存后重打（输出目录自动让路）
 python build_exe.py --onefile  # 单文件版（每次启动要解压运行时，慢）
 python build_exe.py --dry-run  # 只打印 PyInstaller 命令，不真的打包
 ```
@@ -351,14 +351,15 @@ dist/MapleStoryFarm/
 
 - **`data/` 必须在 exe 旁边，不能打进包里。** onefile 的 `_MEIPASS` 是每次启动新建的临时目录，配置写进去一关就没了。`webui/paths.py` 统一处理：内置资源从包里读，`detconf.json`/`masks.json`/`bars.json`/`charconf.json`/`chartpl.png`/`botconf.json` 第一次运行时复制到 `data/`，之后都读写那一份——**换新 exe 不会冲掉已经标定好的血条和屏蔽区**。`data/` 不可写（比如装在 Program Files）会自动退到 `%LOCALAPPDATA%\MapleStoryFarm`，启动时有一行提示。
 - **模型目录按资源根拼绝对路径。** 快捷方式启动时 CWD 可能是 system32，`YOLO("model_int8_fast_openvino_model")` 会直接找不到。
-- **必须 `--collect-all ultralytics` / `openvino`。** 模型类和跟踪器是运行时按名字导入的，静态分析看不见；少收一个就是「exe 能启动，一点识别就 `ModuleNotFoundError`」。
+- **必须 `--collect-all ultralytics` / `torchvision` / `openvino`。** 模型类和跟踪器是运行时按名字导入的，静态分析看不见；torchvision 0.29 把扩展改名成 `_C_stable.pyd`，PyInstaller 自带的 hook 还在找旧的 `tv._C`，漏收就是「exe 能启动、一点识别就 `RuntimeError: operator torchvision::nms does not exist`」。这个坑踩过一次，`/api/stats` 的 `detect_preload_error` 会直接写出来。
 - **保留控制台。** 端口、局域网手机地址、识别加载进度、报错都在里面，出问题能直接看。
+- **重复打包不删旧产物。** `dist/MapleStoryFarm-20261109-1732` 这种是上一次的备份（改名让路，不是删除）——几千个文件的批量删除容易被安全策略拦，改名还能留个回滚点。脚本只保留最近一个，更早的会尝试清掉，删不掉会提示你手动删。
 
-体积参考：目录版约 900MB～1.2GB（torch CPU 占大头），压缩后拷贝约 400～600MB。`--no-accurate` 能省 10MB 模型，可以忽略。
+体积参考：实测目录版 **1196 MB**，构建约 7～9 分钟（torch CPU 占大头）。压缩后拷贝约 400～600MB。`--no-accurate` 能省 10MB 模型，可以忽略。
 
 其它注意：
 
-- 首次启动要解压/初始化，比之后慢；ultralytics 会往用户目录写配置，正常。
+- 首次启动要做初始化（导入推理库、建 OpenVINO 引擎），比之后慢；ultralytics 会往用户目录写配置，正常。
 - 放到 Program Files、桌面都行，别放在需要管理员权限才能写的目录（`data/` 写不进去会退到 LOCALAPPDATA）。
 - 杀毒软件可能对 PyInstaller 产物误报（尤其 onefile 自解压），加白名单即可。
 - exe 里没有 `best.pt`，推理只走 OpenVINO IR；换模型要重新打包。

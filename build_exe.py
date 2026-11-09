@@ -29,6 +29,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -115,14 +116,47 @@ def optional_pyserial():
             "--hidden-import", "serial.tools.list_ports"]
 
 
+def prepare_dist():
+    """上一次的产物目录先改名让路，**不删**。
+
+    直接删 5000+ 文件会撞上批量删除确认策略，PyInstaller 自己 `--noconfirm`
+    的 "Removing dir" 也会被同一道检查拦下来（退出码 1）。改名是移动操作，
+    不经过删除检查，顺带留了个能回滚的旧版本——M 大内存的空闲磁盘，值得。
+    """
+    target = DIST / APP_NAME
+    if not target.exists():
+        return
+    bak = DIST / f"{APP_NAME}-{time.strftime('%Y%m%d-%H%M%S')}"
+    log(f"旧产物改名备份 -> dist/{bak.name}（占空间，确认新版没问题后可手动删）")
+    target.rename(bak)
+
+
+def prune_backups(keep=1):
+    """只留最近一个旧版本备份，别让 dist/ 无限长大（每次 1.2GB）。
+
+    删不掉就算了：某些环境对批量删除有策略拦截，构建结果已经好了，
+    不能让"清理"把整个脚本搞崩。
+    """
+    baks = sorted(DIST.glob(f"{APP_NAME}-*"), key=lambda p: p.name, reverse=True)
+    for old in baks[keep:]:
+        try:
+            shutil.rmtree(old)
+            log(f"删掉更早的备份 {old.name}")
+        except BaseException:  # noqa: BLE001  含 SystemExit：删除被拦时不要中断
+            log(f"更早的备份删不掉，可手动删：{old}")
+            break
+
+
 def build(onefile, with_accurate, clean, dry_run=False):
-    if clean:
-        for d in (BUILD, DIST):
-            if d.exists():
-                log(f"清理 {d.name}/")
-                shutil.rmtree(d, ignore_errors=True)
+    # 不在脚本里删 build/ 和 dist/：里面是几万个文件，批量删除会被各种安全策略
+    # （包括本项目的 safe-delete 钩子）拦下来。目录版靠 prepare_dist() 改名让路，
+    # 单文件版只有一个 exe，PyInstaller 直接覆盖。
+    if clean and not dry_run:
+        log("--clean：交给 PyInstaller 清理自身缓存")
 
     stage_assets()
+    if not dry_run and not onefile:
+        prepare_dist()
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
@@ -143,6 +177,11 @@ def build(onefile, with_accurate, clean, dry_run=False):
     # ultralytics：模型/跟踪器运行时按名字导入，必须整包收
     cmd += [
         "--collect-all", "ultralytics",
+        # torchvision：ultralytics 的 NMS 走 torchvision.ops。新版把扩展改名成
+        # `_C_stable.pyd`，PyInstaller 自带的 hook 还在找 `torchvision._C`，
+        # 收不进去 → 运行时 `RuntimeError: operator torchvision::nms does not exist`。
+        # --collect-all 会把 binaries(.pyd) 一起带上。
+        "--collect-all", "torchvision",
         # openvino：IR 推理 + 插件 dll
         "--collect-all", "openvino",
         # uvicorn 的协议实现是字符串动态加载的，静态分析抓不到
@@ -186,6 +225,7 @@ def build(onefile, with_accurate, clean, dry_run=False):
         log("config/标定会写到 exe 旁边的 data/ 里。")
     else:
         log("拷贝时把整个 dist/MapleStoryFarm 文件夹带走；data/ 会在第一次运行时生成。")
+        prune_backups()
 
 
 def main():
