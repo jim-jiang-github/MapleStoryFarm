@@ -26,5 +26,5 @@ echo.
 "%PICKED%" "webui\server.py" --open
 
 echo.
-echo Service stopped.
+echo Service stopped. (exit code %errorlevel% ^| 退出原因见 webui\service.log)
 pause

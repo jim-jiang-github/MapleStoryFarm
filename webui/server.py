@@ -3099,6 +3099,104 @@ def lan_ipv4():
     return ips
 
 
+LOG_FILE = apppaths.DATA_DIR / "service.log"
+
+
+def _log(msg):
+    """带时间戳追加一行到 data/service.log——排查「用着用着就没了」的唯一线索。"""
+    try:
+        line = f"[{time.strftime('%m-%d %H:%M:%S')}] {msg}"
+        with open(LOG_FILE, "a", encoding="utf-8", errors="replace") as f:
+            f.write(line + "\n")
+        return line
+    except Exception:  # noqa: BLE001
+        return msg
+
+
+def _diag_bootstrap():
+    """服务退出诊断：控制台输出镜像进日志、挂上原生崩溃转储和异常钩子。
+
+    之前进程退出后只有黑框里一行 Service stopped，什么原因都查不到。
+    现在所有去向都有记录：
+    - 原生崩溃（access violation 之类）→ faulthandler 把原生栈写进日志
+    - Python 异常 → excepthook 写进日志
+    - Ctrl+C / 关闭信号 → uvicorn 优雅退出，结尾记「正常退出」
+    - 控制台被直接关掉/任务管理器杀 → 日志里什么都没有（这本身就是线索）
+    """
+    log_file = str(LOG_FILE)
+    # 日志超过 2MB 就翻代，只留一份旧的，别无限涨
+    try:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > 2 * 1024 * 1024:
+            LOG_FILE.replace(LOG_FILE.with_suffix(".old.log"))
+    except Exception:  # noqa: BLE001
+        pass
+
+    import faulthandler
+
+    _fh = open(log_file, "a", encoding="utf-8", errors="replace")
+    faulthandler.enable(_fh)          # 原生崩溃时自动把所有线程的栈拍进来
+    print(f"日志 -> {log_file}")
+
+    # 控制台输出同时写日志（print 的启动信息、uvicorn 的告警都算线索）
+    class _Tee:
+        def __init__(self, *streams):
+            self._streams = streams
+
+        def write(self, s):
+            for st in self._streams:
+                try:
+                    st.write(s)
+                except Exception:  # noqa: BLE001
+                    pass
+            return len(s)
+
+        def flush(self):
+            for st in self._streams:
+                try:
+                    st.flush()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        def isatty(self):
+            # uvicorn 的彩色 formatter 启动时要调 sys.stdout.isatty()，
+            # 没这个方法服务起不来。恒 False：日志里不要 ANSI 色码。
+            return False
+
+        def fileno(self):
+            # 有下游需要真句柄的场景（比如报错时），把第一个支持的原样递出去
+            for st in self._streams:
+                if hasattr(st, "fileno"):
+                    try:
+                        return st.fileno()
+                    except Exception:  # noqa: BLE001
+                        pass
+            raise OSError("no fileno")
+
+    sys.stdout = _Tee(sys.stdout, _fh)
+    sys.stderr = _Tee(sys.stderr, _fh)
+
+    def _hook(kind, value, tb):
+        _log(f"!! {kind.__name__}: {value}")
+        import traceback
+        traceback.print_exception(kind, value, tb)   # 会经 Tee 落盘
+        _log("!! 异常结束")
+
+    sys.excepthook = _hook
+    threading.excepthook = lambda a: _hook(a.exc_type, a.exc_value, a.exc_traceback)
+
+    # 关掉控制台 QuickEdit：在黑框里点一下鼠标就进入选择模式，输出被冻住，
+    # 看起来跟「服务死了」一模一样（实际进程还活着）。
+    try:
+        k32 = ctypes.windll.kernel32
+        h = k32.GetStdHandle(-10)                       # STD_INPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if k32.GetConsoleMode(h, ctypes.byref(mode)):
+            k32.SetConsoleMode(h, (mode.value | 0x0080) & ~0x0040)  # EXTENDED，去 QUICK_EDIT
+            _log("控制台 QuickEdit 已关闭")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 if __name__ == "__main__":
     local = f"http://127.0.0.1:{PORT}"
     # 打包成 exe 之后用户就是双击运行的，不会记得加 --open；
@@ -3111,6 +3209,9 @@ if __name__ == "__main__":
             webbrowser.open(local)
         raise SystemExit(0)
 
+    _diag_bootstrap()
+    _log(f"服务启动 port={PORT} pid={os.getpid()}")
+
     print(f"preview -> {local}   (Ctrl+C to stop)")
     if HOST in ("0.0.0.0", "::"):
         for ip in lan_ipv4():
@@ -3118,4 +3219,18 @@ if __name__ == "__main__":
             print(f"手机(同 WiFi) -> http://{ip}:{PORT}{tail}   ← 在家就用这个，最流畅")
     if want_open:
         threading.Timer(1.2, lambda: webbrowser.open(local)).start()
-    uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
+    try:
+        uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
+    except KeyboardInterrupt:
+        _log("收到 Ctrl+C，正常退出")
+        raise
+    except SystemExit as e:
+        _log(f"sys.exit({e.code})")
+        raise
+    except BaseException as e:  # noqa: BLE001
+        _log(f"!! uvicorn 异常退出: {e!r}")
+        raise
+    else:
+        # uvicorn 优雅返回 = 收到了 Ctrl+C / 关闭信号，或者有代码调了 sys.exit。
+        # 前面没有异常记录的话，基本就是窗口里按过 Ctrl+C（或 Ctrl+Break）。
+        _log("uvicorn 正常返回（收到中断信号），进程结束")
