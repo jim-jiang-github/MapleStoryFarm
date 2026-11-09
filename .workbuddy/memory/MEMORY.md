@@ -5,6 +5,9 @@
 - **每次改动完代码就立刻 `git commit` 一次**，不要攒着等用户说"提交"。
   提交信息用中文，前缀沿用 `feat:` / `fix:` / `style:` / `refactor:` / `memory:`。
   分支是 `dev`，只在本地提交，不主动 push（除非用户要求）。
+- **每次改完 webui/ 都跑 `python tools/test_headless.py`，提交前必须全绿**
+  （无头全链路自测：合成画面+假YOLO+录音按键，~30s，不依赖游戏/模型/硬件，
+  不碰仓库真实配置——数据被 MAPLE_DATA_DIR 指到临时目录）。
 - 运行时数据文件 `webui/bars.json`、`webui/masks.json` 是被跟踪的，改动一起提交。
 - 改完 `webui/index.html` 后，页面有热更新；提醒用户 **Ctrl+F5** 强刷。
 
