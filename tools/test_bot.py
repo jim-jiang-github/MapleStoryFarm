@@ -269,5 +269,41 @@ print("[21] 攻击方向的取值校验")
 check("front 合法", bot.clamp_cfg({"range_side": "front"})["range_side"] == "front")
 check("乱写的值退回两侧", bot.clamp_cfg({"range_side": "up"})["range_side"] == "both")
 
+print("[22] 喝药链：主键按了血量没涨 → 按备用 1→5 换着喝")
+pot_presses = lambda c: [n for n, d in c if d and (n.startswith("pot") or n in ("KeyA", "KeyS"))]
+b = make(hp=30.0)
+b.cfg["pot_chain"] = ["KeyA", "KeyS"]
+t = 100.0
+c = step(b, now=t, hp=30.0)
+check("血量低于线 → 按主键 pot8", pot_presses(c) == ["pot8"], pot_presses(c))
+c = step(b, now=t + 0.5, hp=30.0)
+check("验证期内（<0.8s）不连按", pot_presses(c) == [], pot_presses(c))
+c = step(b, now=t + 0.9, hp=30.0)
+check("主键没反应 → 立刻换备用1 KeyA", pot_presses(c) == ["KeyA"], pot_presses(c))
+c = step(b, now=t + 1.2, hp=55.0)
+check("血量涨回来 → 认定喝到，停手", pot_presses(c) == [], pot_presses(c))
+c = step(b, now=t + 10.0, hp=20.0)
+check("下次低血直接用生效的 KeyA", pot_presses(c) == ["KeyA"], pot_presses(c))
+c = step(b, now=t + 10.9, hp=20.0)
+check("KeyA 也空 → 换 KeyS", pot_presses(c) == ["KeyS"], pot_presses(c))
+c = step(b, now=t + 11.8, hp=20.0)
+check("链全空绕完一圈 → 停手等间隔", pot_presses(c) == [], pot_presses(c))
+c = step(b, now=t + 11.8 + 3.1, hp=20.0)
+check("歇完间隔从头（pot8）再试", pot_presses(c) == ["pot8"], pot_presses(c))
+
+print("[23] 边掉血边喝：没回到线以上但比按下时高，也算喝到")
+b2 = make(hp=30.0)
+t2 = 200.0
+step(b2, now=t2, hp=30.0)
+c = step(b2, now=t2 + 0.9, hp=32.0)
+check("涨了 2% 就算生效，不换键", pot_presses(c) == [], pot_presses(c))
+
+print("[24] 备用药水键的配置清洗")
+check("只收认识的键", bot.clamp_cfg({"pot_chain": ["KeyA", "BadKey", "F5"]})["pot_chain"]
+      == ["KeyA", "", "F5", "", ""],
+      bot.clamp_cfg({"pot_chain": ["KeyA", "BadKey", "F5"]})["pot_chain"])
+check("超过 5 格截断", len(bot.clamp_cfg({"pot_chain": ["KeyA"] * 9})["pot_chain"]) == 5)
+check("默认全空", bot.DEFAULTS["pot_chain"] == ["", "", "", "", ""])
+
 print(f"\n通过 {ok} / {ok + fail}")
 sys.exit(1 if fail else 0)

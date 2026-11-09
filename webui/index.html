@@ -136,14 +136,14 @@
     box-shadow: inset 0 1px 1px rgba(0,0,0,.06);
     position: relative;
   }
-  /* 识别边界：HP 轨道上的黑竖线，位置 = 后端在标定区域里识别到的血量右缘。
-     比彩色填充高一点、不带过渡动画，读数是多少它就在哪，比填充边缘更"准"。 */
+  /* 喝药线：HP 轨道上的黑竖线，跟下面的红三角对齐（同一个 --thr），
+     血量掉到这条线就自动喝药。位置由 paintBotVals 写的 --thr 驱动。 */
   .btrack .mark {
     position: absolute; top: -2px; bottom: -2px;
+    left: var(--thr, 40%);
     width: 2px; transform: translateX(-1px);
     background: #1c1917; border-radius: 1px;
     pointer-events: auto;
-    transition: opacity .2s;
   }
   /* 血线三角箭头：贴在 HP 轨道下沿、尖朝上指着血条，按住可左右拖动调阈值
      （--thr 由 paintBotVals 同步）。btrack 的 overflow 放开就是为了能探出轨道下面。 */
@@ -165,6 +165,20 @@
   }
   /* 给三角留出探出轨道的余量，别怼到 MP 条上 */
   .bar[data-k="hp"] { margin-bottom: 3px; }
+  /* 备用药水键 1~5：贴在 HP 条下面的五个小格子 */
+  .potrow { display: flex; gap: 4px; }
+  .potrow .slot {
+    flex: 1 1 0; min-width: 0; height: 17px;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: #fff; color: var(--hint);
+    font-size: 10px; line-height: 15px; text-align: center;
+    cursor: pointer; padding: 0; font-family: inherit;
+    font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden;
+  }
+  .potrow .slot:hover { border-color: #dc2626; color: var(--muted); }
+  .potrow .slot.set { color: var(--text); font-weight: 600; }
+  .potrow .slot.rec { border-color: #dc2626; background: #fef2f2; color: #dc2626; }
+  .potrow .slot.rec::after { content: " 按键…"; }
   .btrack i {
     display: block; height: 100%; width: 0;
     border-radius: 999px;
@@ -441,7 +455,6 @@
         <img id="view" alt="游戏画面预览" />
         <div class="badge"><span class="dot" id="dot"></span><span id="badge">等待画面</span></div>
         <div class="hudstats">
-          <div class="r"><span class="k">客户区</span><span class="v" id="size">—</span></div>
           <div class="r"><span class="k">采集</span><span class="v" id="cfps">—</span></div>
           <div class="r"><span class="k">推送</span><span class="v" id="sfps">—</span></div>
           <div class="r"><span class="k">帧延迟</span><span class="v" id="age">—</span></div>
@@ -466,7 +479,10 @@
               </span>
               <b class="cneed" id="charNeed" title="点这里截图上传；也支持 Ctrl+V 粘贴 / 把图拖进来">⚠ 上传名字牌截图 · 点这里或 Ctrl+V</b>
             </div>
-            <div class="bar" data-k="hp"><span class="bk">HP</span><span class="bv">—</span><span class="btrack"><i></i><u class="mark"></u><u class="thr"></u></span></div>
+            <div class="bar" data-k="hp"><span class="bk">HP</span><span class="bv">—</span><span class="btrack"><i></i><u class="mark" title="喝药线：血量掉到这条线就自动喝药"></u><u class="thr"></u></span></div>
+            <div class="potrow" id="potChain" title="备用药水键 1~5：喝药键的药空了（按了血量没涨回来），就按这里的顺序换着按，直到喝上为止。点格子 → 按一个键即设置；再按 Del 清空、Esc 取消">
+              <button class="slot" data-i="0" type="button"></button><button class="slot" data-i="1" type="button"></button><button class="slot" data-i="2" type="button"></button><button class="slot" data-i="3" type="button"></button><button class="slot" data-i="4" type="button"></button>
+            </div>
             <div class="bar" data-k="mp"><span class="bk">MP</span><span class="bv">—</span><span class="btrack"><i></i></span></div>
             <div class="bar" data-k="exp"><span class="bk">EXP</span><span class="bv">—</span><span class="btrack"><i></i></span></div>
           </div>
@@ -681,14 +697,15 @@
   let barQueue = [];              // 待标定的剩余条（按 hp -> mp -> exp 顺序）
   let charHasTpl = false;         // 后端已经有模板
   let charLockUntil = 0;          // 拖人物阈值滑块期间，别让轮询把值拽回去
-  /* 人物搜索范围：只在画面中部一条横向带里找名字牌（左右整宽，上下可调）。
-     上下 HUD（小地图/任务栏/血条/聊天）里也印着玩家名字，收窄范围等于把它们从
-     搜索里剔掉——误匹配更少，全搜也更快。 */
+  /* 人物搜索范围：只在人物可能出现的那一块矩形里找名字牌（四边可调）。
+     上下 HUD（小地图/任务栏/血条/聊天）里也印着玩家名字，左右贴边也是 HUD；
+     收窄范围等于把它们从搜索里剔掉——误匹配更少，全搜也更快。 */
   let roiCal = false;             // 正在调人物搜索范围
-  let roi = { y1: 0.08, y2: 0.90 };
+  let roi = { x1: 0, y1: 0.08, x2: 1, y2: 0.90 };
   let roiOrig = null;             // 进入调整时的值，Esc 撤回
   const ROI_EDGE = 14;            // 边界把手命中像素
   const ROI_MIN_H = 0.05;         // 与后端 CHAR_ROI_MIN_H 一致
+  const ROI_MIN_W = 0.05;         // 与后端 CHAR_ROI_MIN_W 一致
   let grabberReady = false;       // 抓到画面后才知道画面比例，标定前先确认
   const L = { w: 0, h: 0, ox: 0, oy: 0 }; // 内容区尺寸 + 内容区在 canvas 内的偏移
   // 遮罩 canvas 盖住 tile 并四周外扩 PAD(px)：贴边选区(x2=1.0 等)的把手
@@ -764,69 +781,81 @@
     });
   }
 
-  /* 人物搜索范围的可视化：带外压暗、带内淡蓝，上下两条可拖的边线。
-     只在「调整」状态下画——平时画面上不需要这条线。 */
+  /* 人物搜索范围的可视化：范围外压暗、范围内淡蓝，四条可拖的边线（各带百分比把手）。
+     只在「调整」状态下画——平时画面上不需要这个框。 */
   function drawRoiBand() {
     if (!L.w || !L.h) return;
-    const x0 = X(0), x1 = X(1);
-    const yTop = Y(roi.y1), yBot = Y(roi.y2);
-    // 带外压暗：一眼看出「这条以外不会被搜索」
+    const x0 = X(roi.x1), x1 = X(roi.x2);
+    const yT = Y(roi.y1), yB = Y(roi.y2);
+    const w = x1 - x0, h = yB - yT;
+    const gx0 = X(0), gx1 = X(1), gy0 = L.oy, gy1 = L.oy + L.h;
+    // 范围外压暗：一眼看出「这块以外不会被搜索」
     mctx.fillStyle = "rgba(12,10,9,.55)";
-    mctx.fillRect(x0, L.oy, x1 - x0, Math.max(0, yTop - L.oy));
-    mctx.fillRect(x0, yBot, x1 - x0, Math.max(0, L.oy + L.h - yBot));
-    // 带内淡蓝
+    mctx.fillRect(gx0, gy0, L.w, Math.max(0, yT - gy0));          // 上
+    mctx.fillRect(gx0, yB, L.w, Math.max(0, gy1 - yB));           // 下
+    mctx.fillRect(gx0, yT, Math.max(0, x0 - gx0), h);             // 左
+    mctx.fillRect(x1, yT, Math.max(0, gx1 - x1), h);              // 右
+    // 范围内淡蓝
     mctx.fillStyle = "rgba(14,165,233,.10)";
-    mctx.fillRect(x0, yTop, x1 - x0, Math.max(1, yBot - yTop));
-    // 左右两条竖虚线：范围恒为整宽，画出来才对得上
-    mctx.setLineDash([4, 5]);
-    mctx.strokeStyle = "rgba(14,165,233,.55)";
-    mctx.lineWidth = 1;
-    [x0 + 0.5, x1 - 0.5].forEach((x) => {
-      mctx.beginPath(); mctx.moveTo(x, yTop); mctx.lineTo(x, yBot); mctx.stroke();
-    });
-    mctx.setLineDash([]);
-    // 上下两条边线：先白后蓝（压在浅色地面/黄沙上也看得出来）
-    [[roi.y1, "上边界"], [roi.y2, "下边界"]].forEach(([n, name]) => {
-      const y = Y(n);
+    mctx.fillRect(x0, yT, w, h);
+    // 四条边线：先白后蓝（压在浅色地面/黄沙上也看得出来）
+    const edge = (ax, ay, bx, by) => {
       mctx.strokeStyle = "rgba(255,255,255,.92)";
       mctx.lineWidth = 3.4;
-      mctx.beginPath(); mctx.moveTo(x0, y); mctx.lineTo(x1, y); mctx.stroke();
+      mctx.beginPath(); mctx.moveTo(ax, ay); mctx.lineTo(bx, by); mctx.stroke();
       mctx.strokeStyle = ROI_LINE;
       mctx.lineWidth = 1.7;
-      mctx.beginPath(); mctx.moveTo(x0, y); mctx.lineTo(x1, y); mctx.stroke();
-      // 中间一个小把手，提示「这里能拖」
-      const hx = (x0 + x1) / 2, hy = y;
+      mctx.beginPath(); mctx.moveTo(ax, ay); mctx.lineTo(bx, by); mctx.stroke();
+    };
+    edge(x0, yT, x1, yT);          // 上
+    edge(x0, yB, x1, yB);          // 下
+    edge(x0, yT, x0, yB);          // 左
+    edge(x1, yT, x1, yB);          // 右
+    // 每条边中间一个把手，标注各自百分比，提示「这里能拖」
+    const handle = (hx, hy, text) => {
       mctx.fillStyle = ROI_LINE;
       mctx.beginPath();
-      if (mctx.roundRect) mctx.roundRect(hx - 24, hy - 8, 48, 16, 8);
-      else mctx.rect(hx - 24, hy - 8, 48, 16);
+      const bwid = Math.max(44, mctx.measureText(text).width + 16);
+      if (mctx.roundRect) mctx.roundRect(hx - bwid / 2, hy - 8, bwid, 16, 8);
+      else mctx.rect(hx - bwid / 2, hy - 8, bwid, 16);
       mctx.fill();
       mctx.fillStyle = "#fff";
       mctx.font = "600 10px ui-monospace, Menlo, Consolas, monospace";
       mctx.textAlign = "center";
-      mctx.fillText("拖", hx, hy + 3.5);
+      mctx.fillText(text, hx, hy + 3.5);
       mctx.textAlign = "left";
-      // 标签贴在左边（避开中间的把手）
-      const label = `${name} ${Math.round(n * 100)}%`;
-      mctx.font = "600 11px ui-monospace, Menlo, Consolas, monospace";
-      const tw = mctx.measureText(label).width;
-      mctx.fillStyle = "rgba(12,10,9,.72)";
-      mctx.beginPath();
-      if (mctx.roundRect) mctx.roundRect(x0 + 6, y - 20, tw + 12, 17, 5);
-      else mctx.rect(x0 + 6, y - 20, tw + 12, 17);
-      mctx.fill();
-      mctx.fillStyle = "#fff";
-      mctx.fillText(label, x0 + 12, y - 7.5);
-    });
+    };
+    handle((x0 + x1) / 2, yT, `拖 ${pct(roi.y1)}`);
+    handle((x0 + x1) / 2, yB, `拖 ${pct(roi.y2)}`);
+    handle(x0, (yT + yB) / 2, `拖 ${pct(roi.x1)}`);
+    handle(x1, (yT + yB) / 2, `拖 ${pct(roi.x2)}`);
+    // 左上角一个汇总标签，调整时不用去面板看数字
+    const label = `搜索范围 X ${pct(roi.x1)}~${pct(roi.x2)} · Y ${pct(roi.y1)}~${pct(roi.y2)}`;
+    mctx.font = "600 11px ui-monospace, Menlo, Consolas, monospace";
+    const tw = mctx.measureText(label).width;
+    const ly = yT >= 26 ? yT - 20 : yB + 16;   // 顶太贴画布上沿时挪到下边线下
+    mctx.fillStyle = "rgba(12,10,9,.72)";
+    mctx.beginPath();
+    if (mctx.roundRect) mctx.roundRect(x0 + 6, ly, tw + 12, 17, 5);
+    else mctx.rect(x0 + 6, ly, tw + 12, 17);
+    mctx.fill();
+    mctx.fillStyle = "#fff";
+    mctx.fillText(label, x0 + 12, ly + 12.5);
   }
 
   function roiHit(p) {
     if (!L.h) return null;
+    const near = [];
     const dTop = Math.abs(Y(p.y) - Y(roi.y1));
     const dBot = Math.abs(Y(p.y) - Y(roi.y2));
-    if (dTop <= ROI_EDGE && dTop <= dBot) return "top";
-    if (dBot <= ROI_EDGE) return "bottom";
-    if (p.y > roi.y1 && p.y < roi.y2) return "band";
+    const dLeft = Math.abs(X(p.x) - X(roi.x1));
+    const dRight = Math.abs(X(p.x) - X(roi.x2));
+    if (dTop <= ROI_EDGE) near.push(["top", dTop]);
+    if (dBot <= ROI_EDGE) near.push(["bottom", dBot]);
+    if (dLeft <= ROI_EDGE) near.push(["left", dLeft]);
+    if (dRight <= ROI_EDGE) near.push(["right", dRight]);
+    if (near.length) { near.sort((a, b) => a[1] - b[1]); return near[0][0]; }
+    if (p.x > roi.x1 && p.x < roi.x2 && p.y > roi.y1 && p.y < roi.y2) return "band";
     return null;
   }
 
@@ -1124,12 +1153,16 @@
   function paintChar(c) {
     if (!c) return;
     // 搜索范围以后端为准（换设备/清缓存后也能对上）；正在拖动时不抢，免得跳回去
-    if (Array.isArray(c.roi) && c.roi.length === 2 && !roiCal) {
-      if (Math.abs(roi.y1 - c.roi[0]) > 1e-4 || Math.abs(roi.y2 - c.roi[1]) > 1e-4) {
-        roi.y1 = c.roi[0];
-        roi.y2 = c.roi[1];
+    if (Array.isArray(c.roi) && !roiCal) {
+      const r = c.roi.length === 4
+        ? { x1: c.roi[0], y1: c.roi[1], x2: c.roi[2], y2: c.roi[3] }
+        : c.roi.length === 2      // 旧格式：只有上下边界，左右恒为整宽
+          ? { x1: 0, y1: c.roi[0], x2: 1, y2: c.roi[1] }
+          : null;
+      if (r && ["x1", "y1", "x2", "y2"].some((k) => Math.abs(roi[k] - r[k]) > 1e-4)) {
+        Object.assign(roi, r);
       }
-      paintRoi();
+      if (r) paintRoi();
     }
     if (!!c.has_tpl !== charHasTpl) showCharTpl(!!c.has_tpl);
     if (!charHasTpl) {
@@ -1161,21 +1194,25 @@
   }
 
   /* ---------- 人物搜索范围（ROI） ----------
-     人物只可能出现在画面中部一条横向带里：左右顶满、上下很小。把匹配收窄到这条带，
-     上下 HUD 里的同名文字天然被排除，误检和全搜耗时一起降。范围存在后端（跟着窗口
-     尺寸归一化），换分辨率不用重调。 */
+     人物只可能出现在画面中部的一块矩形里。把匹配收窄到这块，上下左右 HUD 里的
+     同名文字天然被排除，误检和全搜耗时一起降。范围存在后端（跟着窗口尺寸归一化），
+     换分辨率不用重调。 */
   function paintRoi() {
-    const a = Math.round(roi.y1 * 100), b = Math.round(roi.y2 * 100);
-    $("charRoi").textContent = `整宽 · ${a}%~${b}%`;
+    const fullW = roi.x1 < 0.01 && roi.x2 > 0.99;
+    const xTxt = fullW ? "整宽" : `${Math.round(roi.x1 * 100)}%~${Math.round(roi.x2 * 100)}%`;
+    const yTxt = `${Math.round(roi.y1 * 100)}%~${Math.round(roi.y2 * 100)}%`;
+    $("charRoi").textContent = `${xTxt} · ${yTxt}`;
     $("charRoi").title =
-      `只在画面 ${a}%~${b}% 高、整宽这一条里找名字牌；上下 HUD 里的同名文字不会被认成人物`;
+      `只在画面 X ${xTxt}、Y ${yTxt} 这一块里找名字牌；范围外的同名文字（小地图/任务栏/聊天）不会被认成人物`;
   }
 
   async function saveRoi() {
-    const q = `${roi.y1.toFixed(3)},${roi.y2.toFixed(3)}`;
+    const q = [roi.x1, roi.y1, roi.x2, roi.y2].map((v) => v.toFixed(3)).join(",");
     try {
       const r = await (await fetch(`/api/char/conf?roi=${q}`, { cache: "no-store" })).json();
-      if (Array.isArray(r.roi)) { roi.y1 = r.roi[0]; roi.y2 = r.roi[1]; }
+      if (Array.isArray(r.roi) && r.roi.length === 4) {
+        [roi.x1, roi.y1, roi.x2, roi.y2] = r.roi;
+      }
       paintRoi();
       drawMasks();
       refreshChar();
@@ -1189,9 +1226,9 @@
     roiOrig = { ...roi };
     $("roiBtn").textContent = "完成";
     $("roiBtn").classList.add("on");
-    maskLayer.style.cursor = "ns-resize";
+    maskLayer.style.cursor = "move";
     drawMasks();
-    toast("拖上下两条虚线，把范围收到人物会出现的那一条；拖完点「完成」");
+    toast("拖四条边线（或中间把手）把范围收到人物会出现的那一块；拖完点「完成」");
   }
 
   async function stopRoiCal(revert) {
@@ -1396,30 +1433,24 @@
       const v = vals ? vals[k] : null;
       const fillEl = el.querySelector(".btrack i");
       const txt = el.querySelector(".bv");
-      const mark = el.querySelector(".btrack .mark");
       if (v === null || v === undefined) {
         fillEl.style.width = "0%";
         txt.textContent = "—";
         el.classList.add("off");
         el.classList.remove("low");
-        if (mark) mark.style.opacity = "0";   // 读不到血量时黑线没有意义，先藏起来
         return;
       }
       el.classList.remove("off");
-      if (mark) mark.style.opacity = "1";
       const p = Math.min(100, Math.max(0, v));
       fillEl.style.width = p.toFixed(1) + "%";
       txt.textContent = p.toFixed(1) + "%";
       el.classList.toggle("low", (k === "hp" || k === "mp") && p < 30);
       if (k === "hp") {
-        // 黑竖线 = 识别区域边界：标定的屏幕血条里，彩色填充识别到的右缘
-        if (mark) {
-          mark.style.left = p.toFixed(2) + "%";
-          mark.title = `识别边界：屏幕底部标定的血条区域里，识别到的血量到这里（当前 ${p.toFixed(1)}%），血量百分比就是按它算的`;
-        }
+        // 黑竖线（喝药线）的位置由 --thr 驱动、跟三角对齐，这里只更新悬停说明里的数值
         const thr = el.querySelector(".btrack .thr");
         if (thr) {
-          thr.title = `喝药血线 ${Math.round(Number($("hpRange").value) || 40)}%，血量低于它就自动喝药。按住左右拖动调整`;
+          const tv = Math.round(Number($("hpRange").value) || 40);
+          thr.title = `喝药线 ${tv}%，血量掉到这条线就自动喝药。按住左右拖动调整`;
         }
       }
     });
@@ -1710,17 +1741,24 @@
           roi.y1 = Math.min(clamp01(p.y), o.y2 - ROI_MIN_H);
         } else if (drag.edge === "bottom") {
           roi.y2 = Math.max(clamp01(p.y), o.y1 + ROI_MIN_H);
-        } else {                        // 抓带子中间：整条平移，高度不变
+        } else if (drag.edge === "left") {
+          roi.x1 = Math.min(clamp01(p.x), o.x2 - ROI_MIN_W);
+        } else if (drag.edge === "right") {
+          roi.x2 = Math.max(clamp01(p.x), o.x1 + ROI_MIN_W);
+        } else {                        // 抓范围中间：整块平移，宽高不变
+          const dx = Math.min(Math.max(p.x - drag.start.x, -o.x1), 1 - o.x2);
           const dy = Math.min(Math.max(p.y - drag.start.y, -o.y1), 1 - o.y2);
-          roi.y1 = o.y1 + dy;
-          roi.y2 = o.y2 + dy;
+          roi.x1 = o.x1 + dx; roi.x2 = o.x2 + dx;
+          roi.y1 = o.y1 + dy; roi.y2 = o.y2 + dy;
         }
         drawMasks();
         return;
       }
       const h = roiHit(p);
-      maskLayer.style.cursor = (h === "top" || h === "bottom") ? "ns-resize"
-        : h === "band" ? "grab" : "crosshair";
+      maskLayer.style.cursor =
+        (h === "top" || h === "bottom") ? "ns-resize"
+        : (h === "left" || h === "right") ? "ew-resize"
+        : h === "band" ? "move" : "crosshair";
       return;
     }
     if (barCal) {
@@ -2086,6 +2124,88 @@
       thr.addEventListener("pointercancel", up);
     });
   })();
+
+  /* 备用药水键 1~5：点格子 → 按一个键 → 存 pot_chain。
+     bot 侧规则：主键按了血量没涨回来（药空了），就按这里的顺序换着按到喝上为止。
+   键名收的是 KeyboardEvent.code，跟 bot.py 的 CODE_VK 白名单一一对应。 */
+  const KEY_CODE_RE = /^(?:Key[A-Z]|Digit\d|Numpad\d|F(?:[1-9]|1[0-2])|Insert|Delete|Home|End|PageUp|PageDown|Shift(?:Left|Right)|Control(?:Left|Right)|Space|Enter|Semicolon|Quote|Comma|Period|Slash|Backslash|BracketLeft|BracketRight|Minus|Equal)$/;
+  const potSlots = [...document.querySelectorAll("#potChain .slot")];
+  let potRec = -1;
+
+  function potKeyLabel(code) {
+    return ({
+      Insert: "Ins", Delete: "Del", Home: "Home", End: "End",
+      PageUp: "PgUp", PageDown: "PgDn", Space: "空格", Enter: "回车",
+      ShiftLeft: "LSh", ShiftRight: "RSh", ControlLeft: "LCt", ControlRight: "RCt",
+    })[code]
+      || (code.startsWith("Key") ? code.slice(3)
+        : code.startsWith("Digit") ? code.slice(5)
+        : code.startsWith("Numpad") ? "小" + code.slice(6)
+        : code);
+  }
+
+  function paintPotChain(keys) {
+    if (potRec >= 0) return;              // 正在录的这格别被轮询刷掉
+    potSlots.forEach((s, i) => {
+      const k = (keys && keys[i]) || s.dataset.key || "";
+      s.dataset.key = k;
+      s.classList.toggle("set", !!k);
+      s.textContent = k ? potKeyLabel(k) : String(i + 1);
+    });
+  }
+
+  function paintPotSlot(s) {
+    const k = s.dataset.key || "";
+    s.classList.toggle("set", !!k);
+    s.textContent = k ? potKeyLabel(k) : String(potSlots.indexOf(s) + 1);
+  }
+
+  function potChainSave() {
+    setBot({ pot_chain: potSlots.map((s) => s.dataset.key || "") }).catch(botFail);
+  }
+
+  potSlots.forEach((s) => {
+    s.addEventListener("click", () => {
+      potSlots.forEach((x) => x.classList.remove("rec"));
+      potRec = potSlots.indexOf(s);
+      s.classList.add("rec");
+    });
+  });
+  // 点到格子外面就取消录制，别让"录音机"一直开着
+  document.addEventListener("click", (e) => {
+    if (potRec >= 0 && !e.target.closest("#potChain")) {
+      potSlots[potRec].classList.remove("rec");
+      potRec = -1;
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (potRec < 0) return;
+    e.preventDefault();                   // 录制期间别让 F5 之类触发浏览器行为
+    const s = potSlots[potRec];
+    if (e.key === "Escape") {
+      s.classList.remove("rec");
+      potRec = -1;
+      return;
+    }
+    if (e.key === "Delete" || e.key === "Backspace") {
+      delete s.dataset.key;
+      paintPotSlot(s);
+      s.classList.remove("rec");
+      potRec = -1;
+      potChainSave();
+      return;
+    }
+    if (e.repeat || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (!KEY_CODE_RE.test(e.code)) {
+      toast("这个键不支持，用字母 / 数字 / F1~F12 / Ins / Home 这类", true);
+      return;
+    }
+    s.dataset.key = e.code;
+    paintPotSlot(s);
+    s.classList.remove("rec");
+    potRec = -1;
+    potChainSave();
+  });
   $("sideSel").addEventListener("change", () => {
     setBot({ range_side: $("sideSel").value }).catch(botFail);
   });
@@ -2125,6 +2245,7 @@
       $("sideSel").value = cfg.range_side || "both";
       $("inputSel").value = cfg.input;
       paintBotVals();
+      paintPotChain(cfg.pot_chain);       // 备用药水键 1~5 显示成键名
     }
     $("pickBtn").classList.toggle("on", !!cfg.pick);
     $("pickBtn").textContent = cfg.pick ? "开" : "关";
@@ -2232,7 +2353,6 @@
         ? `窗口「${s.window_title}」`
         : (s.error || "未找到游戏窗口") + (mini ? "\n点这里还原窗口" : "");
       $("badge").classList.toggle("clickable", !found && mini);
-      $("size").textContent = s.client_size[0] ? `${s.client_size[0]}×${s.client_size[1]}` : "—";
       $("cfps").textContent = found ? `${s.capture_fps.toFixed(1)} 帧/秒` : "—";
       $("sfps").textContent = found ? `${s.stream_fps.toFixed(1)} 帧/秒` : "—";
       const age = s.frame_age_ms;

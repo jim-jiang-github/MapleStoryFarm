@@ -63,6 +63,40 @@ EXTENDED = {"left", "right"}
 POT_KEYS = ("pot8", "pot9", "pot0")
 POT_LABEL = {"pot8": "8", "pot9": "9", "pot0": "0"}
 
+# 备用药水键（前端抓的是 KeyboardEvent.code）只认这一批——游戏里真能绑键用的。
+CODE_VK = {
+    **{f"Key{chr(65 + i)}": 0x41 + i for i in range(26)},        # A..Z
+    **{f"Digit{i}": 0x30 + i for i in range(10)},                # 主键盘 0..9
+    **{f"Numpad{i}": 0x60 + i for i in range(10)},               # 小键盘 0..9
+    **{f"F{i}": 0x70 + i - 1 for i in range(1, 13)},             # F1..F12
+    "ShiftLeft": 0xA0, "ShiftRight": 0xA1,
+    "ControlLeft": 0xA2, "ControlRight": 0xA3,
+    "Space": 0x20, "Enter": 0x0D,
+    "Insert": 0x2D, "Delete": 0x2E, "Home": 0x24, "End": 0x23,
+    "PageUp": 0x21, "PageDown": 0x22,
+    "Semicolon": 0xBA, "Quote": 0xDE, "Comma": 0xBC, "Period": 0xBE,
+    "Slash": 0xBF, "Backslash": 0xDC, "BracketLeft": 0xDB, "BracketRight": 0xDD,
+    "Minus": 0xBD, "Equal": 0xBB,
+}
+# 这些键的扫描码不带扩展标志会被游戏当成小键盘那套
+CODE_EXTENDED = {"Insert", "Delete", "Home", "End", "PageUp", "PageDown"}
+
+
+def _key_label(name):
+    """状态栏里给人看的键名。"""
+    if name in POT_LABEL:
+        return POT_LABEL[name]
+    if name.startswith("Key"):
+        return name[3:]
+    if name.startswith("Digit"):
+        return name[5:]
+    if name.startswith("Numpad"):
+        return "小" + name[6:]
+    return {"Insert": "Ins", "Delete": "Del", "PageUp": "PgUp",
+            "PageDown": "PgDn", "ShiftLeft": "LShift", "ShiftRight": "RShift",
+            "ControlLeft": "LCtrl", "ControlRight": "RCtrl",
+            "Space": "空格", "Enter": "回车"}.get(name, name)
+
 # 转身后等多久再攻击（毫秒）。方向键和 Ctrl 挨着发出去，游戏会在同一帧里
 # 一起处理，结果往往按「转身前」的朝向出招——看着就是朝着反方向挥刀。
 TURN_SETTLE_MS = 130
@@ -111,14 +145,25 @@ def _scan_of(name):
 _SCAN = {name: _scan_of(name) for name in VK}
 
 
+def _scan_for(name):
+    """主键位查表；备用快捷键（KeyboardEvent.code）运行时换算并缓存。"""
+    s = _SCAN.get(name)
+    if s is None:
+        vk = CODE_VK.get(name)
+        if vk is None:
+            raise KeyError(name)
+        s = _SCAN[name] = (int(vk), int(_u32.MapVirtualKeyW(vk, 0)))
+    return s
+
+
 def send_key(name, down):
-    """发一次按键（down=True 按下，False 抬起）。名字见 VK。
+    """发一次按键（down=True 按下，False 抬起）。名字见 VK 和 CODE_VK。
 
     返回 SendInput 的返回值：<1 表示系统没接受这次注入（比如被 UIPI 拦了）。
     """
-    _, sc = _SCAN[name]
+    _, sc = _scan_for(name)
     flags = KEYEVENTF_SCANCODE | (0 if down else KEYEVENTF_KEYUP)
-    if name in EXTENDED:
+    if name in EXTENDED or name in CODE_EXTENDED:
         flags |= KEYEVENTF_EXTENDEDKEY
     inp = _INPUT(type=1, u=_INPUTUNION(ki=_KEYBDINPUT(0, sc, flags, 0, 0)))
     return _u32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
@@ -283,6 +328,8 @@ DEFAULTS = {
     "hp_pct": 40.0,      # 血低于这个百分比就喝药
     "pot_sec": 3.0,      # 两次喝药的最小间隔（秒）
     "pot_key": "pot8",   # 用哪个键喝药：pot8 / pot9 / pot0
+    "pot_chain": ["", "", "", "", ""],
+    # ↑ 备用药水键 1~5：主键按了血量没回到线以上（药空了）就按这个顺序换着喝
     "range_px": 100.0,   # 攻击区域宽：人物中心左右各这么多像素
     "range_h": 120.0,    # 攻击区域高：以人物身体为中心上下各占一半（画面上画的就是它）
     "range_side": "both",  # 攻击方向：both 左右两侧 / front 只打身前（单体技能）
@@ -324,6 +371,12 @@ def clamp_cfg(raw):
         v = raw[k]
         if isinstance(dv, bool):
             out[k] = bool(v)
+        elif isinstance(dv, list):
+            # 备用药水键链：最多 5 格，只收认识的键名，不认识的清空
+            if isinstance(v, list):
+                out[k] = [x if (x == "" or x in CODE_VK or x in VK) else ""
+                          for x in (str(s).strip() for s in v)][:5]
+                out[k] += [""] * (5 - len(out[k]))
         elif isinstance(dv, str):
             if k == "hid_port":
                 out[k] = str(v or "").strip().upper()[:16]
@@ -476,6 +529,9 @@ class Bot:
         self._t_turn = 0.0        # 上一次转身的时刻：转完要等一帧再打，否则打的是旧朝向
         self._was_fg = False      # 上一轮游戏是否在前台（重新拿回焦点时朝向不可信）
         self._t_pot = 0.0
+        self._pot_key = None      # 当前在用的药水键（喝空了会顺着备用链往下换）
+        self._pot_wait = False    # 刚按过药水键，正在等血量回到线以上
+        self._pot_hp0 = 0.0       # 按下那一刻的血量：比它高就算喝到了
         self._t_atk = 0.0
         self._t_jump = 0.0
         self._t_pick = 0.0
@@ -598,6 +654,55 @@ class Bot:
                 self._set_status(act="出错", err=f"{type(e).__name__}: {e}")
             time.sleep(self.TICK)
 
+    POT_VERIFY_MS = 800      # 按下药水键后等多久确认「血量回来没有」
+
+    def _pot_chain(self, cfg):
+        """喝药尝试顺序：主键在最前，备用 1~5 只留设了值的，去重。"""
+        seen, order = set(), []
+        for k in [cfg["pot_key"], *cfg.get("pot_chain", [])]:
+            if k and k not in seen:
+                seen.add(k)
+                order.append(k)
+        return order or [cfg["pot_key"]]
+
+    def _pot_step(self, cfg, hp, now):
+        """喝药状态机。
+
+        正常：血量 < 血线且过了喝药间隔 → 按当前药水键，进入 0.8s 验证期。
+        验证：血量比按下那一刻高（哪怕还在血线下）＝喝到了，键不变；
+              到点没涨 ＝ 这一格的药空了 → 立刻换备用键的下一格接着按，
+              不等喝药间隔——药空了还等 3 秒人早没了。
+        兜底：整条链绕完一圈（含主键全空）就停手，回到正常间隔再从头试。
+        """
+        chain = self._pot_chain(cfg)
+        if self._pot_key not in chain:
+            self._pot_key = chain[0]          # 首次 / 配置刚改过
+        thr = cfg["hp_pct"]
+        press = False
+        if self._pot_wait:
+            if hp > self._pot_hp0 + 0.3:      # 回血了＝喝到了，键留用
+                self._pot_wait = False
+                self._set_status(act=f"喝药 {_key_label(self._pot_key)} 生效", err="")
+            elif (now - self._t_pot) * 1000.0 >= self.POT_VERIFY_MS:
+                self._pot_wait = False
+                idx = chain.index(self._pot_key)
+                if idx == len(chain) - 1:     # 到 5 号（或只有主键）还没喝上
+                    self._pot_key = chain[0]  # 整条链空转了一圈，歇完从头再来
+                    self._set_status(act="药水键全按过一轮都没回血，歇一会儿再试", err="药可能喝完了")
+                else:
+                    self._pot_key = chain[idx + 1]
+                    self._set_status(act=f"{_key_label(chain[idx])} 没反应，换 {_key_label(self._pot_key)}", err="")
+                    press = True              # 空瓶不等人，立刻按下一格
+        elif hp < thr and now - self._t_pot >= cfg["pot_sec"]:
+            press = True
+        if press:
+            self._tap(self._pot_key)
+            self._t_pot = now
+            self._pot_hp0 = hp
+            self._pot_wait = True
+            self._count("pot")
+            self._set_status(act=f"喝药 {_key_label(self._pot_key)}", err="")
+
     def _step(self, cfg, now=None):
         """跑一轮决策。now 只有测试会传（假时钟），线上留空取真实时间。"""
         st = self.get_state() or {}
@@ -620,12 +725,9 @@ class Bot:
 
         now = time.time() if now is None else float(now)
 
-        # 1) 喝药：读不到血量就不动，别蒙着眼睛按
-        if hp is not None and hp < cfg["hp_pct"] and now - self._t_pot >= cfg["pot_sec"]:
-            self._tap(cfg["pot_key"])
-            self._t_pot = now
-            self._count("pot")
-            self._set_status(act=f"喝药 {POT_LABEL[cfg['pot_key']]}", err="")
+        # 1) 喝药：低于血线按当前药水键；按完没见血量涨回来就顺着备用键换
+        if hp is not None:
+            self._pot_step(cfg, hp, now)
 
         # 2) 拾取：无脑一直按，跟其它动作不冲突（不同键）
         if cfg["pick"] and (now - self._t_pick) * 1000.0 >= cfg["pick_ms"]:
