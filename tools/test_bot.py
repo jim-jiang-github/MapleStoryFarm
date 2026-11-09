@@ -21,12 +21,12 @@ def make(monsters=(), hp=100.0, fg=True, char=CHAR):
     return b
 
 
-def step(b, **kw):
+def step(b, now=None, **kw):
     st = {"fg": kw.get("fg", True), "hp": kw.get("hp", 100.0),
           "char": kw.get("char", CHAR), "monsters": kw.get("monsters", list(kw.get("m", [])))}
     b.get_state = lambda: st
     calls.clear()
-    b._step(b.cfg)
+    b._step(b.cfg, now=now)
     return list(calls)
 
 
@@ -222,6 +222,52 @@ print("[16] 本来就没按键时失焦也不发任何抬起")
 b = make()
 c = step(b, fg=False)
 check("没有抬起事件", c == [], c)
+
+print("[17] 攻击方向：正前方模式的矩形只朝一侧展开")
+BOTH_Z = [530.0, 192.5, 730.0, 312.5]      # CHAR → 身体中心 (630, 252.5)，宽 100 高 120
+check("默认两侧", bot.DEFAULTS["range_side"] == "both")
+check("正前方朝右：从身体中心往右",
+      bot.attack_zone(CHAR, 100, 120, 1, "front") == [630.0, 192.5, 730.0, 312.5],
+      bot.attack_zone(CHAR, 100, 120, 1, "front"))
+check("正前方朝左：从身体中心往左",
+      bot.attack_zone(CHAR, 100, 120, -1, "front") == [530.0, 192.5, 630.0, 312.5],
+      bot.attack_zone(CHAR, 100, 120, -1, "front"))
+check("朝向未知（0）时按两侧算，别假装知道",
+      bot.attack_zone(CHAR, 100, 120, 0, "front") == BOTH_Z)
+check("两侧模式与朝向无关",
+      bot.attack_zone(CHAR, 100, 120, -1, "both") == BOTH_Z)
+
+print("[18] 正前方模式：怪在身后但够得着 → 转身，不是走过去")
+b = make()
+b.cfg["range_side"] = "front"
+t = 5000.0
+c = step(b, now=t, m=left_mon)
+check("第一帧点左方向", down_keys(c) == ["left"], c)
+check("状态是转身朝目标（没判成太远）",
+      b.snapshot()[1]["act"] == "转身朝目标", b.snapshot()[1])
+check("状态里带真实朝向", b.snapshot()[1]["face"] == -1, b.snapshot()[1])
+c = step(b, now=t + 0.2, m=left_mon)
+check("对正后出刀", down_keys(c) == ["attack"], c)
+
+print("[19] 正前方模式每刀前重新对正（记忆说朝对了也要再点一次）")
+c = step(b, now=t + 0.3, m=left_mon)          # 冷却中
+check("冷却中不重复转身", down_keys(c) == [], c)
+c = step(b, now=t + 0.7, m=left_mon)          # 420ms 冷却到
+check("冷却好了先重新对正", down_keys(c) == ["left"], c)
+c = step(b, now=t + 0.85, m=left_mon)
+check("对正之后才出刀", down_keys(c) == ["attack"], c)
+
+print("[20] 正前方模式 + 头顶的怪：先对正再起跳，别跳起来砍反方向")
+b = make()
+b.cfg["range_side"] = "front"
+c = step(b, m=top_mon)
+check("先转身对正", down_keys(c) == ["right"], c)
+c = step(b, m=top_mon)
+check("对正后按跳", ("jump", True) in c, c)
+
+print("[21] 攻击方向的取值校验")
+check("front 合法", bot.clamp_cfg({"range_side": "front"})["range_side"] == "front")
+check("乱写的值退回两侧", bot.clamp_cfg({"range_side": "up"})["range_side"] == "both")
 
 print(f"\n通过 {ok} / {ok + fail}")
 sys.exit(1 if fail else 0)

@@ -11,7 +11,9 @@
   2) 全程按 Z 拾取（默认 130ms 一次，无脑一直按）
   3) 有目标且与攻击区域相交（宽 range_px × 高 range_h 的矩形，画面上画的就是
      它，与怪物框有交集才出手）→ 转向 + 攻击（攻击有冷却，默认 420ms）。
-     头顶差得不多的怪（<= jump_reach）会先跳起来（Alt）再打
+     头顶差得不多的怪（<= jump_reach）会先跳起来（Alt）再打。
+     range_side=front（单体技能只打身前）时矩形只朝目标那侧展开，且每刀前都
+     重新点一次方向键对正——朝向读不到，宁可按一下也不空砍
   4) 有目标但在范围外 → 朝它走（只按左右，这个场景没有纵向移动）
   5) 视野内没目标 → 左右巡逻（可选，默认开）
 
@@ -239,6 +241,7 @@ DEFAULTS = {
     "pot_key": "pot8",   # 用哪个键喝药：pot8 / pot9 / pot0
     "range_px": 100.0,   # 攻击区域宽：人物中心左右各这么多像素
     "range_h": 120.0,    # 攻击区域高：以人物身体为中心上下各占一半（画面上画的就是它）
+    "range_side": "both",  # 攻击方向：both 左右两侧 / front 只打身前（单体技能）
     "jump_reach": 140.0, # 跳跃可攻击高度：头顶的怪离攻击区不超过它就跳起来打
     "atk_ms": 420,       # 两次攻击的最小间隔（毫秒）
     "pick": True,        # 全程按 Z 拾取
@@ -252,7 +255,8 @@ DEFAULTS = {
 }
 
 # 字符串型配置的合法取值，非法就退回默认，免得写进一个谁都不认识的模式
-ENUMS = {"pot_key": POT_KEYS, "input": ("auto", "hid", "soft")}
+ENUMS = {"pot_key": POT_KEYS, "input": ("auto", "hid", "soft"),
+         "range_side": ("both", "front")}
 
 CLAMP = {
     "hp_pct": (10.0, 95.0),
@@ -345,18 +349,29 @@ def _intersects(a, b):
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
-def attack_zone(char_box, range_px, range_h):
-    """攻击判定区：以人物身体中心为原点，左右各 range_px、上下各 range_h/2
-    的矩形。server 的 draw_attack_range 画在画面上的就是它——所见即所打。
+def attack_zone(char_box, range_px, range_h, face=0, side="both"):
+    """攻击判定区：以人物身体中心为原点、上下各 range_h/2 的矩形。
+
+    横向按攻击方向展开：
+      side="both"  左右各 range_px（多数技能，两侧都能打到）
+      side="front" 只朝 face 那一侧展开 range_px（单体技能只能打正前方）。
+                   face=0（朝向未知）时按两侧算——不知道朝哪就别假装知道，
+                   让判定宽一点，等转身后再按单侧精确算。
+    server 的 draw_attack_range 画在画面上的就是它——所见即所打。
     """
     b = char_body_box(char_box)
     cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
     hh = float(range_h) / 2.0
-    return [cx - float(range_px), cy - hh, cx + float(range_px), cy + hh]
+    w = float(range_px)
+    if side == "front" and face:
+        if face > 0:
+            return [cx, cy - hh, cx + w, cy + hh]
+        return [cx - w, cy - hh, cx, cy + hh]
+    return [cx - w, cy - hh, cx + w, cy + hh]
 
 
-def in_attack_zone(char_box, mon_box, range_px, range_h):
-    return _intersects(attack_zone(char_box, range_px, range_h), mon_box)
+def in_attack_zone(char_box, mon_box, range_px, range_h, face=0, side="both"):
+    return _intersects(attack_zone(char_box, range_px, range_h, face, side), mon_box)
 
 
 def pick_target(char_box, monsters, range_px, range_h, jump_reach, dy_tol):
@@ -408,7 +423,7 @@ class Bot:
         # 不传就按配置开真出口：优先 CH9329 硬件，连不上才软件注入。
         self.sender = sender or Sender(self.cfg["input"], self.cfg["hid_port"])
         self._lock = threading.Lock()
-        self._status = {"act": "空闲", "target": "", "hp": None,
+        self._status = {"act": "空闲", "target": "", "hp": None, "face": 0,
                         "atk": 0, "pot": 0, "pick": 0, "jmp": 0, "err": ""}
         self._thread = None
         self._held = 0            # 当前按住的左右方向：-1 / 0 / 1
@@ -513,6 +528,9 @@ class Bot:
     def _set_status(self, **kw):
         with self._lock:
             self._status.update(kw)
+            # 朝向跟着状态一起出：server 画攻击区域要按真实朝向画单侧，
+            # 不然「正前方」模式画出来的框和实际判定对不上。
+            self._status["face"] = self._face
 
     def _count(self, key):
         with self._lock:
@@ -536,7 +554,8 @@ class Bot:
                 self._set_status(act="出错", err=f"{type(e).__name__}: {e}")
             time.sleep(self.TICK)
 
-    def _step(self, cfg):
+    def _step(self, cfg, now=None):
+        """跑一轮决策。now 只有测试会传（假时钟），线上留空取真实时间。"""
         st = self.get_state() or {}
         hp = st.get("hp")
         self._set_status(hp=hp)
@@ -555,7 +574,7 @@ class Bot:
             self._was_fg = True
             self._face = 0
 
-        now = time.time()
+        now = time.time() if now is None else float(now)
 
         # 1) 喝药：读不到血量就不动，别蒙着眼睛按
         if hp is not None and hp < cfg["hp_pct"] and now - self._t_pot >= cfg["pot_sec"]:
@@ -606,16 +625,38 @@ class Bot:
         #   水平挨着、怪物悬在头顶且差得不多（<= jump_reach）→ 跳起来打：跳完
         #     人物升高、攻击区域跟着上移，交上集就走下面的正常攻击流程；
         #   水平挨着但高度交不上（下一层/差太多）→ 站住，走过去也白走。
-        zone = attack_zone(char, cfg["range_px"], cfg["range_h"])
+        #
+        # 攻击方向 front（单体技能只能打身前）：矩形只朝目标那一侧展开。判定
+        # 用 side（假设已面向目标），绘制用真实朝向（server 读 status["face"]）——
+        # 出招前那一步「对正」就是把假设变成事实。
+        mode = cfg["range_side"]
+        zone = attack_zone(char, cfg["range_px"], cfg["range_h"], side, mode)
         mb = tgt["box"]
         x_hit = zone[0] < mb[2] and mb[0] < zone[2]
         y_hit = zone[1] < mb[3] and mb[1] < zone[3]
+        atk_ready = (now - self._t_atk) * 1000.0 >= cfg["atk_ms"]
+        settling = (now - self._t_turn) * 1000.0 < TURN_SETTLE_MS
+        # 上一次转身之后还没出过手 = 朝向只是「记得对」，不是「刚确认过」。
+        # 被击退、复活、你自己手动走两步都会让记忆失准；单侧攻击失准就是空砍，
+        # 所以正前方模式下每刀前都重新点一次方向键对正（转身 50ms + 等 130ms
+        # 本来就塞得进 420ms 的攻击冷却里，几乎不损攻速）。
+        calibrated = self._t_turn > self._t_atk
         if not (x_hit and y_hit):
             if x_hit:
                 gap = zone[1] - mb[3]        # >0：怪物整个悬在攻击区上方
                 if 0 < gap <= cfg["jump_reach"]:
                     self._set_dir(0)
-                    if (now - self._t_jump) * 1000.0 >= JUMP_COOLDOWN_MS:
+                    jump_ready = (now - self._t_jump) * 1000.0 >= JUMP_COOLDOWN_MS
+                    # 跳起来那一刀也是朝正前方的：正前方模式先对正再起跳，
+                    # 别跳起来砍反方向。两侧模式朝向不影响命中，直接跳更干脆。
+                    if jump_ready and mode == "front" and (self._face != side
+                                                           or not calibrated):
+                        self._tap("right" if side > 0 else "left", TURN_TAP_MS)
+                        self._face = side
+                        self._t_turn = now
+                        self._set_status(act="转身朝目标", err="")
+                        return
+                    if jump_ready:
                         self._tap("jump")
                         self._t_jump = now
                         self._count("jmp")
@@ -634,7 +675,7 @@ class Bot:
 
         # 进范围了：先站住，再转向目标，然后按节奏攻击
         self._set_dir(0)
-        if self._face != side:
+        if self._face != side or (mode == "front" and atk_ready and not calibrated):
             # 这个游戏只能靠按方向键转身。轻点一下位置几乎不动，但朝向会变。
             # 转完这一轮**不打**：转身和攻击挨着发，游戏会按旧朝向出招。
             self._tap("right" if side > 0 else "left", TURN_TAP_MS)
@@ -642,11 +683,11 @@ class Bot:
             self._t_turn = now
             self._set_status(act="转身朝目标", err="")
             return
-        if (now - self._t_turn) * 1000.0 < TURN_SETTLE_MS:
+        if settling:
             # 刚转完身，等游戏把朝向渲染出来再出手
             self._set_status(act="等朝向生效")
             return
-        if (now - self._t_atk) * 1000.0 >= cfg["atk_ms"]:
+        if atk_ready:
             self._tap("attack")
             self._t_atk = now
             self._count("atk")

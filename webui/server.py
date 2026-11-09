@@ -1871,18 +1871,24 @@ char_body_box = botmod.char_body_box
 
 
 def draw_attack_range(img, box):
-    """在人物旁边画出攻击区域：以身体中心为原点、左右各 R 像素、上下各 range_h/2
-    的矩形（上下边虚线、左右实线）。
+    """在人物旁边画出攻击区域：以身体中心为原点、上下各 range_h/2 的矩形
+    （上下边虚线、左右实线）。
+
+    横向按攻击方向展开：`both` 左右各 range_px；`front` 只朝人物**当前朝向**
+    那一侧展开（单体技能只能打身前）。朝向来自 bot 状态里的 `face`，读不到
+    （0）就画成两侧——不知道朝哪就别假装知道。
 
     画的不是「水平够得着多远」的示意带了——bot 出不出手就是按这个矩形与怪物
     框求交判断的（in_attack_zone），所见即所打。上下层够不着的怪，把高度调小
     就不会再被打。
     """
-    cfg, _ = game_bot.snapshot()
+    cfg, st = game_bot.snapshot()
     r = int(cfg["range_px"])
     rh = int(cfg["range_h"])
     if r <= 0 or rh <= 0:
         return img
+    mode = cfg.get("range_side", "both")
+    face = int(st.get("face") or 0)
     on = cfg["on"]
     color = BOT_RANGE_ON if on else BOT_RANGE_OFF
     thick = 2 if on else 1
@@ -1891,7 +1897,16 @@ def draw_attack_range(img, box):
     cx = int((b[0] + b[2]) / 2)
     cy = int((b[1] + b[3]) / 2)
     half = rh // 2
-    left, right = max(2, cx - r), min(w - 3, cx + r)
+    if mode == "front" and face:
+        if face > 0:                      # 朝右：从身体中心往右
+            left, right = cx, cx + r
+        else:                             # 朝左
+            left, right = cx - r, cx
+    else:
+        left, right = cx - r, cx + r
+    left, right = max(2, left), min(w - 3, right)
+    if right - left < 6:                  # 贴着画面边缘时别画成一条线
+        right = min(w - 3, left + 6)
     top, bot = max(2, cy - half), min(h - 3, cy + half)
     _dash(img, (left, top), (right, top), color, thick)
     _dash(img, (left, bot), (right, bot), color, thick)
@@ -1899,10 +1914,20 @@ def draw_attack_range(img, box):
     cv2.line(img, (left, top - 6), (left, bot + 6), color, thick, cv2.LINE_AA)
     cv2.line(img, (right, top - 6), (right, bot + 6), color, thick, cv2.LINE_AA)
     cv2.line(img, (cx, cy - 5), (cx, cy + 5), color, thick, cv2.LINE_AA)
-    tag = f"ATK {r}x{rh}" if on else f"ATK {r}x{rh} (关)"
+    # 箭头表示打哪边：两侧 / 朝右 / 朝左 / 朝向未知（正前方模式还没转身）
+    arrow = ""
+    if mode == "front":
+        arrow = " ->" if face > 0 else (" <-" if face < 0 else " ?")
+    tag = f"ATK {r}x{rh}{arrow}" if on else f"ATK {r}x{rh}{arrow} (关)"
     (tw_, th_), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
-    # 标签贴在范围带左端、竖直居中：离人物框不远，又不压名字牌和 ME 标记
-    tx = min(left + 4, w - tw_ - 6)
+    # 标签贴在矩形外侧的空地上：正前方模式只有半个框，往里放会压住人物本体
+    if mode == "front" and face > 0:
+        tx = right + 6
+    elif mode == "front" and face < 0:
+        tx = left - tw_ - 6
+    else:
+        tx = left + 4
+    tx = max(4, min(tx, w - tw_ - 6))
     ty = min(bot - 2, max(th_ + 3, cy + th_ // 2))
     cv2.rectangle(img, (tx - 3, ty - th_ - 3), (tx + tw_ + 3, ty + 2), TXT_BG, -1)
     cv2.putText(img, tag, (tx, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.42,

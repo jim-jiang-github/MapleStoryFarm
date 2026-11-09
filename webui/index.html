@@ -460,7 +460,11 @@
             </div>
             <div class="row conf">
               <span class="k">攻击距离</span>
-              <span class="v"><input id="rngRange" class="rng" type="range" min="60" max="500" step="10" value="100" title="攻击区域的宽度：人物中心左右各这么多像素"><b id="rngVal">100px</b></span>
+              <span class="v"><input id="rngRange" class="rng" type="range" min="60" max="500" step="10" value="100" title="攻击区域的宽度：两侧模式左右各这么多像素；正前方模式只朝身前展开这么多"><b id="rngVal">100px</b></span>
+            </div>
+            <div class="row conf">
+              <span class="k">攻击方向</span>
+              <span class="v"><select id="sideSel" title="两侧：身前身后都能打到（多数技能），画面上的框左右对称。正前方：单体技能只能打身前，框只画朝向那一侧；因为读不到人物朝向，正前方模式每刀前都会先轻点一次方向键重新对正（转身时间塞在攻击冷却里，几乎不损攻速）"><option value="both">两侧</option><option value="front">正前方</option></select></span>
             </div>
             <div class="row conf">
               <span class="k">攻击高度</span>
@@ -1910,6 +1914,9 @@
   $("potSel").addEventListener("change", () => {
     setBot({ pot_key: $("potSel").value }).catch(botFail);
   });
+  $("sideSel").addEventListener("change", () => {
+    setBot({ range_side: $("sideSel").value }).catch(botFail);
+  });
   $("inputSel").addEventListener("change", () => {
     setBot({ input: $("inputSel").value }).catch(botFail);
   });
@@ -1943,6 +1950,7 @@
       $("hgtRange").value = cfg.range_h;
       $("atkRange").value = cfg.atk_ms;
       $("potSel").value = cfg.pot_key;
+      $("sideSel").value = cfg.range_side || "both";
       $("inputSel").value = cfg.input;
       paintBotVals();
     }
