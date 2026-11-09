@@ -534,6 +534,10 @@
               <button class="slot" data-i="0" type="button"></button><button class="slot" data-i="1" type="button"></button><button class="slot" data-i="2" type="button"></button><button class="slot" data-i="3" type="button"></button>
             </div>
             <div class="bar" data-k="exp"><span class="bk">EXP</span><span class="bv">—</span><span class="btrack"><i></i></span></div>
+            <div class="trend">
+              <div class="cap"><span id="expCap">EXP 变化</span><span class="sub" id="expRange">—</span></div>
+              <canvas id="expChart"></canvas>
+            </div>
           </div>
           <div class="rows">
             <!-- 设置全部收进可折叠分组：默认收起，点标题展开；
@@ -645,10 +649,6 @@
               </div>
             </details>
           </div>
-        </div>
-        <div class="trend">
-          <div class="cap"><span id="expCap">EXP 变化</span><span class="sub" id="expRange">—</span></div>
-          <canvas id="expChart"></canvas>
         </div>
       </div>
 
