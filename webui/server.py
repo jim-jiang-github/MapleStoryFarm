@@ -28,6 +28,17 @@ try:
 except Exception:  # noqa: BLE001  老系统没有这个函数
     ctypes.windll.user32.SetProcessDPIAware()
 
+# 打包成 exe 后控制台默认是 GBK(936)，print 的中文会变成一片乱码
+# （「手机(同 WiFi)」变成 `\xca\xd6\xbb\xfa`）。把控制台代码页和 Python 输出
+# 一起切到 UTF-8，两边一致才不会花。
+if getattr(sys, "frozen", False):
+    try:
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001  没有控制台（重定向）时无所谓
+        pass
+
 
 import cv2
 import mss
@@ -42,6 +53,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 # 跟踪模块与本文件同目录；直接 `python webui/server.py` 时它已在 sys.path 里，
 # 用 -m 方式启动时补一下，免得为了一个 import 去改运行方式
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import paths as apppaths  # noqa: E402  （见 webui/paths.py：源码/打包后的资源与数据目录）
 from track import Tracker  # noqa: E402  （见 webui/track.py：卡尔曼 + 匈牙利 + ByteTrack）
 import bot as botmod  # noqa: E402  （见 webui/bot.py：挂机按键与决策）
 
@@ -70,7 +82,7 @@ LOW_DETECT_CONF = 0.10
 # 这个值可以在页面上用滑块实时改（/api/detect/conf），存在同目录的 detconf.json。
 SHOW_CONF_DEFAULT = float(os.environ.get("PREVIEW_SHOW_CONF") or 0.80)
 SHOW_HITS_DEFAULT = int(os.environ.get("PREVIEW_MIN_HITS") or 6)
-SHOW_CONF_FILE = Path(__file__).with_name("detconf.json")
+SHOW_CONF_FILE = apppaths.data_file("detconf.json")
 # ---- 显示稳定（解决「冒出来一两帧又消失」）----
 # 置信度高不等于目标真实：误检偶尔也会连着两帧拿到 0.7。原来「连续 2 帧」就确认，
 # 于是这种误检会被画两帧再消失。现在显示端另加三道闸：
@@ -99,7 +111,7 @@ DETECT_IMGSZ = MODES["fast"]["imgsz"]
 
 # ---------------- UI 排除区（可在 WebUI 框选 / 保存） ----------------
 # 归一化坐标（占客户区宽高的比例，与分辨率无关），存在同目录 masks.json 里。
-MASK_FILE = Path(__file__).with_name("masks.json")
+MASK_FILE = apppaths.data_file("masks.json")
 MASK_GRAY = 114                 # 与 YOLO letterbox 填充值一致，对模型最"无感"
 MIN_MASK_SIZE = 0.01            # 最小边长（归一化），防止手抖画出零面积小框
 DEFAULT_MASKS = [
@@ -407,7 +419,7 @@ grabber.start()
 # 三条是固定 UI：位置固定、颜色固定、只沿水平方向变化。所以不走训练/推理，
 # 直接按"色相 + 饱和度"逐列扫描，既准（逐像素）又快（3 个 ~160x15 的 ROI，
 # 亚毫秒级），也完全不受模型召回率影响。
-BAR_FILE = Path(__file__).with_name("bars.json")
+BAR_FILE = apppaths.data_file("bars.json")
 BAR_KINDS = ("hp", "mp", "exp")
 BAR_LABEL = {"hp": "HP", "mp": "MP", "exp": "EXP"}
 BAR_HUE_TOL = 30        # 色相容差（OpenCV 色相 0~180，对应 0~360°）
@@ -996,6 +1008,9 @@ det_state = {
     "stage": "idle",     # idle / import / load / warmup / ready / error
     "det_t0": 0.0,       # 这次冷启动的开始时刻（perf_counter）
     "preloaded": False,  # 服务启动时的后台预热是否已完成（点开就秒出）
+    # 预热是静默的（失败不影响点开时再试），但「为什么没预热成」要留痕：
+    # 打包成 exe 后最容易缺的就是动态库，没有这条只能靠猜。
+    "preload_error": "",
 }
 det_lock = threading.Lock()
 # 已加载的模型：mode -> YOLO。放到模块级而不是循环里的局部变量——线程崩了重拉、
@@ -1289,8 +1304,8 @@ def pick_visible(tracks, shown, now, show_conf, show_hits, prev_tid=None):
 #
 # 全画面直搜 1366x768 要 15~25ms，所以分两级：半分辨率粗搜（~4ms）+ 命中点附近
 # 按原尺寸精修（~2ms）。跑在独立线程里按 15fps 走，不占检测线程的推理时间。
-CHAR_TPL_FILE = Path(__file__).with_name("chartpl.png")
-CHAR_CONF_FILE = Path(__file__).with_name("charconf.json")
+CHAR_TPL_FILE = apppaths.data_file("chartpl.png")
+CHAR_CONF_FILE = apppaths.data_file("charconf.json")
 CHAR_THRESH_DEFAULT = 0.80
 CHAR_MIN_W, CHAR_MIN_H = 24, 8      # 比这还小的框多半是框歪了
 CHAR_LOST_AFTER = 0.6               # 超过这么久没命中就不再画标记（秒）
@@ -2095,7 +2110,7 @@ def _ensure_model(mode):
         if mode not in det_models:      # 双检：等锁期间可能已被别的线程装好
             cls = _yolo_cls()
             _det_stage("load")
-            det_models[mode] = cls(MODES[mode]["dir"], task="detect")
+            det_models[mode] = cls(apppaths.model_dir(MODES[mode]["dir"]), task="detect")
     return det_models[mode]
 
 
@@ -2119,8 +2134,11 @@ def preload_det():
                       verbose=False, device="cpu")
         det_state["preloaded"] = True
         print(f"detector preloaded ({cfg['dir']})")
-    except Exception:  # noqa: BLE001
-        pass                            # 预加载失败不影响正常流程
+    except Exception as e:  # noqa: BLE001
+        # 预加载失败不影响正常流程，但要把原因留下来：exe 换机器最常见的失败
+        # 就是缺 dll / 模型路径不对，面板和 /api/stats 都能查到。
+        det_state["preload_error"] = f"{type(e).__name__}: {e}"
+        print(f"preload failed: {det_state['preload_error']}")
     finally:
         if not det_state["enabled"]:
             _det_stage("idle")
@@ -2308,7 +2326,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-INDEX = Path(__file__).with_name("index.html")
+INDEX = apppaths.res_file("index.html")
 
 # 外网访问时的口令门（可选）：设了环境变量 PREVIEW_TOKEN 才生效，本地用不受影响。
 # 理由：这个页面等于"看你的屏幕 + 能把游戏窗口提到前台"，把 URL 直接公开风险太大。
@@ -2352,7 +2370,7 @@ async def index():
 
 # 手机监控页：只取 640px 缩略图 + 几十字节状态，2 秒一次约 50 kbps。
 # 免费隧道只剩 200 kbps 时主页面（H.264）会很勉强，这一页却完全够用。
-MOBILE = Path(__file__).with_name("m.html")
+MOBILE = apppaths.res_file("m.html")
 
 
 @app.get("/m", response_class=HTMLResponse)
@@ -2426,6 +2444,8 @@ async def stats():
         "pending": tracker.pending,
         "top_classes": [f"{k}×{v}" for k, v in top],
         "detect_error": det_state["error"],
+        "detect_preloaded": det_state["preloaded"],
+        "detect_preload_error": det_state["preload_error"],
         "filter": det_state["filter"],
         "lock": det_state["lock"],
         "mode": det_state["mode"],

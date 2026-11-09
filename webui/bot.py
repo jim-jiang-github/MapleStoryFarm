@@ -31,12 +31,19 @@ from __future__ import annotations
 
 import ctypes
 import json
+import sys
 import threading
 import time
 from ctypes import wintypes
 from pathlib import Path
 
-CONF_FILE = Path(__file__).with_name("botconf.json")
+try:
+    import paths as apppaths            # 和 server.py 共用同一套资源/数据目录
+except ImportError:                     # 单独 import 本模块时补一下 sys.path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import paths as apppaths
+
+CONF_FILE = apppaths.data_file("botconf.json")
 
 # ---------------- 键位 ----------------
 # 用户的设置：Ctrl 攻击、Alt 跳、方向键（只会用到左右）、8/9/0 喝药、Z 拾取。

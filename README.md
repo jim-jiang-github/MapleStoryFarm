@@ -325,6 +325,44 @@
 
 注意：游戏窗口被别的窗口挡住时，抓到的是挡住它的那个窗口，匹配自然找不到人（页面上的「前置游戏」按钮可以先把游戏抬回前台）。
 
+## 打包成 exe（拷到别的电脑）
+
+目标机器不用装 Python，把整个文件夹拷过去双击就能跑：
+
+```
+python build_exe.py            # 目录版，推荐
+python build_exe.py --clean    # 先清掉旧的 build/ dist/ 再打
+python build_exe.py --onefile  # 单文件版（每次启动要解压运行时，慢）
+python build_exe.py --dry-run  # 只打印 PyInstaller 命令，不真的打包
+```
+
+产物：
+
+```
+dist/MapleStoryFarm/
+    MapleStoryFarm.exe      双击运行，浏览器开 http://127.0.0.1:8765
+    _internal/              python、torch、openvino、两个模型都在这里
+    data/                   第一次运行自动生成
+```
+
+**要拷就整个文件夹拷**，只拿 exe 过去会缺 `_internal`。
+
+几个刻意这么设计的地方：
+
+- **`data/` 必须在 exe 旁边，不能打进包里。** onefile 的 `_MEIPASS` 是每次启动新建的临时目录，配置写进去一关就没了。`webui/paths.py` 统一处理：内置资源从包里读，`detconf.json`/`masks.json`/`bars.json`/`charconf.json`/`chartpl.png`/`botconf.json` 第一次运行时复制到 `data/`，之后都读写那一份——**换新 exe 不会冲掉已经标定好的血条和屏蔽区**。`data/` 不可写（比如装在 Program Files）会自动退到 `%LOCALAPPDATA%\MapleStoryFarm`，启动时有一行提示。
+- **模型目录按资源根拼绝对路径。** 快捷方式启动时 CWD 可能是 system32，`YOLO("model_int8_fast_openvino_model")` 会直接找不到。
+- **必须 `--collect-all ultralytics` / `openvino`。** 模型类和跟踪器是运行时按名字导入的，静态分析看不见；少收一个就是「exe 能启动，一点识别就 `ModuleNotFoundError`」。
+- **保留控制台。** 端口、局域网手机地址、识别加载进度、报错都在里面，出问题能直接看。
+
+体积参考：目录版约 900MB～1.2GB（torch CPU 占大头），压缩后拷贝约 400～600MB。`--no-accurate` 能省 10MB 模型，可以忽略。
+
+其它注意：
+
+- 首次启动要解压/初始化，比之后慢；ultralytics 会往用户目录写配置，正常。
+- 放到 Program Files、桌面都行，别放在需要管理员权限才能写的目录（`data/` 写不进去会退到 LOCALAPPDATA）。
+- 杀毒软件可能对 PyInstaller 产物误报（尤其 onefile 自解压），加白名单即可。
+- exe 里没有 `best.pt`，推理只走 OpenVINO IR；换模型要重新打包。
+
 ## 依赖
 
 ```bash
