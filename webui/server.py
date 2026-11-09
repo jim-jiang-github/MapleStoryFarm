@@ -1214,6 +1214,10 @@ CHAR_THRESH_DEFAULT = 0.80
 CHAR_MIN_W, CHAR_MIN_H = 24, 8      # 比这还小的框多半是框歪了
 CHAR_LOST_AFTER = 0.6               # 超过这么久没命中就不再画标记（秒）
 CHAR_FPS = 15
+# 怪物框与人物身体框的重叠比例（交集/较小框面积）超过它，就当这只怪「和人物
+# 完全重叠」：人挡怪/怪挡人时 YOLO 的框会乱抖，锁定和挂机跟着乱选目标，不如
+# 当没看见。人物丢了（模板没匹配上）时不做这个过滤。
+CHAR_OVERLAP_HIDE = 0.8
 # 尺度只在「分数确实很硬」时采信：画面里没有这块图时，随便一个尺度也能刷到 0.7 上下
 # 的假高分，按它把模板压扁，之后就永远匹配不上了。名字牌真身在 0.95 以上，所以
 # 0.88 这条线足够区分「真找到了、只是尺度差了 2%」和「画面里压根没有人」。
@@ -1862,6 +1866,24 @@ def _dash(img, p1, p2, color, thick=1, seg=9):
                  color, thick, cv2.LINE_AA)
 
 
+def char_body_box(box):
+    """名字牌框 -> 人物身体框 [x1,y1,x2,y2]（浮点）。
+
+    这个游戏把名字牌挂在角色**脚下**，身体在牌子上方（实测 16px 高的牌子
+    对应约 60px 高的人物，脚底离牌顶 8px），身宽约为身高的 0.45（人形比高瘦）。
+    换分辨率/缩放时牌子等比变高变矮，所以全部按牌高归一。
+    识别框、攻击范围带、重叠过滤用的都是这一个函数——改这里就全跟着变了。
+    """
+    x1, y1, x2, y2 = (float(v) for v in box)
+    ph = max(8.0, y2 - y1)
+    k = ph / 16.0
+    body_h = 60.0 * k
+    gap = 8.0 * k
+    bw = max(10.0, body_h * 0.45)
+    cx = (x1 + x2) / 2.0
+    return [cx - bw, y1 - gap - body_h, cx + bw, y1 - gap]
+
+
 def draw_attack_range(img, box):
     """在人物框旁边画出攻击范围：以人物为原点、左右各 R 像素的一条带。
 
@@ -1876,16 +1898,10 @@ def draw_attack_range(img, box):
     color = BOT_RANGE_ON if on else BOT_RANGE_OFF
     thick = 2 if on else 1
     h, w = img.shape[:2]
-    cx = (int(box[0]) + int(box[2])) // 2
-    # 这个游戏把名字牌挂在角色**脚下**，身体在牌子上方（实测 16px 高的牌子
-    # 对应约 50px 高的人物，脚底离牌顶 13px）。所以带宽要往上挪，不是往下。
-    # 跟着牌子高度等比缩放：换分辨率/缩放时牌子会变高变矮，人物同比例变。
-    ph = max(8, int(box[3]) - int(box[1]))
-    k = ph / 16.0
-    body_h = int(round(60 * k))        # 人物身高（实测 55~60px）
-    gap = int(round(8 * k))            # 脚底到牌顶的空隙（实测 5~13px，取中）
-    cy = int(box[1]) - gap - body_h // 2
-    half = max(12, body_h // 2)
+    b = char_body_box(box)
+    cx = int((b[0] + b[2]) / 2)
+    cy = int((b[1] + b[3]) / 2)
+    half = max(12, int(round(b[3] - b[1])) // 2)
     left, right = max(2, cx - r), min(w - 3, cx + r)
     top, bot = max(2, cy - half), min(h - 3, cy + half)
     _dash(img, (left, top), (right, top), color, thick)
@@ -1906,39 +1922,32 @@ def draw_attack_range(img, box):
 
 
 def overlay_char(img):
-    """把人物标记画到画面上（原地修改并返回）。名字牌下面那条竖线指向人物本体。"""
+    """把人物标记画到画面上（原地修改并返回）。
+
+    人物用和怪物同款的识别框样式：由名字牌框推导出身体框，整框框住人物本体，
+    顶上挂 ME 标签（分数即模板匹配置信度）。名字牌本身再画个 1px 细框，方便
+    确认模板匹配到的到底是哪块像素。以前的「小框 + 箭头指向身体」不要了——
+    框直接盖住身体就不需要箭头再指一遍。
+    """
     with char_lock:
         box = char_state["box"]
         score = char_state["score"]
         ts = char_state["ts"]
-        char_dir = char_state["dir"]
     if box is None or ts <= 0 or time.time() - ts > CHAR_LOST_AFTER:
         return img
-    x1, y1, x2, y2 = (int(v) for v in box)
     h, w = img.shape[:2]
-    x1, y1 = max(1, x1), max(1, y1)
-    x2, y2 = min(w - 2, x2), min(h - 2, y2)
-    cv2.rectangle(img, (x1 - 4, y1 - 3), (x2 + 4, y2 + 3), CHAR_COLOR, 2)
-    cx = (x1 + x2) // 2
-    ph = max(8, y2 - y1)
-    # 指示线长度：名字牌很扁（~16px）时要伸到人物身上；框本身已经包含身体
-    # （比如框的是头顶/帽子）时就短一点，别拖一条长尾巴。按牌高算再夹到 14~40px。
-    seg = min(40, max(14, int(ph * 1.7)))
-    below = char_dir != "above"
-    if below:                      # 人物在模板下方：从框底往下指
-        tip = min(h - 3, y2 + 6 + seg)
-        cv2.line(img, (cx, y2 + 6), (cx, tip - 7), CHAR_COLOR, 2, cv2.LINE_AA)
-        cv2.fillPoly(img, [np.array([[cx - 6, tip - 8], [cx + 6, tip - 8], [cx, tip]],
-                                    np.int32)], CHAR_COLOR, cv2.LINE_AA)
-    else:                          # 人物在模板上方：从框顶往上指
-        tip = max(3, y1 - 6 - seg)
-        cv2.line(img, (cx, y1 - 6), (cx, tip + 7), CHAR_COLOR, 2, cv2.LINE_AA)
-        cv2.fillPoly(img, [np.array([[cx - 6, tip + 8], [cx + 6, tip + 8], [cx, tip]],
-                                    np.int32)], CHAR_COLOR, cv2.LINE_AA)
+    # 名字牌细框（1px）：模板实际命中的位置，标定/换图时用来肉眼核对
+    px1, py1, px2, py2 = (int(v) for v in box)
+    cv2.rectangle(img, (max(1, px1 - 2), max(1, py1 - 2)),
+                  (min(w - 2, px2 + 2), min(h - 2, py2 + 2)), CHAR_COLOR, 1)
+    # 身体框：和 draw_tracks 里的怪物框同一个画法（2px 矩形 + 底色标签）
+    b = char_body_box(box)
+    x1, y1 = max(1, int(b[0])), max(1, int(b[1]))
+    x2, y2 = min(w - 2, int(b[2])), min(h - 2, int(b[3]))
+    cv2.rectangle(img, (x1 - 2, y1 - 2), (x2 + 2, y2 + 2), CHAR_COLOR, 2)
     tag = f"ME {score:.2f}"
     (tw_, th_), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
-    # 标签放在箭头反方向那一侧，别压在指示线上
-    ty = (y2 + th_ + 8) if not below else (y1 - 6 if y1 - 6 > th_ else y2 + th_ + 8)
+    ty = y1 - 6 if y1 - 6 > th_ else y2 + th_ + 6
     cv2.rectangle(img, (x1 - 4, ty - th_ - 4), (x1 - 4 + tw_ + 4, ty + 2), TXT_BG, -1)
     cv2.putText(img, tag, (x1 - 2, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                 CHAR_COLOR, 1, cv2.LINE_AA)
@@ -2080,6 +2089,19 @@ def detect_loop():
             prev_box = None
 
         vis = pick_visible(tracks, shown, now, show_conf, show_hits, prev)
+
+        # 和人物完全重叠的怪不当目标：人挡怪/怪挡人时 YOLO 的框会乱抖，锁定和
+        # 挂机跟着乱选。过滤放在「这一帧画谁」这一层——显示、计数、锁定、挂机
+        # 挑目标用的都是同一份 vis，不会出现「画面上没有、挂机却在打」的分裂。
+        # 人物刚被挡住/丢失时不滤：宁可多显示，也别拿旧位置瞎删。
+        with char_lock:
+            cbox = char_state["box"]
+            cts = char_state["ts"]
+        if cbox is not None and cts > 0 and now - cts <= CHAR_LOST_AFTER:
+            cbody = char_body_box(cbox)
+            vis = [tr for tr in vis
+                   if overlap_min(tr["box"], cbody) < CHAR_OVERLAP_HIDE]
+
         locked_tid = pick_lock(vis, prev, prev_box)
 
         counts = {}
