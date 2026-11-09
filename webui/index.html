@@ -525,10 +525,6 @@
               <b class="cneed" id="charNeed" title="点这里截图上传；也支持 Ctrl+V 粘贴 / 把图拖进来">⚠ 上传名字牌截图 · 点这里或 Ctrl+V</b>
               <button id="roiBtn" class="mini" title="程序只会在你圈出来的一块区域里找「你的人物」。点这里，画面会变暗、出现一个亮框：拖四条边，把亮框收到人物会出现的那块就行，不用很精确。范围收小了认人更快更准，也不会把任务栏、聊天里印着的同名字错认成你的人物">人物识别区</button>
             </div>
-            <div class="row conf">
-              <span class="k">人物匹配</span>
-              <span class="v"><input id="charRange" class="rng" type="range" min="0.40" max="0.98" step="0.01" value="0.80" title="名字牌模板的匹配分门限。名字牌这种固定字体稳定在 0.95 以上，低于 0.85 基本是认错地方；标记忽有忽无就往下调一点"><b id="charVal">0.80</b></span>
-            </div>
             <div class="bar" data-k="hp"><span class="bk">HP</span><span class="bv">—</span><span class="btrack"><i></i><u class="mark" title="喝药线：血量掉到这条线就自动喝药"></u><u class="thr"></u></span></div>
             <div class="potrow" id="potChain" title="备用红药键 1~4：喝药键的药空了（按了血量没涨回来），就按这里的顺序换着按，直到喝上为止。点格子 → 按一个键即设置；再按 Del 清空、Esc 取消">
               <button class="slot" data-i="0" type="button"></button><button class="slot" data-i="1" type="button"></button><button class="slot" data-i="2" type="button"></button><button class="slot" data-i="3" type="button"></button>
@@ -561,6 +557,14 @@
                 <span class="k">检测频率</span>
                 <span class="v"><select id="fpsSel" title="每秒最多推理几次。YOLO 的单帧耗时是固定的（速度模式约 66ms），调低只省 CPU 占用，不会让单帧变快——画面上的框本来就只在每次推理后刷新一次"><option value="0">不限（跑满）</option><option value="20">20 帧/秒</option><option value="15">15 帧/秒</option><option value="12">12 帧/秒</option><option value="10">10 帧/秒</option><option value="8">8 帧/秒</option></select></span>
               </div>
+              </div>
+            </details>
+            <details class="group" data-cap="人物">
+              <summary><b>人物</b><span class="gsum" id="sumChar">—</span></summary>
+              <div class="gbody">
+            <div class="row conf">
+              <span class="k">人物匹配</span>
+              <span class="v"><input id="charRange" class="rng" type="range" min="0.40" max="0.98" step="0.01" value="0.80" title="名字牌模板的匹配分门限。名字牌这种固定字体稳定在 0.95 以上，低于 0.85 基本是认错地方；标记忽有忽无就往下调一点"><b id="charVal">0.80</b></span>
             </div>
             <div class="row"><span class="k">人物</span>
               <span class="v small"><span id="charInfo">未设置</span></span>
@@ -601,6 +605,14 @@
               <span class="k">攻击间隔</span>
               <span class="v"><input id="atkRange" class="rng" type="range" min="150" max="1200" step="10" value="420" title="两次攻击的最小间隔（毫秒）。太小会一直按着打不出伤害，太大浪费输出"><b id="atkVal">420ms</b></span>
             </div>
+            <div class="row conf">
+              <span class="k">拾取 Z</span>
+              <span class="v"><button id="pickBtn" class="mini on" title="全程无脑按 Z 捡东西，跟打怪互不影响">开</button><b class="sub">130ms 一次</b></span>
+            </div>
+            <div class="row conf">
+              <span class="k">巡逻找怪</span>
+              <span class="v"><button id="patrolBtn" class="mini on" title="视野里没有怪时左右来回走；关掉就站在原地等">开</button><b class="sub">2.5s 换向</b></span>
+            </div>
               </div>
             </details>
             <details class="group" data-cap="键位">
@@ -629,14 +641,6 @@
             <div class="row conf" style="display:none">
               <span class="k">蓝线</span>
               <span class="v"><input id="mpRange" class="rng" type="range" min="10" max="95" step="5" value="30" title="蓝量低于这个百分比就喝蓝药；读不到蓝量（蓝条没标定）时不会瞎按"><b id="mpVal">30%</b></span>
-            </div>
-            <div class="row conf">
-              <span class="k">拾取 Z</span>
-              <span class="v"><button id="pickBtn" class="mini on" title="全程无脑按 Z 捡东西，跟打怪互不影响">开</button><b class="sub">130ms 一次</b></span>
-            </div>
-            <div class="row conf">
-              <span class="k">巡逻找怪</span>
-              <span class="v"><button id="patrolBtn" class="mini on" title="视野里没有怪时左右来回走；关掉就站在原地等">开</button><b class="sub">2.5s 换向</b></span>
             </div>
               </div>
             </details>
@@ -2133,6 +2137,34 @@
     }
   }
 
+  /* ---- 可折叠分组：默认收起，哪个组被点开过记在 localStorage；
+     收起时标题右侧的状态摘要压缩成一行，展开与否都扫一眼可知关键值 ---- */
+  document.querySelectorAll("details.group").forEach((d) => {
+    const key = "grp:" + d.dataset.cap;
+    if (localStorage.getItem(key) === "1") d.open = true;
+    d.addEventListener("toggle", () => localStorage.setItem(key, d.open ? "1" : "0"));
+  });
+
+  function paintGroupSums() {
+    const key = (id) => { const el = $(id); const s = el ? el.textContent.trim() : ""; return s || (el && el.dataset.hint) || "—"; };
+    const opt = (id) => { const el = $(id); return el && el.selectedOptions[0] ? el.selectedOptions[0].textContent : "—"; };
+    const set = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
+    set("sumDet", [
+      key("detect").replace("识别: ", ""),
+      key("confVal"), key("hitVal") + "帧", opt("fpsSel").replace("（跑满）", ""),
+    ].join(" · "));
+    set("sumChar", key("charInfo") + " · 匹配 " + key("charVal"));
+    set("sumBot", [
+      "血 " + key("hpVal"), "蓝 " + key("mpVal"),
+      "攻 " + key("rngVal").replace("px", "") + "×" + key("hgtVal").replace("px", ""),
+      key("atkVal"), opt("inputSel") + "出口",
+      "拾取" + ($("pickBtn").classList.contains("on") ? "开" : "关"),
+      "巡逻" + ($("patrolBtn").classList.contains("on") ? "开" : "关"),
+    ].join(" · "));
+    set("sumKeys", [key("atkKey"), key("jumpKey"), key("pickKey"), "红" + key("potKeySlot"), "蓝" + key("mpKeySlot")].join(" "));
+  }
+  paintGroupSums();
+
   async function setBot(patch) {
     botLockUntil = Date.now() + 900;        // 这段时间内别让轮询把控件拽回去
     const r = await botFetch("/api/bot/set", {
@@ -2499,6 +2531,7 @@
                  stage: s.detect_stage, label: s.detect_stage_label,
                  pct: s.detect_progress, elapsed_ms: s.detect_elapsed_ms,
                  waiting: s.detect_waiting });
+      paintGroupSums();   // 收起的分组标题摘要跟着轮询刷新
       if (s.detect_loading) startDetProg(); else stopDetProg();
       $("targets").textContent = s.detect_enabled ? s.targets : "—";
       // 两个滑块以后端为准（可能被别的标签页 / 重启后的存盘改过），但拖动期间不覆盖
