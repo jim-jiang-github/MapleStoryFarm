@@ -18,6 +18,17 @@ import time
 import webbrowser
 from pathlib import Path
 
+
+# 抓屏坐标必须是物理像素，这一步要在抓屏/窗口调用之前做。
+# 不做的话，改过系统缩放后 GetClientRect 会返回放大后的值（实测 1366x768 被报成
+# 2049x1152），而 mss 按物理像素抓图，抓到的区域比窗口大一圈 → 画面混进别的窗口、
+# 人物框和屏蔽区全错位（表现就是「重启一下就好了」）。
+try:
+    ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+except Exception:  # noqa: BLE001  老系统没有这个函数
+    ctypes.windll.user32.SetProcessDPIAware()
+
+
 import cv2
 import mss
 import numpy as np
@@ -34,8 +45,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from track import Tracker  # noqa: E402  （见 webui/track.py：卡尔曼 + 匈牙利 + ByteTrack）
 import bot as botmod  # noqa: E402  （见 webui/bot.py：挂机按键与决策）
 
-
-ctypes.windll.user32.SetProcessDPIAware()
 
 SCREENSHOT = getattr(mss, "MSS", None) or getattr(mss, "mss")
 
