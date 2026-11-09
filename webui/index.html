@@ -482,7 +482,7 @@
                 <b class="cdel" id="charDel" title="删掉当前模板">×</b>
               </span>
               <b class="cneed" id="charNeed" title="点这里截图上传；也支持 Ctrl+V 粘贴 / 把图拖进来">⚠ 上传名字牌截图 · 点这里或 Ctrl+V</b>
-              <button id="roiBtn" class="mini" title="程序只会在你圈出来的一块区域里找「你的人物」。点这里，画面会变暗、出现一个亮框：拖四条边，把亮框收到人物会出现的那块就行，不用很精确。范围收小了认人更快更准，也不会把任务栏、聊天里印着的同名字错认成你的人物">调整</button>
+              <button id="roiBtn" class="mini" title="程序只会在你圈出来的一块区域里找「你的人物」。点这里，画面会变暗、出现一个亮框：拖四条边，把亮框收到人物会出现的那块就行，不用很精确。范围收小了认人更快更准，也不会把任务栏、聊天里印着的同名字错认成你的人物">人物识别区</button>
             </div>
             <div class="bar" data-k="hp"><span class="bk">HP</span><span class="bv">—</span><span class="btrack"><i></i><u class="mark" title="喝药线：血量掉到这条线就自动喝药"></u><u class="thr"></u></span></div>
             <div class="potrow" id="potChain" title="备用红药键 1~4：喝药键的药空了（按了血量没涨回来），就按这里的顺序换着按，直到喝上为止。点格子 → 按一个键即设置；再按 Del 清空、Esc 取消">
@@ -516,7 +516,7 @@
             </div>
             <div class="row"><span class="k">人物范围</span>
               <span class="v small">
-                <span id="charRoi" title="程序找「你的人物」时只在画面上的这一块里找（X 是左右、Y 是上下，都是占画面的百分比）。点血条上方的「调整」按钮可以在画面上拖出来改">整宽 · 8%~90%</span>
+                <span id="charRoi" title="程序找「你的人物」时只在画面上的这一块里找（X 是左右、Y 是上下，都是占画面的百分比）。点血条上方的「人物识别区」按钮可以在画面上拖出来改">整宽 · 8%~90%</span>
               </span>
             </div>
             <div class="row conf">
@@ -1223,7 +1223,7 @@
     const yTxt = `${Math.round(roi.y1 * 100)}%~${Math.round(roi.y2 * 100)}%`;
     $("charRoi").textContent = `${xTxt} · ${yTxt}`;
     $("charRoi").title =
-      `程序找「你的人物」时只在画面 X ${xTxt}、Y ${yTxt} 这一块里找。点血条上方的「调整」按钮可以在画面上拖出来改`;
+      `程序找「你的人物」时只在画面 X ${xTxt}、Y ${yTxt} 这一块里找。点血条上方的「人物识别区」按钮可以在画面上拖出来改`;
   }
 
   async function saveRoi() {
@@ -1254,7 +1254,7 @@
   async function stopRoiCal(revert) {
     if (!roiCal) return;
     roiCal = false;
-    $("roiBtn").textContent = "调整";
+    $("roiBtn").textContent = "人物识别区";
     $("roiBtn").classList.remove("on");
     maskLayer.style.cursor = "crosshair";
     const back = revert && roiOrig ? { ...roiOrig } : null;
