@@ -29,7 +29,16 @@ else:
 
 
 def _pick_data_dir():
-    """exe 旁边放 data/；那里不可写（比如装在 Program Files）就退到用户目录。"""
+    """exe 旁边放 data/；那里不可写（比如装在 Program Files）就退到用户目录。
+
+    MAPLE_DATA_DIR 环境变量优先级最高：无头自测（tools/test_headless.py）用它把
+    配置/标定/日志全部指到临时目录，跑多少遍都不会碰仓库里真实的那几份 json。
+    """
+    env = os.environ.get("MAPLE_DATA_DIR", "").strip()
+    if env:
+        p = Path(env)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
     if not FROZEN:
         return RES_DIR
     cand = Path(sys.executable).resolve().parent / "data"

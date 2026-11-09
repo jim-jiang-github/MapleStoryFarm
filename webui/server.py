@@ -2384,7 +2384,9 @@ def detect_loop():
 # 服务一起来就在后台把模型热好（不推理真画面，只把库导入、模型编译、引擎建起来）。
 # 这样用户点「识别」时不用先干等十几秒——等待被挪到了启动阶段，而那个阶段本来
 # 就在等窗口/等页面打开。失败没关系，点开时检测线程会再试一次并显示报错。
-threading.Thread(target=preload_det, daemon=True, name="det-preload").start()
+# MAPLE_HEADLESS=1（无头自测）时跳过：测试会注入假 YOLO，不碰真模型。
+if os.environ.get("MAPLE_HEADLESS") != "1":
+    threading.Thread(target=preload_det, daemon=True, name="det-preload").start()
 
 
 app = FastAPI(title="Capture Preview")
