@@ -234,3 +234,7 @@ webui/masks.json.tmp
 webui/chartpl.png
 webui/charconf.json
 /.tmpchk
+
+# EXP 走势历史（运行时数据，自动增长与裁剪，不进版本库）
+webui/explog.jsonl
+webui/explog.tmp

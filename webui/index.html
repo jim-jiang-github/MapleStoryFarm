@@ -296,6 +296,14 @@
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     font-variant-numeric: tabular-nums;
   }
+  /* EXP 窗口档位：血条列只有 158px 宽，做成迷你下拉 */
+  #expWin {
+    flex: none; height: 16px; padding: 0 1px;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: #fff; color: var(--hint);
+    font-size: 10px; font-family: inherit; cursor: pointer;
+  }
+  #expWin:hover { border-color: #a8a29e; }
   #expChart { display: block; width: 100%; height: 46px; }
   button:disabled { opacity: .55; cursor: default; }
   button.on { background: #eaf3de; border-color: #b5cf8f; }
@@ -539,7 +547,7 @@
             </div>
             <div class="bar" data-k="exp"><span class="bk">EXP</span><span class="bv">—</span><span class="btrack"><i></i></span></div>
             <div class="trend">
-              <div class="cap"><span id="expCap">EXP 变化</span><span class="sub" id="expRange">—</span></div>
+              <div class="cap"><span id="expCap">EXP 变化</span><select id="expWin" title="走势图的时间窗口。数据记在服务端（保留 24 小时），页面刷新、服务重启都不会丢，不开页面也在记"><option value="600000">10分</option><option value="3600000">1时</option><option value="28800000">8时</option><option value="86400000">24时</option></select><span class="sub" id="expRange">—</span></div>
               <canvas id="expChart"></canvas>
             </div>
           </div>
@@ -1511,24 +1519,44 @@
     });
   }
 
-  /* ---- EXP 走势：每 2 秒记一个点，窗口 10 分钟 ----
-     经验条涨得慢，纵轴按窗口内的实际范围自适应；固定 0~100 会看成一条贴着
-     100% 的直线，什么都看不出来。 */
-  const EXP_WIN_MS = 10 * 60 * 1000;
-  const EXP_STEP_MS = 2000;
-  const expHist = [];             // [{t, v}]
-  let expLastAt = 0;
+  /* ---- EXP 走势：数据记在服务端（explog.jsonl，保留 24h），
+     页面刷新 / 服务重启都不丢，页面不开也在记。
+     这里按所选窗口拉一次全量，之后靠 /api/bars 里的 exp_last 增量追加。
+     纵轴按窗口内的实际范围自适应；固定 0~100 会看成一条贴着 100% 的直线。 */
+  let EXP_WIN_MS = 10 * 60 * 1000;
+  const expHist = [];             // [[t, v]]
+  let expLastT = 0;
 
-  function recordExp(v) {
-    if (typeof v !== "number" || !isFinite(v)) return;
-    const now = Date.now();
-    if (expHist.length && now - expLastAt < EXP_STEP_MS) return;
-    expLastAt = now;
-    expHist.push({ t: now, v });
-    const cut = now - EXP_WIN_MS;
-    while (expHist.length && expHist[0].t < cut) expHist.shift();
+  function expTrim() {
+    const cut = Date.now() - EXP_WIN_MS;
+    while (expHist.length && expHist[0][0] < cut) expHist.shift();
+  }
+
+  function recordExp(p) {         // p: [t, v]，来自 /api/bars 的 exp_last
+    if (!Array.isArray(p) || typeof p[1] !== "number" || typeof p[0] !== "number") return;
+    if (p[0] <= expLastT) return; // 旧点/重复点跳过
+    expLastT = p[0];
+    expHist.push(p);
+    expTrim();
     drawExpChart();
   }
+
+  async function loadExpHistory() {
+    try {
+      const r = await (await fetch(`/api/exp?ms=${EXP_WIN_MS}`, { cache: "no-store" })).json();
+      expHist.length = 0;
+      (r.points || []).forEach((p) => {
+        if (typeof p[1] === "number") expHist.push(p);
+      });
+      expLastT = expHist.length ? expHist[expHist.length - 1][0] : 0;
+      drawExpChart();
+    } catch (e) { /* 服务未就绪：等下一轮轮询再补 */ }
+  }
+
+  $("expWin").addEventListener("change", () => {
+    EXP_WIN_MS = parseInt($("expWin").value, 10);
+    loadExpHistory();
+  });
 
   function drawExpChart() {
     const cv = $("expChart");
@@ -1552,17 +1580,17 @@
       return;
     }
     let rawLo = Infinity, rawHi = -Infinity;
-    expHist.forEach((p) => { rawLo = Math.min(rawLo, p.v); rawHi = Math.max(rawHi, p.v); });
+    expHist.forEach((p) => { rawLo = Math.min(rawLo, p[1]); rawHi = Math.max(rawHi, p[1]); });
     let lo = rawLo, hi = rawHi;
     if (hi - lo < 0.5) { lo -= 0.3; hi += 0.3; }      // 几乎没变化时给点纵向余量
     const pad = 4;
     const y = (v) => ch - pad - ((v - lo) / (hi - lo)) * (ch - pad * 2);
     const line = (close) => {
       ctx.beginPath();
-      expHist.forEach((p, i) => (i ? ctx.lineTo(x(p.t), y(p.v)) : ctx.moveTo(x(p.t), y(p.v))));
+      expHist.forEach((p, i) => (i ? ctx.lineTo(x(p[0]), y(p[1])) : ctx.moveTo(x(p[0]), y(p[1]))));
       if (close) {
-        ctx.lineTo(x(expHist[expHist.length - 1].t), ch);
-        ctx.lineTo(x(expHist[0].t), ch);
+        ctx.lineTo(x(expHist[expHist.length - 1][0]), ch);
+        ctx.lineTo(x(expHist[0][0]), ch);
         ctx.closePath();
       }
     };
@@ -1579,7 +1607,7 @@
 
     const last = expHist[expHist.length - 1];
     ctx.beginPath();
-    ctx.arc(x(last.t), y(last.v), 2.2, 0, Math.PI * 2);
+    ctx.arc(x(last[0]), y(last[1]), 2.2, 0, Math.PI * 2);
     ctx.fillStyle = "#65a30d";
     ctx.fill();
 
@@ -1592,7 +1620,7 @@
       const r = await (await fetch("/api/bars", { cache: "no-store" })).json();
       barsCfg = r.bars || {};
       renderBars(r.values);
-      recordExp(r.values ? r.values.exp : null);
+      recordExp(r.exp_last);      // 服务端记录的最新 EXP 点（重启/刷新不丢）
       barsFail = 0;
       try { sessionStorage.removeItem("selfReload"); } catch (e) {}
     } catch (e) {
@@ -2540,6 +2568,7 @@
   setInterval(tick, 1000);
 
   pollBars();                       // 血蓝经验条读数：独立轮询，比统计信息快一档
+  loadExpHistory();                 // EXP 走势：先把服务端存的历史拉进来画
   setInterval(pollBars, 400);
 
   /* 自愈：轮询的 try/catch 会把错误全吞掉，脚本挂了页面就僵在旧状态

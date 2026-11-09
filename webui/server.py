@@ -844,6 +844,77 @@ bar_state = {
 }
 _bar_thread_started = [False]
 
+# ---------- EXP 走势历史：服务端记录 + 落盘（保留 24h，页面刷新/重启都不丢） ----------
+# EXP 是慢变量：数值变了才记点，另外每 60 秒补一个锚点（画「没变化」的平线用）。
+# 一天通常几千点、几十 KB；文件按行追加（JSONL），每小时整一次（剪掉过期行）。
+EXP_KEEP_MS = 24 * 3600 * 1000
+EXP_ANCHOR_MS = 60 * 1000
+EXP_COMPACT_SEC = 3600.0
+EXP_FILE = apppaths.DATA_DIR / "explog.jsonl"
+exp_hist = []                   # [[t_ms, v], ...] 时间升序
+exp_lock = threading.Lock()
+_exp_last = {"v": None, "t": 0}
+_exp_compact_at = [0.0]
+
+
+def _exp_load():
+    if not EXP_FILE.exists():
+        return
+    cut = int(time.time() * 1000) - EXP_KEEP_MS
+    try:
+        with open(EXP_FILE, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    t, v = json.loads(line)
+                except Exception:
+                    continue
+                if t >= cut and isinstance(v, (int, float)):
+                    exp_hist.append([t, v])
+    except OSError:
+        pass
+
+
+def _exp_compact():
+    """把文件重写成保留窗口内的点（去掉过期行），写坏也不影响内存里的数据。"""
+    tmp = EXP_FILE.with_suffix(".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            for t, v in exp_hist:
+                f.write(json.dumps([t, v], separators=(",", ":")) + "\n")
+        tmp.replace(EXP_FILE)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def exp_record(v):
+    if v is None:
+        return
+    now = int(time.time() * 1000)
+    last_v, last_t = _exp_last["v"], _exp_last["t"]
+    if last_v is not None and v == last_v and now - last_t < EXP_ANCHOR_MS:
+        return                  # 数值没变且还没到锚点间隔：不记
+    pt = [now, v]
+    with exp_lock:
+        exp_hist.append(pt)
+        while exp_hist and exp_hist[0][0] < now - EXP_KEEP_MS:
+            exp_hist.pop(0)
+        try:
+            with open(EXP_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(pt, separators=(",", ":")) + "\n")
+        except OSError:
+            pass                # 磁盘异常别把采血线程带崩
+        if time.time() - _exp_compact_at[0] > EXP_COMPACT_SEC:
+            _exp_compact_at[0] = time.time()
+            _exp_compact()
+    _exp_last["v"], _exp_last["t"] = v, now
+
+
+_exp_load()
+
+
 BAR_CHECK_EVERY = 20        # 每 20 帧（约 2s）做一次自检
 BAR_RETRY_SEC = 5.0         # 自检不过时，最多每 5s 重定位一次，别把 CPU 吃满
 
@@ -911,6 +982,7 @@ def bars_loop():
         with bar_lock:
             bar_state["values"] = vals
             bar_state["updated"] = time.time()
+        exp_record(vals.get("exp"))
         n += 1
         dt = time.perf_counter() - t0
         if dt >= 2.0:
@@ -2492,6 +2564,8 @@ async def bars_get():
     with bar_lock:
         vals = dict(bar_state["values"])
         source = BAR_META.get("source", "auto")
+    with exp_lock:
+        exp_last = list(exp_hist[-1]) if exp_hist else None
     return JSONResponse({
         "bars": bar_snapshot(),
         "values": vals,
@@ -2502,7 +2576,18 @@ async def bars_get():
         "source": source,
         "note": bar_state["note"],
         "error": bar_state["error"],
+        "exp_last": exp_last,
     })
+
+
+@app.get("/api/exp")
+async def exp_get(ms: int = 600000):
+    """返回窗口内的 EXP 走势点（[[t_ms, v], ...]）。窗口上限就是落盘保留的 24h。"""
+    ms = max(60_000, min(int(ms), EXP_KEEP_MS))
+    cut = int(time.time() * 1000) - ms
+    with exp_lock:
+        pts = [list(p) for p in exp_hist if p[0] >= cut]
+    return JSONResponse({"points": pts, "keep_hours": EXP_KEEP_MS // 3600000})
 
 
 @app.post("/api/bars/set")
