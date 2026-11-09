@@ -487,10 +487,6 @@
               <span class="k">人物匹配</span>
               <span class="v"><input id="charRange" class="rng" type="range" min="0.40" max="0.98" step="0.01" value="0.80" title="名字牌模板的匹配分门限。名字牌这种固定字体稳定在 0.95 以上，低于 0.85 基本是认错地方；标记忽有忽无就往下调一点"><b id="charVal">0.80</b></span>
             </div>
-            <div class="row"><span class="k">瞬现过滤</span><span class="v" id="pending">—</span></div>
-            <div class="row"><span class="k">推理模式</span><span class="v small" id="mode">—</span></div>
-            <div class="row"><span class="k">类别</span><span class="v small" id="classes">—</span></div>
-            <div class="row"><span class="k">锁定目标</span><span class="v small" id="lock">—</span></div>
             <div class="row"><span class="k">人物</span>
               <span class="v small"><span id="charInfo">未设置</span></span>
             </div>
@@ -2264,19 +2260,6 @@
           paintHits(s.show_hits);
         }
       }
-      $("pending").textContent = s.detect_enabled
-        ? (s.pending ? `${s.pending} 个待确认` : "0")
-        : "—";
-      $("classes").textContent = s.detect_enabled
-        ? (s.detect_loading
-            ? `${s.detect_stage_label || "启动中"}… ${s.detect_progress || 0}%`
-            : (s.detect_error || s.top_classes.join("　") || "无"))
-        : "—";
-      const lk = s.lock;
-      $("lock").textContent = s.detect_enabled
-        ? (s.detect_loading ? "—" : (lk ? `#${lk.tid} ${lk.name} ${lk.conf}` : "无"))
-        : "—";
-      $("mode").textContent = s.mode === "accurate" ? "精度 544×960" : "速度 384×672";
       paintChar(s.char);          // 人物定位状态（有无模板 / 匹配分 / 是否已定位）
       $("modeBtn").textContent = "模式: " + s.mode_label;
       $("modeBtn").className = s.mode === "accurate" ? "on" : "";
