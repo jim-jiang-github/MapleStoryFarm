@@ -1799,8 +1799,7 @@
     const d = drag;
     drag = null;
     if (d.mode === "roi") {
-      const moved = Math.abs(roi.y1 - d.orig.y1) > 1e-4
-                 || Math.abs(roi.y2 - d.orig.y2) > 1e-4;
+      const moved = ["x1", "y1", "x2", "y2"].some((k) => Math.abs(roi[k] - d.orig[k]) > 1e-4);
       if (moved) saveRoi();             // 松手即存：后端立刻按新范围重找，能马上看到效果
       else drawMasks();
       return;
