@@ -3084,7 +3084,9 @@ def lan_ipv4():
 
 if __name__ == "__main__":
     local = f"http://127.0.0.1:{PORT}"
-    want_open = "--open" in sys.argv
+    # 打包成 exe 之后用户就是双击运行的，不会记得加 --open；
+    # 不自动开页面的话，双击只会看到一块黑框，还得自己去浏览器敲地址。
+    want_open = ("--open" in sys.argv) or getattr(sys, "frozen", False)
 
     if port_busy("127.0.0.1", PORT):
         print(f"already running -> {local}")
