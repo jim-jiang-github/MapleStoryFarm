@@ -373,9 +373,10 @@
   .bars { position: relative; }
   .charpot {
     /* 三条血条在这一列里垂直居中，上方余量 = (列高 - 三条高) / 2。
-       投放位贴在这块余量的下沿（离血条 14px 左右），别飘到面板顶上。 */
+       投放位贴在这块余量的下沿（离血条 14px 左右），别飘到面板顶上。
+       靠左排：名字牌缩略图 + 「调整」按钮一行，不居中了。 */
     position: absolute; left: 0; right: 0; bottom: calc(50% + 46px);
-    display: flex; justify-content: center;
+    display: flex; justify-content: flex-start; align-items: center; gap: 8px;
   }
   .cwrap { display: flex; align-items: center; justify-content: flex-end; gap: 7px; overflow: visible; }
   .ctpl { position: relative; display: inline-flex; flex: 0 0 auto; cursor: pointer; }
@@ -471,13 +472,15 @@
         <!-- 宽屏：血条在左、指标在右并排；手机屏（≤560px）自动变回上下排列 -->
         <div class="gauge">
           <div class="bars" id="bars">
-            <!-- 人物模板的入口就放在血条上方这块空白里：没模板是提示块，有模板是缩略图 -->
+            <!-- 人物模板的入口就放在血条上方这块空白里：没模板是提示块，有模板是缩略图；
+                 右边跟着「调整」按钮（调搜索范围用） -->
             <div class="charpot">
               <span class="ctpl" id="charTpl" hidden title="当前人物模板：点图换一张">
                 <img id="charImg" alt="人物模板" />
                 <b class="cdel" id="charDel" title="删掉当前模板">×</b>
               </span>
               <b class="cneed" id="charNeed" title="点这里截图上传；也支持 Ctrl+V 粘贴 / 把图拖进来">⚠ 上传名字牌截图 · 点这里或 Ctrl+V</b>
+              <button id="roiBtn" class="mini" title="程序只会在你圈出来的一块区域里找「你的人物」。点这里，画面会变暗、出现一个亮框：拖四条边，把亮框收到人物会出现的那块就行，不用很精确。范围收小了认人更快更准，也不会把任务栏、聊天里印着的同名字错认成你的人物">调整</button>
             </div>
             <div class="bar" data-k="hp"><span class="bk">HP</span><span class="bv">—</span><span class="btrack"><i></i><u class="mark" title="喝药线：血量掉到这条线就自动喝药"></u><u class="thr"></u></span></div>
             <div class="potrow" id="potChain" title="备用药水键 1~5：喝药键的药空了（按了血量没涨回来），就按这里的顺序换着按，直到喝上为止。点格子 → 按一个键即设置；再按 Del 清空、Esc 取消">
@@ -508,8 +511,7 @@
             </div>
             <div class="row"><span class="k">人物范围</span>
               <span class="v small">
-                <span id="charRoi" title="只在这一块矩形里找名字牌（四边可调）。范围外的同名文字（小地图/任务栏/聊天）不会被误认">整宽 · 8%~90%</span>
-                <button id="roiBtn" class="mini" title="在画面上拖动四条边线，把范围收到人物可能出现的那一块">调整</button>
+                <span id="charRoi" title="程序找「你的人物」时只在画面上的这一块里找（X 是左右、Y 是上下，都是占画面的百分比）。点血条上方的「调整」按钮可以在画面上拖出来改">整宽 · 8%~90%</span>
               </span>
             </div>
             <div class="row conf">
@@ -1196,7 +1198,7 @@
     const yTxt = `${Math.round(roi.y1 * 100)}%~${Math.round(roi.y2 * 100)}%`;
     $("charRoi").textContent = `${xTxt} · ${yTxt}`;
     $("charRoi").title =
-      `只在画面 X ${xTxt}、Y ${yTxt} 这一块里找名字牌；范围外的同名文字（小地图/任务栏/聊天）不会被认成人物`;
+      `程序找「你的人物」时只在画面 X ${xTxt}、Y ${yTxt} 这一块里找。点血条上方的「调整」按钮可以在画面上拖出来改`;
   }
 
   async function saveRoi() {
