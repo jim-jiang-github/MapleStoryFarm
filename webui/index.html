@@ -304,6 +304,9 @@
     font-size: 10px; font-family: inherit; cursor: pointer;
   }
   #expWin:hover { border-color: #a8a29e; }
+  /* 标题不许换行（158px 列里塞标题+档位+区间，默认会挤成两行）；区间文字超宽就省略 */
+  #expCap { white-space: nowrap; }
+  #expRange { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #expChart { display: block; width: 100%; height: 46px; }
   button:disabled { opacity: .55; cursor: default; }
   button.on { background: #eaf3de; border-color: #b5cf8f; }
@@ -547,7 +550,7 @@
             </div>
             <div class="bar" data-k="exp"><span class="bk">EXP</span><span class="bv">—</span><span class="btrack"><i></i></span></div>
             <div class="trend">
-              <div class="cap"><span id="expCap">EXP 变化</span><select id="expWin" title="走势图的时间窗口。数据记在服务端（保留 24 小时），页面刷新、服务重启都不会丢，不开页面也在记"><option value="600000">10分</option><option value="3600000">1时</option><option value="28800000">8时</option><option value="86400000">24时</option></select><span class="sub" id="expRange">—</span></div>
+              <div class="cap"><span id="expCap">EXP 变化</span><select id="expWin" title="走势图的时间窗口，选过会记住（保存在本机浏览器）。数据记在服务端（保留 24 小时），页面刷新、服务重启都不会丢，不开页面也在记"><option value="3600000">1时</option><option value="28800000" selected>8时</option><option value="86400000">24时</option></select><span class="sub" id="expRange">—</span></div>
               <canvas id="expChart"></canvas>
             </div>
           </div>
@@ -1523,7 +1526,14 @@
      页面刷新 / 服务重启都不丢，页面不开也在记。
      这里按所选窗口拉一次全量，之后靠 /api/bars 里的 exp_last 增量追加。
      纵轴按窗口内的实际范围自适应；固定 0~100 会看成一条贴着 100% 的直线。 */
-  let EXP_WIN_MS = 10 * 60 * 1000;
+  let EXP_WIN_MS = 8 * 3600 * 1000;   // 默认 8 小时；上次选过的档位存在本机浏览器里
+  try {
+    const saved = parseInt(localStorage.getItem("expWin") || "", 10);
+    if ([3600000, 28800000, 86400000].includes(saved)) {
+      EXP_WIN_MS = saved;
+      $("expWin").value = String(saved);
+    }
+  } catch (e) { /* 隐私模式等拿不到 localStorage：用默认 8 时 */ }
   const expHist = [];             // [[t, v]]
   let expLastT = 0;
 
@@ -1555,6 +1565,7 @@
 
   $("expWin").addEventListener("change", () => {
     EXP_WIN_MS = parseInt($("expWin").value, 10);
+    try { localStorage.setItem("expWin", String(EXP_WIN_MS)); } catch (e) { /* 存不下就算了 */ }
     loadExpHistory();
   });
 
