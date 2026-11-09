@@ -7,6 +7,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webui"))
 import bot  # noqa: E402
 
 CHAR = [600, 300, 660, 320]          # 人物名字牌：中心 (630, 310)
+# 攻击/跳/拾取的键现在在面板上可配，断言一律从 DEFAULTS 取，别写死
+ATK = bot.DEFAULTS["atk_key"]        # ControlLeft
+JUMP = bot.DEFAULTS["jump_key"]      # AltLeft
+PICK = bot.DEFAULTS["pick_key"]      # KeyZ
 calls = []
 
 
@@ -32,12 +36,12 @@ def step(b, now=None, **kw):
 
 
 def down_keys(c):
-    # 拾取 Z 是每帧都可能按的，跟其它动作不冲突；除专门测拾取的用例，这里都剔掉
-    return [n for n, d in c if d and n != "pick"]
+    # 拾取键是每帧都可能按的，跟其它动作不冲突；除专门测拾取的用例，这里都剔掉
+    return [n for n, d in c if d and n != PICK]
 
 
 def up_keys(c):
-    return [n for n, d in c if not d and n != "pick"]
+    return [n for n, d in c if not d and n != PICK]
 
 
 def settle(b, ms=200):
@@ -79,18 +83,18 @@ check("状态是转身朝目标", b.snapshot()[1]["act"] == "转身朝目标", b
 
 print("[1b] 刚转完身的那一帧仍然不打（等游戏把朝向渲染出来）")
 c = step(b, m=mon)
-check("这一帧不出手", "attack" not in down_keys(c), c)
+check("这一帧不出手", ATK not in down_keys(c), c)
 check("状态是等朝向生效", b.snapshot()[1]["act"] == "等朝向生效", b.snapshot()[1])
 
 print("[1c] 过了 130ms 才按 Ctrl")
 settle(b)
 c = step(b, m=mon)
-check("这一帧按了 Ctrl", down_keys(c) == ["attack"], c)
+check("这一帧按了 Ctrl", down_keys(c) == [ATK], c)
 check("状态是攻击", b.snapshot()[1]["act"] == "攻击", b.snapshot()[1])
 
 print("[2] 攻击冷却：紧接着再来一帧不应重复攻击")
 c = step(b, m=mon)
-check("这一帧没攻击", "attack" not in down_keys(c), c)
+check("这一帧没攻击", ATK not in down_keys(c), c)
 check("状态是等冷却", b.snapshot()[1]["act"] == "等冷却", b.snapshot()[1])
 
 print("[3] 怪在左边、距离内 → 先左转，等朝向生效再打")
@@ -100,7 +104,7 @@ c = step(b, m=left_mon)
 check("第一帧点左方向", down_keys(c) == ["left"], c)
 settle(b)
 c = step(b, m=left_mon)
-check("第二帧才攻击", down_keys(c) == ["attack"], c)
+check("第二帧才攻击", down_keys(c) == [ATK], c)
 
 print("[3b] 重新拿回焦点后朝向记忆作废：第一帧必须重新转身")
 b = make()
@@ -117,12 +121,12 @@ check("状态是走向目标", b.snapshot()[1]["act"] == "走向目标", b.snaps
 print("[5] 进入范围后松开方向键")
 c = step(b, m=[{"name": "Stump", "box": [690, 300, 750, 360], "conf": 0.9}])
 check("右方向先松开", up_keys(c)[0] == "right", c)
-check("然后攻击", "attack" in down_keys(c), c)
+check("然后攻击", ATK in down_keys(c), c)
 
 print("[6] 纵向差距过大（上下层）→ 不把它当目标")
 b = make()
 c = step(b, m=[{"name": "Stump", "box": [740, 600, 800, 660], "conf": 0.9}])   # dy≈325
-check("不攻击上层怪", "attack" not in down_keys(c), c)
+check("不攻击上层怪", ATK not in down_keys(c), c)
 check("去巡逻/守株待兔", b.snapshot()[1]["act"] in ("巡逻找怪", "守株待兔"),
       b.snapshot()[1])
 
@@ -130,24 +134,24 @@ print("[6b] 头顶差得不多的怪 → 跳起来打（不走路、不出手）
 b = make()
 top_mon = [{"name": "Snail", "box": [690, 130, 750, 190], "conf": 0.8}]   # 怪底 190，离攻击区顶 2.5px
 c = step(b, m=top_mon)
-check("按了跳 (Alt)", ("jump", True) in c, c)
-check("没按方向/攻击", not any(k in ("attack", "left", "right") for k in down_keys(c)), c)
+check("按了跳 (Alt 键)", (JUMP, True) in c, c)
+check("没按方向/攻击", not any(k in (ATK, "left", "right") for k in down_keys(c)), c)
 check("状态是跳起攻击", b.snapshot()[1]["act"] == "跳起攻击", b.snapshot()[1])
 c = step(b, m=top_mon)
-check("跳跃冷却内不再按跳", ("jump", True) not in c, c)
+check("跳跃冷却内不再按跳", (JUMP, True) not in c, c)
 
 print("[6c] 头顶差太多的怪（超出跳跃判定框）→ 根本不进决策，去巡逻")
 b = make()
 high_mon = [{"name": "Snail", "box": [690, 0, 750, 40], "conf": 0.8}]    # 怪底 40 < 候选带顶 52.5
 c = step(b, m=high_mon)
-check("不跳不出手", ("jump", True) not in c and "attack" not in down_keys(c), c)
+check("不跳不出手", (JUMP, True) not in c and ATK not in down_keys(c), c)
 check("状态去巡逻了", b.snapshot()[1]["act"] in ("巡逻找怪", "守株待兔"), b.snapshot()[1])
 
 print("[6d] 正下方下一层的怪 → 站住提示高度够不着，不走不跳不打")
 b = make()
 low_mon = [{"name": "Snail", "box": [690, 320, 750, 380], "conf": 0.8}]  # 怪顶 320 > 攻击区底 312.5
 c = step(b, m=low_mon)
-check("不出手不跳", "attack" not in down_keys(c) and ("jump", True) not in c, c)
+check("不出手不跳", ATK not in down_keys(c) and (JUMP, True) not in c, c)
 check("不按方向", not any(k in ("left", "right") for k in down_keys(c)), c)
 check("状态是高度够不着", b.snapshot()[1]["act"] == "高度够不着", b.snapshot()[1])
 
@@ -155,7 +159,7 @@ print("[7] 血低于 40% → 喝 8")
 b = make()
 c = step(b, hp=30.0)
 check("按 8 且不干别的", down_keys(c)[0] == "pot8"
-      and not any(k in down_keys(c) for k in ("attack", "right")), c)
+      and not any(k in down_keys(c) for k in ("ControlLeft", "right")), c)
 
 print("[8] 喝药冷却：距上次不到 3 秒不再按")
 c = step(b, hp=35.0)
@@ -172,10 +176,10 @@ check("没按药", not any(k.startswith("pot") for k in down_keys(c)), c)
 print("[10] 拾取默认全程按 Z")
 b = make()
 c = step(b)
-check("按了 Z", "pick" in [n for n, d in c if d], c)
+check("按了拾取键", PICK in [n for n, d in c if d], c)
 b.cfg["pick"] = False
 c = step(b)
-check("关掉后不按 Z", "pick" not in [n for n, d in c if d], c)
+check("关掉后不按拾取键", PICK not in [n for n, d in c if d], c)
 
 print("[11] 失焦 → 立刻松开按住的键，且不发任何按键")
 b = make()
@@ -188,7 +192,7 @@ check("状态提示不在前台", b.snapshot()[1]["act"] == "游戏不在前台"
 print("[12] 没识别到人物 → 松键、不乱按")
 b = make()
 c = step(b, char=None)
-check("不按方向/攻击", not any(k in ("left", "right", "attack") for k in down_keys(c)), c)
+check("不按方向/攻击", not any(k in ("left", "right", ATK) for k in down_keys(c)), c)
 check("状态是找不到人物", b.snapshot()[1]["act"] == "找不到人物", b.snapshot()[1])
 
 print("[13] 巡逻：没怪时按住一个方向，到点换向")
@@ -248,7 +252,7 @@ check("状态是转身朝目标（没判成太远）",
       b.snapshot()[1]["act"] == "转身朝目标", b.snapshot()[1])
 check("状态里带真实朝向", b.snapshot()[1]["face"] == -1, b.snapshot()[1])
 c = step(b, now=t + 0.2, m=left_mon)
-check("对正后出刀", down_keys(c) == ["attack"], c)
+check("对正后出刀", down_keys(c) == [ATK], c)
 
 print("[19] 正前方模式每刀前重新对正（记忆说朝对了也要再点一次）")
 c = step(b, now=t + 0.3, m=left_mon)          # 冷却中
@@ -256,7 +260,7 @@ check("冷却中不重复转身", down_keys(c) == [], c)
 c = step(b, now=t + 0.7, m=left_mon)          # 420ms 冷却到
 check("冷却好了先重新对正", down_keys(c) == ["left"], c)
 c = step(b, now=t + 0.85, m=left_mon)
-check("对正之后才出刀", down_keys(c) == ["attack"], c)
+check("对正之后才出刀", down_keys(c) == [ATK], c)
 
 print("[20] 正前方模式 + 头顶的怪：先对正再起跳，别跳起来砍反方向")
 b = make()
@@ -264,7 +268,7 @@ b.cfg["range_side"] = "front"
 c = step(b, m=top_mon)
 check("先转身对正", down_keys(c) == ["right"], c)
 c = step(b, m=top_mon)
-check("对正后按跳", ("jump", True) in c, c)
+check("对正后按跳", (JUMP, True) in c, c)
 
 print("[21] 攻击方向的取值校验")
 check("front 合法", bot.clamp_cfg({"range_side": "front"})["range_side"] == "front")

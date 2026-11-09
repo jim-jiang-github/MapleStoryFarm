@@ -1,8 +1,22 @@
 {
   "on": false,
-  "hp_pct": 40.0,
+  "hp_pct": 55.0,
   "pot_sec": 3.0,
   "pot_key": "pot8",
+  "pot_chain": [
+    "Digit5",
+    "Digit6",
+    "Digit7",
+    "Digit8"
+  ],
+  "mp_pct": 30.0,
+  "mp_key": "pot9",
+  "mp_chain": [
+    "Digit9",
+    "Digit0",
+    "",
+    ""
+  ],
   "range_px": 100.0,
   "range_h": 130,
   "range_side": "both",

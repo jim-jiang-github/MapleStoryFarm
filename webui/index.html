@@ -165,20 +165,21 @@
   }
   /* 给三角留出探出轨道的余量，别怼到 MP 条上 */
   .bar[data-k="hp"] { margin-bottom: 3px; }
-  /* 备用药水键 1~5：贴在 HP 条下面的五个小格子 */
+  /* 键位格子：药水链贴在 HP/MP 条下面，动作键（攻击/跳/拾取/喝药主键）在面板里 */
   .potrow { display: flex; gap: 4px; }
-  .potrow .slot {
+  .slot {
     flex: 1 1 0; min-width: 0; height: 17px;
     border: 1px solid var(--border); border-radius: 4px;
     background: #fff; color: var(--hint);
     font-size: 10px; line-height: 15px; text-align: center;
-    cursor: pointer; padding: 0; font-family: inherit;
+    cursor: pointer; padding: 0 6px; font-family: inherit;
     font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden;
   }
-  .potrow .slot:hover { border-color: #dc2626; color: var(--muted); }
-  .potrow .slot.set { color: var(--text); font-weight: 600; }
-  .potrow .slot.rec { border-color: #dc2626; background: #fef2f2; color: #dc2626; }
-  .potrow .slot.rec::after { content: " 按键…"; }
+  .row .slot { flex: 0 0 64px; }
+  .slot:hover { border-color: #dc2626; color: var(--muted); }
+  .slot.set { color: var(--text); font-weight: 600; }
+  .slot.rec { border-color: #dc2626; background: #fef2f2; color: #dc2626; }
+  .slot.rec::after { content: " 按键…"; }
   .btrack i {
     display: block; height: 100%; width: 0;
     border-radius: 999px;
@@ -542,16 +543,28 @@
               <span class="v"><input id="atkRange" class="rng" type="range" min="150" max="1200" step="10" value="420" title="两次攻击的最小间隔（毫秒）。太小会一直按着打不出伤害，太大浪费输出"><b id="atkVal">420ms</b></span>
             </div>
             <div class="row conf">
-              <span class="k">喝药用键</span>
-              <span class="v"><select id="potSel" title="血低了按哪个键喝药（三个键都在你手上就选一个）"><option value="pot8">8</option><option value="pot9">9</option><option value="pot0">0</option></select></span>
+              <span class="k">攻击键</span>
+              <span class="v"><button id="atkKey" class="slot" data-hint="Ctrl" title="出刀按的键，跟游戏里键盘设置的「攻击」对应。点格子 → 按一个键即设置；Del 清空退回默认、Esc 取消" data-cfg="atk_key" data-def="ControlLeft"></button></span>
+            </div>
+            <div class="row conf">
+              <span class="k">跳跃键</span>
+              <span class="v"><button id="jumpKey" class="slot" data-hint="Alt" title="头顶的怪跳起来打时按的键，跟游戏里的「跳跃」对应。点格子 → 按一个键即设置" data-cfg="jump_key" data-def="AltLeft"></button></span>
+            </div>
+            <div class="row conf">
+              <span class="k">拾取键</span>
+              <span class="v"><button id="pickKey" class="slot" data-hint="Z" title="挂机全程按这个键捡东西，跟游戏里的「拾取」对应。点格子 → 按一个键即设置" data-cfg="pick_key" data-def="KeyZ"></button></span>
+            </div>
+            <div class="row conf">
+              <span class="k">红药用键</span>
+              <span class="v"><button id="potKeySlot" class="slot" data-hint="8" title="血低了按哪个键喝红药（就是 HP 条上方游戏快捷槽里的键）。点格子 → 按一个键即设置" data-cfg="pot_key" data-def="pot8"></button></span>
+            </div>
+            <div class="row conf">
+              <span class="k">蓝药用键</span>
+              <span class="v"><button id="mpKeySlot" class="slot" data-hint="9" title="蓝量低于「蓝线」时按哪个键喝蓝药。点格子 → 按一个键即设置" data-cfg="mp_key" data-def="pot9"></button></span>
             </div>
             <div class="row conf">
               <span class="k">蓝线</span>
               <span class="v"><input id="mpRange" class="rng" type="range" min="10" max="95" step="5" value="30" title="蓝量低于这个百分比就喝蓝药；读不到蓝量（蓝条没标定）时不会瞎按"><b id="mpVal">30%</b></span>
-            </div>
-            <div class="row conf">
-              <span class="k">蓝药用键</span>
-              <span class="v"><select id="mpSel" title="蓝低了按哪个键喝蓝药"><option value="pot8">8</option><option value="pot9">9</option><option value="pot0">0</option></select></span>
             </div>
             <div class="row conf">
               <span class="k">拾取 Z</span>
@@ -2091,13 +2104,6 @@
     inp.addEventListener("change", () => { clearTimeout(timer); send(); });
   }
 
-  $("potSel").addEventListener("change", () => {
-    setBot({ pot_key: $("potSel").value }).catch(botFail);
-  });
-  $("mpSel").addEventListener("change", () => {
-    setBot({ mp_key: $("mpSel").value }).catch(botFail);
-  });
-
   /* 血线三角直接在 HP 条上拖：按住左右滑，松手落库。
      拖动时只是改 #hpRange 的值再派发 input/change，右侧滑块的保存、
      回显、botLock 防回弹逻辑原样生效，不写第二份。 */
@@ -2134,24 +2140,19 @@
     });
   })();
 
-  /* 备用药水键 1~4（红药在 HP 条下 / 蓝药在 MP 条下）：点格子 → 按一个键 → 存链。
-     bot 侧规则：主键按了血/蓝量没涨回来（药空了），就按这里的顺序换着按到喝上为止。
+  /* 键位录制：点格子 → 按一个键 → 存进对应配置。共用一套逻辑的有——
+     两条备用药水链（红/蓝，4 格）+ 五个动作键（攻击/跳跃/拾取/红药主键/蓝药主键）。
    键名收的是 KeyboardEvent.code，跟 bot.py 的 CODE_VK 白名单一一对应。 */
-  const KEY_CODE_RE = /^(?:Key[A-Z]|Digit\d|Numpad\d|F(?:[1-9]|1[0-2])|Insert|Delete|Home|End|PageUp|PageDown|Shift(?:Left|Right)|Control(?:Left|Right)|Space|Enter|Semicolon|Quote|Comma|Period|Slash|Backslash|BracketLeft|BracketRight|Minus|Equal)$/;
-  const CHAINS = [
-    { root: $("potChain"), key: "pot_chain" },
-    { root: $("mpChain"), key: "mp_chain" },
-  ].filter((c) => c.root);
-  CHAINS.forEach((c) => {
-    c.slots = [...c.root.querySelectorAll(".slot")];
-    c.rec = -1;
-  });
+  const KEY_CODE_RE = /^(?:Key[A-Z]|Digit\d|Numpad\d|F(?:[1-9]|1[0-2])|Insert|Delete|Home|End|PageUp|PageDown|Shift(?:Left|Right)|Control(?:Left|Right)|Alt(?:Left|Right)|Space|Enter|Semicolon|Quote|Comma|Period|Slash|Backslash|BracketLeft|BracketRight|Minus|Equal)$/;
 
   function potKeyLabel(code) {
     return ({
+      pot8: "8", pot9: "9", pot0: "0",      // 旧版 VK 名，老配置里还会出现
       Insert: "Ins", Delete: "Del", Home: "Home", End: "End",
       PageUp: "PgUp", PageDown: "PgDn", Space: "空格", Enter: "回车",
-      ShiftLeft: "LSh", ShiftRight: "RSh", ControlLeft: "LCt", ControlRight: "RCt",
+      ShiftLeft: "LSh", ShiftRight: "RSh",
+      ControlLeft: "LCt", ControlRight: "RCt",
+      AltLeft: "LAt", AltRight: "RAt",
     })[code]
       || (code.startsWith("Key") ? code.slice(3)
         : code.startsWith("Digit") ? code.slice(5)
@@ -2159,75 +2160,110 @@
         : code);
   }
 
+  /* 槽 = 一个可录键的格子。get/set 读写当前值，commit 落库（发 /api/bot/set）。 */
+  const ALL_SLOTS = [];
+  let rec = null;         // 正在录的槽
+  let botCfgNow = {};     // 最近一次轮询回来的挂机配置（动作键读值用）
+
+  function makeSlot(el, get, set, commit) {
+    const slot = {
+      el, get, set, commit,
+      paint() {
+        const k = this.get() || "";
+        el.classList.toggle("set", !!k);
+        el.textContent = k ? potKeyLabel(k) : (el.dataset.hint || "");
+      },
+    };
+    el.addEventListener("click", () => {
+      if (rec) rec.el.classList.remove("rec");
+      rec = slot;
+      el.classList.add("rec");
+    });
+    ALL_SLOTS.push(slot);
+    return slot;
+  }
+
+  // 药水链：4 格，存 pot_chain / mp_chain
+  const CHAINS = [
+    { root: $("potChain"), key: "pot_chain" },
+    { root: $("mpChain"), key: "mp_chain" },
+  ].filter((c) => c.root);
+  CHAINS.forEach((c) => {
+    c.slots = [...c.root.querySelectorAll(".slot")].map((el) => makeSlot(
+      el,
+      () => el.dataset.key || "",
+      (v) => { el.dataset.key = v; },
+      () => setBot({ [c.key]: c.slots.map((s) => s.el.dataset.key || "") }).catch(botFail),
+    ));
+  });
   function paintChain(chain, keys) {
-    if (chain.rec >= 0) return;           // 正在录的这条链别被轮询刷掉
     chain.slots.forEach((s, i) => {
-      const k = (keys && keys[i]) || s.dataset.key || "";
-      s.dataset.key = k;
-      s.classList.toggle("set", !!k);
-      s.textContent = k ? potKeyLabel(k) : String(i + 1);
+      if (rec && rec.el === s.el) return;   // 正在录的这格别被轮询刷掉
+      s.set((keys && keys[i]) || "");
+      s.paint();
     });
   }
   function paintChains(cfg) {
     CHAINS.forEach((c) => paintChain(c, cfg ? cfg[c.key] : null));
   }
 
-  function paintPotSlot(chain, s) {
-    const k = s.dataset.key || "";
-    s.classList.toggle("set", !!k);
-    s.textContent = k ? potKeyLabel(k) : String(chain.slots.indexOf(s) + 1);
-  }
-
-  function chainSave(chain) {
-    setBot({ [chain.key]: chain.slots.map((s) => s.dataset.key || "") }).catch(botFail);
-  }
-
-  CHAINS.forEach((chain) => {
-    chain.slots.forEach((s) => {
-      s.addEventListener("click", () => {
-        CHAINS.forEach((c) => { c.slots.forEach((x) => x.classList.remove("rec")); c.rec = -1; });
-        chain.rec = chain.slots.indexOf(s);
-        s.classList.add("rec");
-      });
-    });
+  // 动作键：单格，存 atk_key / jump_key / pick_key / pot_key / mp_key
+  const ACTION_SLOTS = {};
+  [["atkKey", "atk_key", "ControlLeft"], ["jumpKey", "jump_key", "AltLeft"],
+   ["pickKey", "pick_key", "KeyZ"], ["potKeySlot", "pot_key", "pot8"],
+   ["mpKeySlot", "mp_key", "pot9"]].forEach(([id, cfgKey, dflt]) => {
+    const el = $(id);
+    if (!el) return;
+    ACTION_SLOTS[cfgKey] = makeSlot(
+      el,
+      () => botCfgNow[cfgKey] || dflt,
+      (v) => { botCfgNow[cfgKey] = v; },
+      () => setBot({ [cfgKey]: botCfgNow[cfgKey] || dflt }).catch(botFail),
+    );
   });
-  // 点到格子外面就取消录制，别让"录音机"一直开着
+  function paintActionKeys() {
+    Object.values(ACTION_SLOTS).forEach((s) => s.paint());
+  }
+
+  // 点到格子外面就取消录制，别让"录音机"一直开着（格子自己的 click 先建录制再冒泡到这里）
   document.addEventListener("click", (e) => {
-    CHAINS.forEach((c) => {
-      if (c.rec >= 0 && !e.target.closest(".potrow")) {
-        c.slots[c.rec].classList.remove("rec");
-        c.rec = -1;
-      }
-    });
+    if (rec && !e.target.closest(".slot")) {
+      rec.el.classList.remove("rec");
+      rec.paint();
+      rec = null;
+    }
   });
   document.addEventListener("keydown", (e) => {
-    const chain = CHAINS.find((c) => c.rec >= 0);
-    if (!chain) return;
-    const s = chain.slots[chain.rec];
+    if (!rec) return;
     e.preventDefault();                   // 录制期间别让 F5 之类触发浏览器行为
+    const slot = rec;
     if (e.key === "Escape") {
-      s.classList.remove("rec");
-      chain.rec = -1;
+      rec = null;
+      slot.el.classList.remove("rec");
+      slot.paint();
       return;
     }
     if (e.key === "Delete" || e.key === "Backspace") {
-      delete s.dataset.key;
-      paintPotSlot(chain, s);
-      s.classList.remove("rec");
-      chain.rec = -1;
-      chainSave(chain);
+      rec = null;
+      slot.el.classList.remove("rec");
+      slot.set("");
+      slot.paint();
+      slot.commit();
       return;
     }
-    if (e.repeat || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.repeat) return;
+    // Alt/Ctrl 本身就是游戏要用的键（跳跃/攻击），录它们时修饰键是按着的，放行
+    const isMod = /^(Alt|Control|Shift)(Left|Right)$/.test(e.code);
+    if ((e.altKey || e.ctrlKey || e.metaKey) && !isMod) return;
     if (!KEY_CODE_RE.test(e.code)) {
       toast("这个键不支持，用字母 / 数字 / F1~F12 / Ins / Home 这类", true);
       return;
     }
-    s.dataset.key = e.code;
-    paintPotSlot(chain, s);
-    s.classList.remove("rec");
-    chain.rec = -1;
-    chainSave(chain);
+    rec = null;
+    slot.el.classList.remove("rec");
+    slot.set(e.code);
+    slot.paint();
+    slot.commit();
   });
   $("sideSel").addEventListener("change", () => {
     setBot({ range_side: $("sideSel").value }).catch(botFail);
@@ -2258,18 +2294,18 @@
   }
 
   function paintBotCfg(cfg) {
+    botCfgNow = cfg;
     if (Date.now() > botLockUntil) {        // 正在拖滑块的这一下不覆盖
       $("hpRange").value = cfg.hp_pct;
       $("mpRange").value = cfg.mp_pct;
       $("rngRange").value = cfg.range_px;
       $("hgtRange").value = cfg.range_h;
       $("atkRange").value = cfg.atk_ms;
-      $("potSel").value = cfg.pot_key;
-      $("mpSel").value = cfg.mp_key || "pot9";
       $("sideSel").value = cfg.range_side || "both";
       $("inputSel").value = cfg.input;
       paintBotVals();
       paintChains(cfg);                   // 红/蓝备用药水键显示成键名
+      paintActionKeys();                  // 攻击/跳跃/拾取/红蓝药主键
     }
     $("pickBtn").classList.toggle("on", !!cfg.pick);
     $("pickBtn").textContent = cfg.pick ? "开" : "关";

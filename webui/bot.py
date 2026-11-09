@@ -71,6 +71,7 @@ CODE_VK = {
     **{f"F{i}": 0x70 + i - 1 for i in range(1, 13)},             # F1..F12
     "ShiftLeft": 0xA0, "ShiftRight": 0xA1,
     "ControlLeft": 0xA2, "ControlRight": 0xA3,
+    "AltLeft": 0xA4, "AltRight": 0xA5,
     "Space": 0x20, "Enter": 0x0D,
     "Insert": 0x2D, "Delete": 0x2E, "Home": 0x24, "End": 0x23,
     "PageUp": 0x21, "PageDown": 0x22,
@@ -334,6 +335,9 @@ DEFAULTS = {
     "mp_key": "pot9",    # 用哪个键喝蓝药：pot8 / pot9 / pot0
     "mp_chain": ["", "", "", ""],
     # ↑ 备用蓝药键 1~4：主键按了蓝量没回到线以上就按这个顺序换着喝
+    "atk_key": "ControlLeft",   # 攻击键（KeyboardEvent.code 名，面板上可改）
+    "jump_key": "AltLeft",      # 跳跃键
+    "pick_key": "KeyZ",         # 拾取键
     "range_px": 100.0,   # 攻击区域宽：人物中心左右各这么多像素
     "range_h": 120.0,    # 攻击区域高：以人物身体为中心上下各占一半（画面上画的就是它）
     "range_side": "both",  # 攻击方向：both 左右两侧 / front 只打身前（单体技能）
@@ -350,8 +354,12 @@ DEFAULTS = {
 }
 
 # 字符串型配置的合法取值，非法就退回默认，免得写进一个谁都不认识的模式
-ENUMS = {"pot_key": POT_KEYS, "mp_key": POT_KEYS, "input": ("auto", "hid", "soft"),
-         "range_side": ("both", "front")}
+# 药水键兼容旧的 pot8/pot9/pot0（VK 名），新的都用 KeyboardEvent.code 名
+_KEY_NAMES = tuple(CODE_VK) + POT_KEYS
+ENUMS = {"pot_key": _KEY_NAMES, "mp_key": _KEY_NAMES,
+         "atk_key": tuple(CODE_VK), "jump_key": tuple(CODE_VK),
+         "pick_key": tuple(CODE_VK),
+         "input": ("auto", "hid", "soft"), "range_side": ("both", "front")}
 
 CLAMP = {
     "hp_pct": (10.0, 95.0),
@@ -791,7 +799,7 @@ class Bot:
 
         # 2) 拾取：无脑一直按，跟其它动作不冲突（不同键）
         if cfg["pick"] and (now - self._t_pick) * 1000.0 >= cfg["pick_ms"]:
-            self._tap("pick", 25)
+            self._tap(cfg["pick_key"], 25)
             self._t_pick = now
             self._count("pick")
 
@@ -863,7 +871,7 @@ class Bot:
                         self._set_status(act="转身朝目标", err="")
                         return
                     if jump_ready:
-                        self._tap("jump")
+                        self._tap(cfg["jump_key"])
                         self._t_jump = now
                         self._count("jmp")
                     self._set_status(act="跳起攻击", err="")
@@ -894,7 +902,7 @@ class Bot:
             self._set_status(act="等朝向生效")
             return
         if atk_ready:
-            self._tap("attack")
+            self._tap(cfg["atk_key"])
             self._t_atk = now
             self._count("atk")
             self._set_status(act="攻击", err="")
