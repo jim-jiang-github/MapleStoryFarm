@@ -58,9 +58,16 @@ def check(title, cond, detail=""):
         print(f"  FAIL {title}  {detail}")
 
 
+print("[0] 出厂默认值（和面板/README 必须一致）")
+check("血线默认 40%", bot.DEFAULTS["hp_pct"] == 40.0, bot.DEFAULTS["hp_pct"])
+check("攻击距离默认 100px", bot.DEFAULTS["range_px"] == 100.0, bot.DEFAULTS["range_px"])
+check("喝药间隔默认 3.0s", bot.DEFAULTS["pot_sec"] == 3.0, bot.DEFAULTS["pot_sec"])
+check("攻击间隔默认 420ms", bot.DEFAULTS["atk_ms"] == 420, bot.DEFAULTS["atk_ms"])
+check("喝药键默认 8", bot.DEFAULTS["pot_key"] == "pot8", bot.DEFAULTS["pot_key"])
+
 print("[1] 怪在攻击距离内 → 先转身，同一帧不出手")
 b = make()
-mon = [{"name": "Stump", "box": [740, 300, 800, 360], "conf": 0.9}]   # 中心 770，dx=140
+mon = [{"name": "Stump", "box": [690, 300, 750, 360], "conf": 0.9}]   # 中心 720，dx=90
 c = step(b, m=mon)
 # 第一帧还不知道朝向：只点一下右方向转身，Ctrl 留到下一帧
 check("第一帧只转身", down_keys(c) == ["right"], c)
@@ -85,7 +92,7 @@ check("状态是等冷却", b.snapshot()[1]["act"] == "等冷却", b.snapshot()[
 
 print("[3] 怪在左边、距离内 → 先左转，等朝向生效再打")
 b = make()
-left_mon = [{"name": "Snail", "box": [460, 300, 520, 360], "conf": 0.8}]  # 中心 490, dx=-140
+left_mon = [{"name": "Snail", "box": [510, 300, 570, 360], "conf": 0.8}]  # 中心 540, dx=-90
 c = step(b, m=left_mon)
 check("第一帧点左方向", down_keys(c) == ["left"], c)
 settle(b)
@@ -105,7 +112,7 @@ check("按住 right", down_keys(c) == ["right"] and up_keys(c) == [], c)
 check("状态是走向目标", b.snapshot()[1]["act"] == "走向目标", b.snapshot()[1])
 
 print("[5] 进入范围后松开方向键")
-c = step(b, m=[{"name": "Stump", "box": [740, 300, 800, 360], "conf": 0.9}])
+c = step(b, m=[{"name": "Stump", "box": [690, 300, 750, 360], "conf": 0.9}])
 check("右方向先松开", up_keys(c)[0] == "right", c)
 check("然后攻击", "attack" in down_keys(c), c)
 
@@ -116,17 +123,17 @@ check("不攻击上层怪", "attack" not in down_keys(c), c)
 check("去巡逻/守株待兔", b.snapshot()[1]["act"] in ("巡逻找怪", "守株待兔"),
       b.snapshot()[1])
 
-print("[7] 血低于 60% → 喝 8")
+print("[7] 血低于 40% → 喝 8")
 b = make()
-c = step(b, hp=55.0)
+c = step(b, hp=30.0)
 check("按 8 且不干别的", down_keys(c)[0] == "pot8"
       and not any(k in down_keys(c) for k in ("attack", "right")), c)
 
 print("[8] 喝药冷却：距上次不到 3 秒不再按")
-c = step(b, hp=50.0)
+c = step(b, hp=35.0)
 check("没再按 8", "pot8" not in down_keys(c), c)
 b._t_pot -= 3.0          # 手动把冷却拨回去
-c = step(b, hp=50.0)
+c = step(b, hp=35.0)
 check("冷却到了又按 8", "pot8" in down_keys(c), c)
 
 print("[9] 血量读不到（None）→ 不瞎按")

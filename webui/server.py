@@ -59,13 +59,13 @@ LOW_DETECT_CONF = 0.10
 # 跟踪器内部仍用低分框续命（上面那段），所以「看不见」不等于「跟丢了」——
 # 阈值调高只是把 0.2/0.3 这种拿不准的框藏起来，不影响已经确认的目标继续被跟踪。
 # 这个值可以在页面上用滑块实时改（/api/detect/conf），存在同目录的 detconf.json。
-SHOW_CONF_DEFAULT = float(os.environ.get("PREVIEW_SHOW_CONF") or 0.60)
-SHOW_HITS_DEFAULT = int(os.environ.get("PREVIEW_MIN_HITS") or 4)
+SHOW_CONF_DEFAULT = float(os.environ.get("PREVIEW_SHOW_CONF") or 0.80)
+SHOW_HITS_DEFAULT = int(os.environ.get("PREVIEW_MIN_HITS") or 6)
 SHOW_CONF_FILE = Path(__file__).with_name("detconf.json")
 # ---- 显示稳定（解决「冒出来一两帧又消失」）----
 # 置信度高不等于目标真实：误检偶尔也会连着两帧拿到 0.7。原来「连续 2 帧」就确认，
 # 于是这种误检会被画两帧再消失。现在显示端另加三道闸：
-#   1) show_hits：累计命中这么多帧才允许第一次出现（默认 4 帧 ≈ 0.15~0.2 秒）
+#   1) show_hits：累计命中这么多帧才允许第一次出现（默认 6 帧 ≈ 0.2~0.3 秒）
 #   2) DISPLAY_MAX_MISS：连续 2 帧没观测到就不再画，避免幽灵框停在原地
 #      （这时框用的是卡尔曼预测 + 上一次达标的分数，所以标签上的数字仍然 >= 门限）
 #   3) 同一只怪被两条轨迹重复框住时只画一条（见 DUP_TRACK_IOU）

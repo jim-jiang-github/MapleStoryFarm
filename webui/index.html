@@ -416,11 +416,11 @@
             <div class="row"><span class="k">检出目标</span><span class="v" id="targets">—</span></div>
             <div class="row conf">
               <span class="k">识别阈值</span>
-              <span class="v"><input id="confRange" class="rng" type="range" min="0.05" max="0.95" step="0.05" value="0.6" title="低于这个置信度的框不算识别到（不画框、不计数）。拖动即时生效"><b id="confVal">0.60</b></span>
+              <span class="v"><input id="confRange" class="rng" type="range" min="0.05" max="0.95" step="0.05" value="0.8" title="低于这个置信度的框不算识别到（不画框、不计数）。拖动即时生效"><b id="confVal">0.80</b></span>
             </div>
             <div class="row conf">
               <span class="k">稳定帧数</span>
-              <span class="v"><input id="hitRange" class="rng" type="range" min="1" max="12" step="1" value="4" title="累计命中这么多帧才允许第一次出现。调大更干净，调小更快但容易闪出假框"><b id="hitVal">4</b></span>
+              <span class="v"><input id="hitRange" class="rng" type="range" min="1" max="12" step="1" value="6" title="累计命中这么多帧才允许第一次出现。调大更干净，调小更快但容易闪出假框"><b id="hitVal">6</b></span>
             </div>
             <div class="row conf">
               <span class="k">检测频率</span>
@@ -452,7 +452,7 @@
             </div>
             <div class="row conf">
               <span class="k">血线</span>
-              <span class="v"><input id="hpRange" class="rng" type="range" min="10" max="95" step="5" value="60" title="血量低于这个百分比就喝药；读不到血量（血条没标定）时不会瞎按"><b id="hpVal">60%</b></span>
+              <span class="v"><input id="hpRange" class="rng" type="range" min="10" max="95" step="5" value="40" title="血量低于这个百分比就喝药；读不到血量（血条没标定）时不会瞎按"><b id="hpVal">40%</b></span>
             </div>
             <div class="row conf">
               <span class="k">喝药间隔</span>
@@ -460,7 +460,7 @@
             </div>
             <div class="row conf">
               <span class="k">攻击距离</span>
-              <span class="v"><input id="rngRange" class="rng" type="range" min="60" max="500" step="10" value="160" title="人物中心到怪物中心的水平距离。画面上会实时画出这条范围带，对着调就行"><b id="rngVal">160px</b></span>
+              <span class="v"><input id="rngRange" class="rng" type="range" min="60" max="500" step="10" value="100" title="人物中心到怪物中心的水平距离。画面上会实时画出这条范围带，对着调就行"><b id="rngVal">100px</b></span>
             </div>
             <div class="row conf">
               <span class="k">攻击间隔</span>
