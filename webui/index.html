@@ -94,6 +94,19 @@
   .dot.off { background: #ef4444; }
   /* 游戏窗口被最小化时角标可点，点了直接还原窗口 */
   #badge.clickable { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+  /* 指标直接叠在画面右上角：半透明黑底白字，不再占面板空间 */
+  .hudstats {
+    position: absolute; right: 8px; top: 8px;
+    padding: 5px 10px; border-radius: 8px;
+    background: rgba(0,0,0,.55);
+    backdrop-filter: blur(2px);
+    pointer-events: none;
+    font-variant-numeric: tabular-nums;
+  }
+  .hudstats .r { display: flex; justify-content: space-between; gap: 16px; line-height: 1.8; }
+  .hudstats .k { color: rgba(255,255,255,.72); font-size: 11px; }
+  .hudstats .v { color: #fff; font-size: 11px; }
+  .hudstats .v.warn { color: #fbbf24; }
   /* ---- 一个窄面板：血条在左、指标在右，右侧留给按钮 ---- */
   .low { display: flex; gap: 14px; align-items: flex-start; }
   .side { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
@@ -123,9 +136,17 @@
     box-shadow: inset 0 1px 1px rgba(0,0,0,.06);
     position: relative;
   }
-  /* 血线三角箭头：贴在 HP 轨道下沿、尖朝上指着血条，
-     横向位置就是喝药阈值（--thr 由 paintBotVals 同步）。
-     btrack 的 overflow 放开就是为了能探出轨道下面。 */
+  /* 识别边界：HP 轨道上的黑竖线，位置 = 后端在标定区域里识别到的血量右缘。
+     比彩色填充高一点、不带过渡动画，读数是多少它就在哪，比填充边缘更"准"。 */
+  .btrack .mark {
+    position: absolute; top: -2px; bottom: -2px;
+    width: 2px; transform: translateX(-1px);
+    background: #1c1917; border-radius: 1px;
+    pointer-events: auto;
+    transition: opacity .2s;
+  }
+  /* 血线三角箭头：贴在 HP 轨道下沿、尖朝上指着血条，按住可左右拖动调阈值
+     （--thr 由 paintBotVals 同步）。btrack 的 overflow 放开就是为了能探出轨道下面。 */
   .btrack .thr {
     position: absolute;
     top: 4px; left: var(--thr, 40%);
@@ -134,7 +155,13 @@
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
     border-bottom: 6px solid #dc2626;
-    pointer-events: none;
+    pointer-events: auto; cursor: ew-resize;
+    touch-action: none; z-index: 2;
+  }
+  /* 三角本体只有 8px 宽，垫一块透明的热区让手指/鼠标好抓 */
+  .btrack .thr::after {
+    content: ""; position: absolute;
+    left: -8px; right: -8px; top: -6px; bottom: -2px;
   }
   /* 给三角留出探出轨道的余量，别怼到 MP 条上 */
   .bar[data-k="hp"] { margin-bottom: 3px; }
@@ -431,7 +458,7 @@
               </span>
               <b class="cneed" id="charNeed" title="点这里截图上传；也支持 Ctrl+V 粘贴 / 把图拖进来">⚠ 上传名字牌截图 · 点这里或 Ctrl+V</b>
             </div>
-            <div class="bar" data-k="hp"><span class="bk">HP</span><span class="bv">—</span><span class="btrack"><i></i><u class="thr" title="血线：低于这条线就自动喝药（在右侧设置里调）"></u></span></div>
+            <div class="bar" data-k="hp"><span class="bk">HP</span><span class="bv">—</span><span class="btrack"><i></i><u class="mark"></u><u class="thr"></u></span></div>
             <div class="bar" data-k="mp"><span class="bk">MP</span><span class="bv">—</span><span class="btrack"><i></i></span></div>
             <div class="bar" data-k="exp"><span class="bk">EXP</span><span class="bv">—</span><span class="btrack"><i></i></span></div>
           </div>
@@ -1371,18 +1398,32 @@
       const v = vals ? vals[k] : null;
       const fillEl = el.querySelector(".btrack i");
       const txt = el.querySelector(".bv");
+      const mark = el.querySelector(".btrack .mark");
       if (v === null || v === undefined) {
         fillEl.style.width = "0%";
         txt.textContent = "—";
         el.classList.add("off");
         el.classList.remove("low");
+        if (mark) mark.style.opacity = "0";   // 读不到血量时黑线没有意义，先藏起来
         return;
       }
       el.classList.remove("off");
+      if (mark) mark.style.opacity = "1";
       const p = Math.min(100, Math.max(0, v));
       fillEl.style.width = p.toFixed(1) + "%";
       txt.textContent = p.toFixed(1) + "%";
       el.classList.toggle("low", (k === "hp" || k === "mp") && p < 30);
+      if (k === "hp") {
+        // 黑竖线 = 识别区域边界：标定的屏幕血条里，彩色填充识别到的右缘
+        if (mark) {
+          mark.style.left = p.toFixed(2) + "%";
+          mark.title = `识别边界：屏幕底部标定的血条区域里，识别到的血量到这里（当前 ${p.toFixed(1)}%），血量百分比就是按它算的`;
+        }
+        const thr = el.querySelector(".btrack .thr");
+        if (thr) {
+          thr.title = `喝药血线 ${Math.round(Number($("hpRange").value) || 40)}%，血量低于它就自动喝药。按住左右拖动调整`;
+        }
+      }
     });
   }
 
@@ -2011,6 +2052,42 @@
   $("potSel").addEventListener("change", () => {
     setBot({ pot_key: $("potSel").value }).catch(botFail);
   });
+
+  /* 血线三角直接在 HP 条上拖：按住左右滑，松手落库。
+     拖动时只是改 #hpRange 的值再派发 input/change，右侧滑块的保存、
+     回显、botLock 防回弹逻辑原样生效，不写第二份。 */
+  (() => {
+    const bar = document.querySelector('.bar[data-k="hp"]');
+    const thr = bar && bar.querySelector(".btrack .thr");
+    const track = bar && bar.querySelector(".btrack");
+    if (!thr || !track) return;
+    const hpRange = $("hpRange");
+    const snap = (clientX) => {
+      const r = track.getBoundingClientRect();
+      const raw = ((clientX - r.left) / r.width) * 100;
+      return Math.min(95, Math.max(10, Math.round(raw / 5) * 5));   // 对齐滑块的 step=5
+    };
+    thr.addEventListener("pointerdown", (e) => {
+      thr.setPointerCapture(e.pointerId);   // 拖出条外也持续收 move
+      e.preventDefault();
+      const move = (ev) => {
+        const v = snap(ev.clientX);
+        if (String(v) !== hpRange.value) {
+          hpRange.value = v;
+          hpRange.dispatchEvent(new Event("input"));
+        }
+      };
+      const up = () => {
+        thr.removeEventListener("pointermove", move);
+        thr.removeEventListener("pointerup", up);
+        thr.removeEventListener("pointercancel", up);
+        hpRange.dispatchEvent(new Event("change"));   // 松手立刻保存一次
+      };
+      thr.addEventListener("pointermove", move);
+      thr.addEventListener("pointerup", up);
+      thr.addEventListener("pointercancel", up);
+    });
+  })();
   $("sideSel").addEventListener("change", () => {
     setBot({ range_side: $("sideSel").value }).catch(botFail);
   });
