@@ -9,7 +9,9 @@
 优先级（每 20ms 一轮）：
   1) 血低于门限 → 喝药（有独立冷却，默认 3 秒）
   2) 全程按 Z 拾取（默认 130ms 一次，无脑一直按）
-  3) 有目标且在攻击距离内 → 转向 + 攻击（攻击有冷却，默认 420ms）
+  3) 有目标且与攻击区域相交（宽 range_px × 高 range_h 的矩形，画面上画的就是
+     它，与怪物框有交集才出手）→ 转向 + 攻击（攻击有冷却，默认 420ms）。
+     头顶差得不多的怪（<= jump_reach）会先跳起来（Alt）再打
   4) 有目标但在范围外 → 朝它走（只按左右，这个场景没有纵向移动）
   5) 视野内没目标 → 左右巡逻（可选，默认开）
 
@@ -56,6 +58,7 @@ POT_LABEL = {"pot8": "8", "pot9": "9", "pot0": "0"}
 # 一起处理，结果往往按「转身前」的朝向出招——看着就是朝着反方向挥刀。
 TURN_SETTLE_MS = 130
 TURN_TAP_MS = 50          # 转身时方向键按住多久：够游戏认一次转向，又不至于真的迈一步
+JUMP_COOLDOWN_MS = 900    # 两次跳的最小间隔：起跳+落地+站稳要这么久，比这快就是原地抽搐
 
 KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
@@ -234,7 +237,9 @@ DEFAULTS = {
     "hp_pct": 40.0,      # 血低于这个百分比就喝药
     "pot_sec": 3.0,      # 两次喝药的最小间隔（秒）
     "pot_key": "pot8",   # 用哪个键喝药：pot8 / pot9 / pot0
-    "range_px": 100.0,   # 攻击距离：人物中心到怪物中心的水平像素
+    "range_px": 100.0,   # 攻击区域宽：人物中心左右各这么多像素
+    "range_h": 120.0,    # 攻击区域高：以人物身体为中心上下各占一半（画面上画的就是它）
+    "jump_reach": 140.0, # 跳跃可攻击高度：头顶的怪离攻击区不超过它就跳起来打
     "atk_ms": 420,       # 两次攻击的最小间隔（毫秒）
     "pick": True,        # 全程按 Z 拾取
     "pick_ms": 130,      # 拾取按键间隔（毫秒）
@@ -253,6 +258,8 @@ CLAMP = {
     "hp_pct": (10.0, 95.0),
     "pot_sec": (0.5, 30.0),
     "range_px": (40.0, 600.0),
+    "range_h": (40.0, 400.0),
+    "jump_reach": (60.0, 300.0),
     "atk_ms": (120, 3000),
     "pick_ms": (60, 2000),
     "patrol_sec": (0.5, 20.0),
@@ -283,7 +290,7 @@ def clamp_cfg(raw):
                 continue
             lo, hi = CLAMP.get(k, (dv, dv))
             out[k] = round(min(hi, max(lo, v)), 2)
-    for k in ("atk_ms", "pick_ms", "dy_tol"):   # 毫秒/像素：整数更好读
+    for k in ("atk_ms", "pick_ms", "dy_tol", "range_h", "jump_reach"):   # 毫秒/像素：整数更好读
         out[k] = int(out[k])
     return out
 
@@ -314,22 +321,64 @@ def _cy(box):
     return (float(box[1]) + float(box[3])) / 2
 
 
-def pick_target(char_box, monsters, range_px, dy_tol):
-    """挑一个目标：先在纵向容差内按水平距离排序，同等距离时取分数高的。
+def char_body_box(box):
+    """名字牌框 -> 人物身体框 [x1,y1,x2,y2]（浮点）。
 
-    纵向容差是为了不隔着平台打怪——只按左右走位，上下层的怪根本够不着，
-    把它们算成目标只会让角色在原地朝一堵墙挥刀。
+    这个游戏把名字牌挂在角色**脚下**，身体在牌子上方（实测 16px 高的牌子
+    对应约 60px 高的人物，脚底离牌顶 8px），身宽约为身高的 0.9（人形比高瘦，
+    bw 是半宽）。换分辨率/缩放时牌子等比变高变矮，所以全部按牌高归一。
+    攻击区域、识别框、攻击范围带用的都是这一个函数——改这里就全跟着变了
+    （server.py 通过 botmod.char_body_box 引用，别在两边各写一份）。
+    """
+    x1, y1, x2, y2 = (float(v) for v in box)
+    ph = max(8.0, y2 - y1)
+    k = ph / 16.0
+    body_h = 60.0 * k
+    gap = 8.0 * k
+    bw = max(10.0, body_h * 0.45)
+    cx = (x1 + x2) / 2.0
+    return [cx - bw, y1 - gap - body_h, cx + bw, y1 - gap]
+
+
+def _intersects(a, b):
+    """两个 [x1,y1,x2,y2] 框是否有交集（ touching 不算，得真叠上）。"""
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def attack_zone(char_box, range_px, range_h):
+    """攻击判定区：以人物身体中心为原点，左右各 range_px、上下各 range_h/2
+    的矩形。server 的 draw_attack_range 画在画面上的就是它——所见即所打。
+    """
+    b = char_body_box(char_box)
+    cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+    hh = float(range_h) / 2.0
+    return [cx - float(range_px), cy - hh, cx + float(range_px), cy + hh]
+
+
+def in_attack_zone(char_box, mon_box, range_px, range_h):
+    return _intersects(attack_zone(char_box, range_px, range_h), mon_box)
+
+
+def pick_target(char_box, monsters, range_px, range_h, jump_reach, dy_tol):
+    """挑一个「值得处理」的目标：带内按水平距离排序，同距取分数高的。
+
+    纵向候选带 = 攻击区域向上扩 jump_reach（跳起来也够得着的层）、向下扩
+    dy_tol（下一层：走下平台沿也算一条路）。带外的怪压根不进入决策——
+    隔着两层平台的怪当成目标，只会让角色对着空气挥刀或者原地发呆。
+    到了带内**打不打**由 _step 的攻击区域矩形判断（头顶够得着的会跳）。
     """
     if not char_box or not monsters:
         return None
-    cx, cy = _cx(char_box), _cy(char_box)
+    zone = attack_zone(char_box, range_px, range_h)
+    v_top = zone[1] - float(jump_reach)
+    v_bot = _cy(char_box) + float(dy_tol)
+    cx = _cx(char_box)
     best, best_d = None, None
     for m in monsters:
         box = m.get("box")
         if not box or len(box) != 4:
             continue
-        dy = abs(_cy(box) - cy)
-        if dy > dy_tol:
+        if not (box[1] < v_bot and box[3] > v_top):
             continue
         d = abs(_cx(box) - cx)
         score = (d, -float(m.get("conf", 0)))
@@ -360,7 +409,7 @@ class Bot:
         self.sender = sender or Sender(self.cfg["input"], self.cfg["hid_port"])
         self._lock = threading.Lock()
         self._status = {"act": "空闲", "target": "", "hp": None,
-                        "atk": 0, "pot": 0, "pick": 0, "err": ""}
+                        "atk": 0, "pot": 0, "pick": 0, "jmp": 0, "err": ""}
         self._thread = None
         self._held = 0            # 当前按住的左右方向：-1 / 0 / 1
         self._down = set()        # 当前真的按住没松的键（别对没按的键发抬起）
@@ -369,6 +418,7 @@ class Bot:
         self._was_fg = False      # 上一轮游戏是否在前台（重新拿回焦点时朝向不可信）
         self._t_pot = 0.0
         self._t_atk = 0.0
+        self._t_jump = 0.0
         self._t_pick = 0.0
         self._t_patrol = 0.0
         self._patrol_dir = 1
@@ -527,7 +577,8 @@ class Bot:
             self._set_status(act="找不到人物", target="")
             return
 
-        tgt = pick_target(char, st.get("monsters") or [], cfg["range_px"], cfg["dy_tol"])
+        tgt = pick_target(char, st.get("monsters") or [],
+                          cfg["range_px"], cfg["range_h"], cfg["jump_reach"], cfg["dy_tol"])
         if not tgt:
             self._set_status(target="")
             if cfg["patrol"]:
@@ -548,8 +599,31 @@ class Bot:
         dist = abs(dx)
         self._set_status(target=f"{name} {int(dist)}px")
 
-        if dist > cfg["range_px"]:
-            if cfg["move"]:
+        # 出不出手看攻击区域：画面上那个矩形（宽 range_px × 高 range_h）与怪物
+        # 框有交集才打。之前只比水平中心距，上下层的怪水平上很近、实际够不着，
+        # 人物就朝空气挥刀。现在拆开看：
+        #   水平交不上 → 走过去；
+        #   水平挨着、怪物悬在头顶且差得不多（<= jump_reach）→ 跳起来打：跳完
+        #     人物升高、攻击区域跟着上移，交上集就走下面的正常攻击流程；
+        #   水平挨着但高度交不上（下一层/差太多）→ 站住，走过去也白走。
+        zone = attack_zone(char, cfg["range_px"], cfg["range_h"])
+        mb = tgt["box"]
+        x_hit = zone[0] < mb[2] and mb[0] < zone[2]
+        y_hit = zone[1] < mb[3] and mb[1] < zone[3]
+        if not (x_hit and y_hit):
+            if x_hit:
+                gap = zone[1] - mb[3]        # >0：怪物整个悬在攻击区上方
+                if 0 < gap <= cfg["jump_reach"]:
+                    self._set_dir(0)
+                    if (now - self._t_jump) * 1000.0 >= JUMP_COOLDOWN_MS:
+                        self._tap("jump")
+                        self._t_jump = now
+                        self._count("jmp")
+                    self._set_status(act="跳起攻击", err="")
+                else:
+                    self._set_dir(0)
+                    self._set_status(act="高度够不着")
+            elif cfg["move"]:
                 self._set_dir(side)
                 self._face = side
                 self._set_status(act="走向目标")

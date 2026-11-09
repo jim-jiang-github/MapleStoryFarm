@@ -1,29 +1,31 @@
 # -*- coding: utf-8 -*-
 """char_body_box + 重叠过滤的判定逻辑测试。
 
-server.py 是个会开线程抓屏的大模块，没法直接 import 进测试进程。
-这里用 ast 把 char_body_box / overlap_min 两个纯函数的源码抠出来 exec，
-测的就是 server.py 里真正跑的那份代码文本——改了函数这里会跟着变。
+char_body_box 在 bot.py（纯函数，直接 import 测的就是跑的那份代码）；
+overlap_min 在 server.py 里——那是个会开线程抓屏的大模块，没法 import 进
+测试进程，这里用 ast 把函数源码抠出来 exec，测的仍然是 server.py 里真正
+跑的那段代码文本——改了函数这里会跟着变。
 跑法：python tools/test_charbox.py
 """
 import ast
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webui"))
+import bot  # noqa: E402
+
+char_body_box = bot.char_body_box
+
 SRC = Path(__file__).resolve().parent.parent / "webui" / "server.py"
-WANT = {"char_body_box", "overlap_min"}
-
 tree = ast.parse(SRC.read_text(encoding="utf-8"))
-picked = {}
+seg = None
 for node in tree.body:
-    if isinstance(node, ast.FunctionDef) and node.name in WANT:
-        picked[node.name] = ast.get_source_segment(SRC.read_text(encoding="utf-8"), node)
-missing = WANT - set(picked)
-assert not missing, f"server.py 里缺函数: {missing}"
-
+    if isinstance(node, ast.FunctionDef) and node.name == "overlap_min":
+        seg = ast.get_source_segment(SRC.read_text(encoding="utf-8"), node)
+assert seg, "server.py 里缺 overlap_min"
 ns = {}
-exec(compile("\n\n".join(picked.values()), str(SRC), "exec"), ns)
-char_body_box, overlap_min = ns["char_body_box"], ns["overlap_min"]
+exec(compile(seg, str(SRC), "exec"), ns)
+overlap_min = ns["overlap_min"]
 
 HIDE = 0.8   # 和 server.py 里的 CHAR_OVERLAP_HIDE 保持一致
 
@@ -52,8 +54,30 @@ check("牌高翻倍身体等比放大", abs((b2[3] - b2[1]) / (b[3] - b[1]) - 2)
 b3 = char_body_box([10, 100, 30, 100])
 check("高度 0 的牌框也能算", b3[3] > b3[1] and b3[2] > b3[0])
 
-# ---- 重叠过滤判定 ----
+# ---- 攻击区域：矩形求交，与画面上画的完全一致 ----
+R, H = 100, 120      # 和 DEFAULTS 的 range_px / range_h 一致
 CB = char_body_box([684, 412, 738, 427])          # 人物身体框
+
+
+def zone_hit(mbox):
+    z = bot.attack_zone([684, 412, 738, 427], R, H)
+    return z[0] < mbox[2] and mbox[0] < z[2] and z[1] < mbox[3] and mbox[1] < z[3]
+
+
+check("身体框内的怪 → 在攻击区域内", zone_hit([CB[0] + 4, CB[1] + 4, CB[2] - 4, CB[3] - 4]))
+check("同层旁边的怪 → 在攻击区域内", zone_hit([CB[2] + 40, CB[1], CB[2] + 90, CB[3]]))
+check("水平太远的怪 → 不在区域内", not zone_hit([CB[2] + 110, CB[1], CB[2] + 170, CB[3]]))
+check("上一层够不着的怪 → 不在区域内（高度交不上）",
+      not zone_hit([CB[0], CB[1] - 200, CB[2], CB[1] - 140]))
+check("下一层够不着的怪 → 不在区域内",
+      not zone_hit([CB[0], CB[3] + 90, CB[2], CB[3] + 150]))
+check("高度恰好搭边 → 在攻击区域内", zone_hit([CB[0], CB[3] - 2, CB[2], CB[3] + 50]))
+check("in_attack_zone 与手算一致",
+      bot.in_attack_zone([684, 412, 738, 427], [CB[2] + 40, CB[1], CB[2] + 90, CB[3]], R, H))
+check("出厂攻击高度默认 120", bot.DEFAULTS["range_h"] == 120.0)
+check("出厂跳跃高度默认 140", bot.DEFAULTS["jump_reach"] == 140.0)
+
+# ---- 人物重叠过滤 ----
 
 
 def hidden(mbox):

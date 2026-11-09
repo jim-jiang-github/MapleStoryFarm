@@ -1,5 +1,5 @@
 {
-  "on": true,
+  "on": false,
   "hp_pct": 40.0,
   "pot_sec": 3.0,
   "pot_key": "pot8",

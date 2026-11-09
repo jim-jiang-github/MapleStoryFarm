@@ -460,7 +460,11 @@
             </div>
             <div class="row conf">
               <span class="k">攻击距离</span>
-              <span class="v"><input id="rngRange" class="rng" type="range" min="60" max="500" step="10" value="100" title="人物中心到怪物中心的水平距离。画面上会实时画出这条范围带，对着调就行"><b id="rngVal">100px</b></span>
+              <span class="v"><input id="rngRange" class="rng" type="range" min="60" max="500" step="10" value="100" title="攻击区域的宽度：人物中心左右各这么多像素"><b id="rngVal">100px</b></span>
+            </div>
+            <div class="row conf">
+              <span class="k">攻击高度</span>
+              <span class="v"><input id="hgtRange" class="rng" type="range" min="40" max="400" step="10" value="120" title="攻击区域的垂直范围，以人物身体为中心上下各占一半。画面上画的那个矩形（ATK 宽x高）就是攻击区域：怪物框和它有交集才会出手。上下层的怪够不着就调小"><b id="hgtVal">120px</b></span>
             </div>
             <div class="row conf">
               <span class="k">攻击间隔</span>
@@ -1847,6 +1851,7 @@
     hp: [$("hpRange"), $("hpVal"), "hp_pct", (v) => `${Math.round(v)}%`],
     pot: [$("potRange"), $("potVal"), "pot_sec", (v) => `${Number(v).toFixed(1)}s`],
     rng: [$("rngRange"), $("rngVal"), "range_px", (v) => `${Math.round(v)}px`],
+    hgt: [$("hgtRange"), $("hgtVal"), "range_h", (v) => `${Math.round(v)}px`],
     atk: [$("atkRange"), $("atkVal"), "atk_ms", (v) => `${Math.round(v)}ms`],
   };
   let botLockUntil = 0;
@@ -1935,6 +1940,7 @@
       $("hpRange").value = cfg.hp_pct;
       $("potRange").value = cfg.pot_sec;
       $("rngRange").value = cfg.range_px;
+      $("hgtRange").value = cfg.range_h;
       $("atkRange").value = cfg.atk_ms;
       $("potSel").value = cfg.pot_key;
       $("inputSel").value = cfg.input;

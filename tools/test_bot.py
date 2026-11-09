@@ -61,6 +61,8 @@ def check(title, cond, detail=""):
 print("[0] 出厂默认值（和面板/README 必须一致）")
 check("血线默认 40%", bot.DEFAULTS["hp_pct"] == 40.0, bot.DEFAULTS["hp_pct"])
 check("攻击距离默认 100px", bot.DEFAULTS["range_px"] == 100.0, bot.DEFAULTS["range_px"])
+check("攻击高度默认 120px", bot.DEFAULTS["range_h"] == 120.0, bot.DEFAULTS["range_h"])
+check("跳跃高度默认 140px", bot.DEFAULTS["jump_reach"] == 140.0, bot.DEFAULTS["jump_reach"])
 check("喝药间隔默认 3.0s", bot.DEFAULTS["pot_sec"] == 3.0, bot.DEFAULTS["pot_sec"])
 check("攻击间隔默认 420ms", bot.DEFAULTS["atk_ms"] == 420, bot.DEFAULTS["atk_ms"])
 check("喝药键默认 8", bot.DEFAULTS["pot_key"] == "pot8", bot.DEFAULTS["pot_key"])
@@ -122,6 +124,31 @@ c = step(b, m=[{"name": "Stump", "box": [740, 600, 800, 660], "conf": 0.9}])   #
 check("不攻击上层怪", "attack" not in down_keys(c), c)
 check("去巡逻/守株待兔", b.snapshot()[1]["act"] in ("巡逻找怪", "守株待兔"),
       b.snapshot()[1])
+
+print("[6b] 头顶差得不多的怪 → 跳起来打（不走路、不出手）")
+b = make()
+top_mon = [{"name": "Snail", "box": [690, 130, 750, 190], "conf": 0.8}]   # 怪底 190，离攻击区顶 2.5px
+c = step(b, m=top_mon)
+check("按了跳 (Alt)", ("jump", True) in c, c)
+check("没按方向/攻击", not any(k in ("attack", "left", "right") for k in down_keys(c)), c)
+check("状态是跳起攻击", b.snapshot()[1]["act"] == "跳起攻击", b.snapshot()[1])
+c = step(b, m=top_mon)
+check("跳跃冷却内不再按跳", ("jump", True) not in c, c)
+
+print("[6c] 头顶差太多的怪（超出跳跃判定框）→ 根本不进决策，去巡逻")
+b = make()
+high_mon = [{"name": "Snail", "box": [690, 0, 750, 40], "conf": 0.8}]    # 怪底 40 < 候选带顶 52.5
+c = step(b, m=high_mon)
+check("不跳不出手", ("jump", True) not in c and "attack" not in down_keys(c), c)
+check("状态去巡逻了", b.snapshot()[1]["act"] in ("巡逻找怪", "守株待兔"), b.snapshot()[1])
+
+print("[6d] 正下方下一层的怪 → 站住提示高度够不着，不走不跳不打")
+b = make()
+low_mon = [{"name": "Snail", "box": [690, 320, 750, 380], "conf": 0.8}]  # 怪顶 320 > 攻击区底 312.5
+c = step(b, m=low_mon)
+check("不出手不跳", "attack" not in down_keys(c) and ("jump", True) not in c, c)
+check("不按方向", not any(k in ("left", "right") for k in down_keys(c)), c)
+check("状态是高度够不着", b.snapshot()[1]["act"] == "高度够不着", b.snapshot()[1])
 
 print("[7] 血低于 40% → 喝 8")
 b = make()
