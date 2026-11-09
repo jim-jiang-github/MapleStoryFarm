@@ -354,8 +354,9 @@ dist/MapleStoryFarm/
 - **必须 `--collect-all ultralytics` / `torchvision` / `openvino`。** 模型类和跟踪器是运行时按名字导入的，静态分析看不见；torchvision 0.29 把扩展改名成 `_C_stable.pyd`，PyInstaller 自带的 hook 还在找旧的 `tv._C`，漏收就是「exe 能启动、一点识别就 `RuntimeError: operator torchvision::nms does not exist`」。这个坑踩过一次，`/api/stats` 的 `detect_preload_error` 会直接写出来。
 - **保留控制台。** 端口、局域网手机地址、识别加载进度、报错都在里面，出问题能直接看。
 - **重复打包不删旧产物。** `dist/MapleStoryFarm-20261109-1732` 这种是上一次的备份（改名让路，不是删除）——几千个文件的批量删除容易被安全策略拦，改名还能留个回滚点。脚本只保留最近一个，更早的会尝试清掉，删不掉会提示你手动删。
+- **剔掉用不到的依赖。** `polars` 的运行时是 161MB 的巨型 pyd，但只在 `Result.to_df/to_csv` 里 import；`onnxruntime`/`onnx` 只在 `model.export()` 里用；`matplotlib` 在 ultralytics 里没有顶层导入——全部 `--exclude-module`。openvino 的 `--collect-all` 没法只收一部分，打包后由 `prune_openvino()` 删掉 NPU 编译器/NPU/GPU 插件（固定 `device="cpu"`，这三样永远不会加载，省 152MB）。要再加白名单之外的依赖，先确认它在导入期（模块顶层）不会被用到。
 
-体积参考：实测目录版 **1196 MB**，构建约 7～9 分钟（torch CPU 占大头）。压缩后拷贝约 400～600MB。`--no-accurate` 能省 10MB 模型，可以忽略。
+体积参考：实测目录版 **824 MB**，构建约 6 分钟。构成：`torch 373MB`（`torch_cpu.dll` 单独 295MB，ultralytics 的硬依赖，砍不掉）+ `cv2 112MB` + `openvino 91MB`（只剩 CPU 插件）+ `scipy 72MB`（`track.py` 用 `linear_sum_assignment`）+ `numpy 27MB` + 模型 20MB + exe 56MB。压缩后拷贝约 300～400MB。
 
 其它注意：
 

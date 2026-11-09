@@ -47,6 +47,32 @@ MODELS = [
     ("model_int8_openvino_model", False),        # 精度模型：可选
 ]
 
+# ultralytics 靠 entry_points 被静态分析扫到的"顺带依赖"，本项目的推理链路完全用不到。
+# 都已经核对过导入位置：polars 只在 Result.to_df/to_csv 这类导出函数里 import，
+# onnxruntime 只在 model.export() 里 import，matplotlib 在 ultralytics 里没有顶层导入。
+# 但 polars 的运行时是个 160MB 的巨型 pyd，留着非常不划算。
+EXCLUDE_MODULES = (
+    "polars",              # 161MB：_polars_runtime_32/_polars_runtime.pyd
+    "_polars_runtime_32",
+    "onnxruntime",         # 38MB：只有导出 onnx 时才用
+    "onnx",                # 4MB：同上
+    "matplotlib",          # 15MB：绘图用，服务端只画 cv2 叠加层
+    "seaborn",
+    "pandas",
+    "IPython",
+    "jupyter",
+)
+
+# openvino 的 --collect-all 会把所有设备插件都收进来，我们固定 device="cpu"，
+# NPU 编译器(96MB)+NPU 插件(7MB)+GPU 插件(33MB) 全是死重量，打包后直接剔掉。
+OPENVINO_DROP = (
+    "openvino_intel_npu_compiler.dll",
+    "openvino_intel_npu_plugin.dll",
+    "openvino_intel_gpu_plugin.dll",
+    "openvino.lib",        # 导入库，只给 C++ 编译期用
+    "cache.json",
+)
+
 
 def log(msg):
     print(f"[build] {msg}", flush=True)
@@ -147,6 +173,43 @@ def prune_backups(keep=1):
             break
 
 
+def prune_openvino(out_dir: Path):
+    """剔掉用不到的 openvino 设备插件。
+
+    我们固定 `device="cpu"`，NPU 编译器/GPU 插件永远不会被加载；`--collect-all openvino`
+    没法只收一部分，所以打包完手动删。只删确定不用的文件，删之前把大小打出来。
+    """
+    libs = out_dir / "_internal" / "openvino" / "libs"
+    if not libs.is_dir():
+        return
+    freed = 0
+    for name in OPENVINO_DROP:
+        p = libs / name
+        if p.is_file():
+            freed += p.stat().st_size
+            try:
+                p.unlink()
+            except OSError as e:  # noqa: BLE001
+                log(f"剔不掉 {name}：{e}")
+    if freed:
+        log(f"剔掉 openvino 的 NPU/GPU 插件：省 {freed / 1048576:.0f} MB")
+
+
+def size_report(out_dir: Path, top=8):
+    """打出体积构成，下次想知道"为啥这么大"直接看这里。"""
+    items = []
+    for p in list(out_dir.glob("*")) + list((out_dir / "_internal").glob("*")):
+        if p.is_file():
+            items.append((p.stat().st_size, p.name))
+        elif p.is_dir():
+            s = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+            items.append((s, p.name + "/"))
+    items.sort(reverse=True)
+    log("体积构成：")
+    for s, n in items[:top]:
+        log(f"  {s / 1048576:7.1f} MB  {n}")
+
+
 def build(onefile, with_accurate, clean, dry_run=False):
     # 不在脚本里删 build/ 和 dist/：里面是几万个文件，批量删除会被各种安全策略
     # （包括本项目的 safe-delete 钩子）拦下来。目录版靠 prepare_dist() 改名让路，
@@ -197,6 +260,7 @@ def build(onefile, with_accurate, clean, dry_run=False):
         "--exclude-module", "tkinter",
         "--exclude-module", "PyQt5",
         "--exclude-module", "PySide6",
+        *[x for m in EXCLUDE_MODULES for x in ("--exclude-module", m)],
         str(WEBUI / "server.py"),
     ]
 
@@ -215,11 +279,14 @@ def build(onefile, with_accurate, clean, dry_run=False):
     else:
         out = DIST / APP_NAME
         exe = out / f"{APP_NAME}.exe"
+        prune_openvino(out)
         total = sum(f.stat().st_size for f in out.rglob("*") if f.is_file()) if out.exists() else 0
     if not exe.exists():
         sys.exit(f"没找到产物 {exe}")
     log(f"完成：{exe}")
     log(f"体积：{total / 1048576:.0f} MB")
+    if not onefile:
+        size_report(DIST / APP_NAME)
     if onefile:
         log("单文件版每次启动都要把运行时解压到临时目录，第一次点开要等一会儿。")
         log("config/标定会写到 exe 旁边的 data/ 里。")
