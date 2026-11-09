@@ -967,9 +967,58 @@ det_state = {
     "shown": {},         # tid -> {"first": 首次出现时间, "last": 最近显示时间}，用于最短显示时长
     "vis": [],           # 这一帧真正画出来的轨迹（给挂机脚本挑目标用）
     "error": "",
+    # 冷启动阶段：点开「识别」不等于马上有框——导入推理库、加载/编译模型、跑通
+    # 第一帧，这几步合起来要几秒到十几秒，期间面板上什么都看不到，很容易以为
+    # 「按钮没生效」。stage 用来给面板报进度，ready 只在**首帧推理成功后**才置位。
+    "stage": "idle",     # idle / import / load / warmup / ready / error
+    "det_t0": 0.0,       # 这次冷启动的开始时刻（perf_counter）
+    "preloaded": False,  # 服务启动时的后台预热是否已完成（点开就秒出）
 }
 det_lock = threading.Lock()
-det_thread_started = [False]     # 检测线程只启动一次（内部按 mode 热切换模型）
+# 已加载的模型：mode -> YOLO。放到模块级而不是循环里的局部变量——线程崩了重拉、
+# 或者切模式再切回来，都能直接复用，不用再花十几秒重新编译 OpenVINO。
+det_models = {}
+# 检测线程句柄：以前是个「只启动一次」的布尔位，线程要是崩了（比如推理库导入
+# 失败）就再也拉不起来，只能重启服务。现在存句柄，死了允许重新拉起。
+det_thread = [None]
+
+# 冷启动的三步，只用来显示「现在卡在哪一步」。
+# 百分比不按阶段加权——各阶段实际耗时波动太大（磁盘缓存、CPU 负载），加权会在
+# 阶段切换时一下跳十几二十个点，看着像数字瞎编。改成按「已用时间 / 预期总时长」
+# 线性推进，超时停在 96%，100% 只留给首帧真的跑通那一刻。
+DET_STAGES = {"import": "导入推理库", "load": "加载模型", "warmup": "首帧检测"}
+DET_EXPECT_S = 12.0      # 本机实测冷启动 10~15 秒（导入 ultralytics 占大头）
+
+
+def _det_stage(name):
+    det_state["stage"] = name
+
+
+def det_progress() -> dict:
+    """面板用的冷启动进度：阶段是真的，百分比是按总耗时估的。"""
+    st = det_state
+    started = st["det_t0"]
+    elapsed_ms = (time.perf_counter() - started) * 1000 if started else 0
+    if not st["enabled"]:
+        return {"stage": "idle", "label": "", "pct": 0,
+                "elapsed_ms": 0, "waiting": ""}
+    if st["error"]:
+        return {"stage": "error", "label": "启动失败", "pct": 100,
+                "elapsed_ms": round(elapsed_ms), "waiting": st["error"]}
+    # 模型好了但窗口不在：识别循环在空转，用户看到的就是「开了没反应」。
+    # 导入库/加载模型这两步跟窗口无关，别拿「等窗口」把阶段盖掉。
+    wait = ("" if grabber.window_found or st["stage"] in ("import", "load")
+            else "找不到游戏窗口")
+    if st["stage"] == "ready":
+        return {"stage": "ready", "label": "就绪", "pct": 100,
+                "elapsed_ms": round(elapsed_ms), "waiting": wait}
+    pct = min(96, round(elapsed_ms / 1000.0 / DET_EXPECT_S * 96))
+    if wait and st["stage"] == "warmup":
+        # 模型已经装好、卡在「抓不到游戏画面」这一步：进度别再往上爬，
+        # 否则看着像马上好，实际是在空等窗口
+        pct = min(pct, 40)
+    return {"stage": st["stage"], "label": DET_STAGES.get(st["stage"], "准备中"),
+            "pct": pct, "elapsed_ms": round(elapsed_ms), "waiting": wait}
 
 
 def _clamp_conf(v) -> float:
@@ -2001,27 +2050,72 @@ if char_state["tpl"] is not None:
     ensure_char_thread()
 
 
-def detect_loop():
-    import warnings
-    warnings.filterwarnings("ignore")
-    from ultralytics import YOLO
+_YOLO = [None]              # 懒加载的 ultralytics.YOLO 类（导入一次就缓存）
+_det_load_lock = threading.Lock()   # 预加载线程和检测线程可能同时想装模型
 
-    models = {}          # mode -> YOLO（切换回来不用重新加载）
 
-    def get_model(mode):
-        if mode not in models:
-            models[mode] = YOLO(MODES[mode]["dir"], task="detect")
-        return models[mode]
+def _yolo_cls():
+    if _YOLO[0] is None:
+        _det_stage("import")
+        import warnings
+        warnings.filterwarnings("ignore")
+        from ultralytics import YOLO  # noqa: PLC0415  故意延迟到线程里导入（约 5 秒）
+        _YOLO[0] = YOLO
+    return _YOLO[0]
 
+
+def _ensure_model(mode):
+    """取（必要时加载）某个模式的模型，模块级缓存，多线程共用一把锁。"""
+    if mode in det_models:
+        return det_models[mode]
+    with _det_load_lock:
+        if mode not in det_models:      # 双检：等锁期间可能已被别的线程装好
+            cls = _yolo_cls()
+            _det_stage("load")
+            det_models[mode] = cls(MODES[mode]["dir"], task="detect")
+    return det_models[mode]
+
+
+def preload_det():
+    """服务启动后后台预热：导入推理库 + 装模型 + 用一张空图跑通首帧。
+
+    首次点开「识别」原本要从零等 10~15 秒（导入 ultralytics 占一半，OpenVINO
+    首次编译占另一半）。预先跑一遍之后，点开基本是秒出，进度条一闪而过。
+    失败就安静退出：用户点开时检测线程会再试一次，并把自己的报错显示到面板上。
+    """
     try:
-        get_model(det_state["mode"])
+        mode = det_state["mode"]
+        model = _ensure_model(mode)
+        if det_state["enabled"]:
+            return                      # 用户已经点开了，让检测线程自己去跑首帧
+        _det_stage("warmup")
+        cfg = MODES[mode]
+        # 尺寸无所谓：predict 会按 imgsz 缩放，这里只要把推理引擎建起来
+        model.predict(np.zeros((768, 1366, 3), np.uint8), imgsz=cfg["imgsz"],
+                      conf=min(cfg["conf"], LOW_DETECT_CONF),
+                      verbose=False, device="cpu")
+        det_state["preloaded"] = True
+        print(f"detector preloaded ({cfg['dir']})")
+    except Exception:  # noqa: BLE001
+        pass                            # 预加载失败不影响正常流程
+    finally:
+        if not det_state["enabled"]:
+            _det_stage("idle")
+
+
+def detect_loop():
+    _det_stage("import")
+    try:
+        _ensure_model(det_state["mode"])
     except Exception as e:  # noqa: BLE001
         det_state["error"] = f"模型加载失败: {type(e).__name__}: {e}"
         det_state["loading"] = False
+        _det_stage("error")
         return
-    det_state["ready"] = True
-    det_state["loading"] = False
-    print(f"detector ready ({MODES[det_state['mode']]['dir']})")
+    # 模型装好了，但 ready 要等第一帧真的跑出结果——那一步也可能要一两秒，
+    # 提前置 ready 会让面板显示「0 ms · 0 帧/秒」，看着像坏了。
+    _det_stage("warmup")
+    print(f"detector loaded ({MODES[det_state['mode']]['dir']})")
 
     n, t0 = 0, time.perf_counter()
     prev_small = None   # 相机补偿用：上一帧缩略灰度图
@@ -2038,10 +2132,17 @@ def detect_loop():
         mode = det_state["mode"]
         cfg = MODES[mode]
         try:
-            model = get_model(mode)      # 首次切到该模式时才加载
-            det_state["loading"] = False
+            # 首次切到某个模式时要现加载模型，这也算一次冷启动：进度条重走一遍
+            fresh = mode not in det_models
+            if fresh:
+                det_state["ready"] = False
+                det_state["loading"] = True
+                det_state["det_t0"] = time.perf_counter()
+            model = _ensure_model(mode)
         except Exception as e:  # noqa: BLE001
             det_state["error"] = f"模型加载失败: {type(e).__name__}: {e}"
+            det_state["loading"] = False
+            _det_stage("error")
             time.sleep(1.0)
             continue
 
@@ -2075,8 +2176,19 @@ def detect_loop():
                                 verbose=False, device="cpu")[0]
         except Exception as e:  # noqa: BLE001
             det_state["error"] = f"推理失败: {type(e).__name__}: {e}"
+            det_state["loading"] = False
+            _det_stage("error")
             time.sleep(0.5)
             continue
+
+        if not det_state["ready"] or det_state["stage"] == "error":
+            # 首帧推理通了才算真的就绪：面板的进度条到这里才走满。
+            # 之前偶发失败（过图瞬间抓不到帧之类）也会自动恢复，不用重启。
+            det_state["ready"] = True
+            det_state["loading"] = False
+            det_state["error"] = ""
+            _det_stage("ready")
+            print("detector ready")
 
         h, w = frame.shape[:2]
         flt = det_state["filter"]
@@ -2158,6 +2270,12 @@ def detect_loop():
         dt = time.perf_counter() - t0
         if dt >= 2.0:
             det_state["det_fps"], n, t0 = n / dt, 0, time.perf_counter()
+
+
+# 服务一起来就在后台把模型热好（不推理真画面，只把库导入、模型编译、引擎建起来）。
+# 这样用户点「识别」时不用先干等十几秒——等待被挪到了启动阶段，而那个阶段本来
+# 就在等窗口/等页面打开。失败没关系，点开时检测线程会再试一次并显示报错。
+threading.Thread(target=preload_det, daemon=True, name="det-preload").start()
 
 
 app = FastAPI(title="Capture Preview")
@@ -2256,6 +2374,7 @@ async def stats():
     stream_fps = round(grabber.stream_fps, 1) if 0 <= sent_age < 1.5 else 0.0
     with det_lock:
         counts = dict(det_state["counts"])
+    dp = det_progress()
     top = sorted(counts.items(), key=lambda kv: -kv[1])[:4]
     return JSONResponse({
         "window_found": grabber.window_found,
@@ -2268,6 +2387,11 @@ async def stats():
         "detect_enabled": det_state["enabled"],
         "detect_loading": det_state["loading"],
         "detect_ready": det_state["ready"],
+        "detect_stage": dp["stage"],
+        "detect_stage_label": dp["label"],
+        "detect_progress": dp["pct"],
+        "detect_elapsed_ms": dp["elapsed_ms"],
+        "detect_waiting": dp["waiting"],
         "infer_ms": round(det_state["infer_ms"], 0),
         "det_fps": round(det_state["det_fps"], 1),
         "targets": sum(counts.values()),
@@ -2582,18 +2706,31 @@ async def detect_mode(m: str = "fast"):
     """切换部署配置：fast=384x672/20+FPS，accurate=544x960/精度优先。"""
     if m in MODES:
         det_state["mode"] = m
-        det_state["loading"] = True      # 首次切到该模式需要加载模型
+        # 切到没加载过的模式要现编译模型（十几秒），此时也得让进度条出现；
+        # 切回已加载过的模式则瞬间生效，不打扰。
+        if det_state["enabled"] and m not in det_models:
+            det_state["loading"] = True
+            det_state["ready"] = False
+            det_state["det_t0"] = time.perf_counter()
+            det_state["stage"] = "load"
     return JSONResponse({"mode": det_state["mode"], **MODES[det_state["mode"]]})
 
 
 @app.get("/api/detect/toggle")
 async def detect_toggle():
     det_state["enabled"] = not det_state["enabled"]
-    if det_state["enabled"] and not det_thread_started[0]:
-        det_thread_started[0] = True
-        det_state["loading"] = not det_state["ready"]
-        threading.Thread(target=detect_loop, daemon=True).start()
-    if not det_state["enabled"]:
+    if det_state["enabled"]:
+        th = det_thread[0]
+        if th is None or not th.is_alive():
+            # 第一次开，或上一次线程崩了（导入失败/推理异常退出）：重新拉起并重走进度
+            det_state["error"] = ""
+            det_state["det_t0"] = time.perf_counter()
+            det_state["loading"] = not det_state["ready"]
+            det_state["stage"] = "ready" if det_state["ready"] else "import"
+            th = threading.Thread(target=detect_loop, daemon=True, name="detect")
+            det_thread[0] = th
+            th.start()
+    else:
         with det_lock:
             det_state["annotated"] = None
             det_state["counts"] = {}
@@ -2602,7 +2739,25 @@ async def detect_toggle():
             det_state["lock_ts"] = 0.0
             det_state["shown"] = {}
         tracker.reset()
-    return JSONResponse({"enabled": det_state["enabled"], "loading": det_state["loading"]})
+    return JSONResponse({"enabled": det_state["enabled"], "loading": det_state["loading"],
+                         **{k: v for k, v in det_progress().items() if k != "waiting"}})
+
+
+@app.get("/api/detect/progress")
+async def detect_progress():
+    """冷启动进度（轻量接口）：面板在加载期间高频轮询它，就绪即停。
+
+    返回的 pct 是按阶段耗时估的，不是真实百分比——import/load 在 C++ 里跑，
+    没有回调能报精细进度。阶段切换是真的，所以进度会一站一站往前走。
+    """
+    p = det_progress()
+    p["enabled"] = det_state["enabled"]
+    p["ready"] = det_state["ready"]
+    p["loading"] = det_state["loading"]
+    p["window_found"] = grabber.window_found
+    # 服务启动时的后台预热（用户还没点识别）也让人能看到，排查「点了半天没反应」用
+    p["preloading"] = (not det_state["enabled"]) and det_state["stage"] in ("import", "load", "warmup")
+    return JSONResponse(p)
 
 
 @app.get("/api/window/focus")

@@ -195,6 +195,16 @@
   #expChart { display: block; width: 100%; height: 46px; }
   button:disabled { opacity: .55; cursor: default; }
   button.on { background: #eaf3de; border-color: #b5cf8f; }
+  /* 识别冷启动进度：按钮底色按 --p 从左往右填（不用伪元素，避免压住文字）。
+     导入推理库 / 编译模型 / 首帧检测要几秒到十几秒，这段时间画面上一个框都没有，
+     光看「识别: 开」会以为点了没反应。 */
+  #detect.loading {
+    background: linear-gradient(90deg, rgba(245,158,11,.34) 0 var(--p, 0%),
+                rgba(255,255,255,0) var(--p, 0%) 100%);
+    border-color: #e2c08d;
+    color: #8a5300;
+  }
+  #detect { white-space: nowrap; }
   .actions { display: flex; flex-wrap: wrap; gap: 8px; }
   /* 包按钮用的 span：display:contents 让里面的按钮仍按 .actions 的 flex 排 */
   #calBox { display: contents; }
@@ -1807,12 +1817,61 @@
     }, 250);
   });
 
+  /* ---------- 识别冷启动进度 ----------
+     点开「识别」不等于马上有框：要先导入 ultralytics、加载/编译 OpenVINO 模型、
+     再跑通第一帧，几秒到十几秒。这段空窗期以前只显示「识别: 开」，看着像点了没反应。
+     现在按钮文字和底色直接当进度条用，旁边（检测耗时那格）显示阶段 + 已用秒数。 */
+  let detProgTimer = null;
+
+  function paintDet(p) {
+    const btn = $("detect");
+    if (!p) return;
+    const busy = !!p.enabled && (p.loading || p.stage === "error");
+    if (busy) {
+      const fail = p.stage === "error";
+      // 模型好了但游戏窗口不在：后端会把进度按在 40% 不再涨（建模已完成、
+      // 卡在抓不到画面这一步），按钮直说在等窗口，别让人以为马上就好
+      const waiting = !fail && !!p.waiting;
+      const pct = Math.max(0, Math.min(99, p.pct || 0));
+      btn.textContent = fail ? "识别: 失败" : (waiting ? "识别: 等窗口" : `识别: ${pct}%`);
+      btn.title = p.waiting || `${p.label || "启动中"}（${pct}%，估算）`;
+      btn.style.setProperty("--p", pct + "%");
+      const secs = ((p.elapsed_ms || 0) / 1000).toFixed(1);
+      $("dms").textContent = fail
+        ? (p.waiting || "启动失败")
+        : (waiting ? `${p.waiting} · ${secs}s`
+                   : `${p.label || "启动中"}… ${secs}s`);
+      $("dms").className = "v" + (fail ? " warn" : "");
+    } else {
+      btn.style.removeProperty("--p");
+      btn.textContent = p.enabled ? "识别: 开" : "识别: 关";
+      btn.title = p.waiting || "";
+    }
+    btn.className = (p.enabled ? "on" : "") + (busy ? " loading" : "");
+  }
+
+  async function pollDetProg() {
+    try {
+      const p = await (await fetch("/api/detect/progress", { cache: "no-store" })).json();
+      paintDet(p);
+      if (!p.loading) stopDetProg();     // 就绪 / 关掉 / 失败：不用再快轮询
+    } catch (e) { /* 服务重启中，下一轮再说 */ }
+  }
+  function startDetProg() {
+    if (detProgTimer) return;
+    pollDetProg();
+    detProgTimer = setInterval(pollDetProg, 250);
+  }
+  function stopDetProg() {
+    if (detProgTimer) { clearInterval(detProgTimer); detProgTimer = null; }
+  }
+
   $("detect").addEventListener("click", async () => {
     $("detect").disabled = true;
     try {
       const r = await (await fetch("/api/detect/toggle", { cache: "no-store" })).json();
-      $("detect").textContent = r.enabled ? "识别: 开" : "识别: 关";
-      $("detect").className = r.enabled ? "on" : "";
+      paintDet(r);
+      if (r.loading) startDetProg(); else stopDetProg();
     } finally {
       $("detect").disabled = false;
     }
@@ -1824,6 +1883,7 @@
       const cur = $("modeBtn").textContent.includes("速度") ? "accurate" : "fast";
       const r = await (await fetch("/api/detect/mode?m=" + cur, { cache: "no-store" })).json();
       $("modeBtn").textContent = "模式: " + r.label;
+      startDetProg();     // 切到没加载过的模式要现编译模型，进度条得跟着出现
       $("modeBtn").className = r.mode === "accurate" ? "on" : "";
     } finally {
       $("modeBtn").disabled = false;
@@ -2062,11 +2122,16 @@
       const age = s.frame_age_ms;
       $("age").textContent = age >= 0 ? `${Math.round(age)} ms` : "—";
       $("age").className = "v" + (age > 800 ? " warn" : "");
-      $("detect").textContent = s.detect_enabled ? "识别: 开" : "识别: 关";
-      $("detect").className = s.detect_enabled ? "on" : "";
       // 单帧耗时（这是 YOLO 的固定成本，调频率不会变）+ 实际推理帧率（调频率才会变）
       $("dms").textContent = s.detect_ready && s.detect_enabled
         ? `${s.infer_ms} ms · ${s.det_fps} 帧/秒` : "—";
+      $("dms").className = "v";
+      // 识别按钮 + 冷启动进度（按钮本身就是进度条；加载期间会覆盖上面这行 dms 文本）
+      paintDet({ enabled: s.detect_enabled, loading: s.detect_loading,
+                 stage: s.detect_stage, label: s.detect_stage_label,
+                 pct: s.detect_progress, elapsed_ms: s.detect_elapsed_ms,
+                 waiting: s.detect_waiting });
+      if (s.detect_loading) startDetProg(); else stopDetProg();
       $("targets").textContent = s.detect_enabled ? s.targets : "—";
       // 两个滑块以后端为准（可能被别的标签页 / 重启后的存盘改过），但拖动期间不覆盖
       if (Date.now() > confLockUntil) {
@@ -2083,7 +2148,9 @@
         ? (s.pending ? `${s.pending} 个待确认` : "0")
         : "—";
       $("classes").textContent = s.detect_enabled
-        ? (s.detect_loading ? "模型加载中…" : (s.detect_error || s.top_classes.join("　") || "无"))
+        ? (s.detect_loading
+            ? `${s.detect_stage_label || "启动中"}… ${s.detect_progress || 0}%`
+            : (s.detect_error || s.top_classes.join("　") || "无"))
         : "—";
       const lk = s.lock;
       $("lock").textContent = s.detect_enabled
@@ -2108,7 +2175,9 @@
         layoutLayer();
       }
       if (!paused) {
-        $("badge").textContent = s.detect_loading ? "模型加载中"
+        $("badge").textContent = s.detect_loading
+          ? (s.detect_waiting ? "等游戏窗口"
+             : `${s.detect_stage_label || "启动"} ${s.detect_progress || 0}%`)
           : (s.detect_enabled ? "识别中" : (found ? "实时" : "无信号"));
       }
     } catch (e) {
