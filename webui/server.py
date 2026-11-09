@@ -2030,7 +2030,8 @@ def draw_attack_range(img, box):
     arrow = ""
     if mode == "front":
         arrow = " ->" if face > 0 else (" <-" if face < 0 else " ?")
-    tag = f"ATK {r}x{rh}{arrow}" if on else f"ATK {r}x{rh}{arrow} (关)"
+    # 「关」不能用中文：cv2 内置字体画不了 CJK，会渲染成一串 "???" 像乱码
+    tag = f"ATK {r}x{rh}{arrow}" if on else f"ATK {r}x{rh}{arrow} (OFF)"
     (tw_, th_), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
     # 标签贴在矩形外侧的空地上：正前方模式只有半个框，往里放会压住人物本体
     if mode == "front" and face > 0:
