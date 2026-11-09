@@ -440,6 +440,14 @@
       <div class="tile" id="tile">
         <img id="view" alt="游戏画面预览" />
         <div class="badge"><span class="dot" id="dot"></span><span id="badge">等待画面</span></div>
+        <div class="hudstats">
+          <div class="r"><span class="k">客户区</span><span class="v" id="size">—</span></div>
+          <div class="r"><span class="k">采集</span><span class="v" id="cfps">—</span></div>
+          <div class="r"><span class="k">推送</span><span class="v" id="sfps">—</span></div>
+          <div class="r"><span class="k">帧延迟</span><span class="v" id="age">—</span></div>
+          <div class="r"><span class="k">检测耗时</span><span class="v" id="dms">—</span></div>
+          <div class="r"><span class="k">检出目标</span><span class="v" id="targets">—</span></div>
+        </div>
       </div>
       <!-- 遮罩层放在 tile 外面：tile 有 overflow:hidden 会把贴边的把手裁掉 -->
       <canvas id="maskLayer" class="masklay"></canvas>
@@ -463,12 +471,6 @@
             <div class="bar" data-k="exp"><span class="bk">EXP</span><span class="bv">—</span><span class="btrack"><i></i></span></div>
           </div>
           <div class="rows">
-            <div class="row"><span class="k">客户区</span><span class="v" id="size">—</span></div>
-            <div class="row"><span class="k">采集</span><span class="v" id="cfps">—</span></div>
-            <div class="row"><span class="k">推送</span><span class="v" id="sfps">—</span></div>
-            <div class="row"><span class="k">帧延迟</span><span class="v" id="age">—</span></div>
-            <div class="row"><span class="k">检测耗时</span><span class="v" id="dms">—</span></div>
-            <div class="row"><span class="k">检出目标</span><span class="v" id="targets">—</span></div>
             <div class="row conf">
               <span class="k">识别阈值</span>
               <span class="v"><input id="confRange" class="rng" type="range" min="0.05" max="0.95" step="0.05" value="0.8" title="低于这个置信度的框不算识别到（不画框、不计数）。拖动即时生效"><b id="confVal">0.80</b></span>
