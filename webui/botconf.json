@@ -1,6 +1,6 @@
 {
   "on": false,
-  "hp_pct": 55.0,
+  "hp_pct": 30.0,
   "pot_sec": 3.0,
   "pot_key": "pot8",
   "pot_chain": [
@@ -9,7 +9,7 @@
     "Digit7",
     "Digit8"
   ],
-  "mp_pct": 30.0,
+  "mp_pct": 25.0,
   "mp_key": "pot9",
   "mp_chain": [
     "Digit9",
