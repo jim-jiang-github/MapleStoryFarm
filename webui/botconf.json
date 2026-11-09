@@ -17,6 +17,9 @@
     "",
     ""
   ],
+  "atk_key": "ControlLeft",
+  "jump_key": "AltLeft",
+  "pick_key": "KeyZ",
   "range_px": 100.0,
   "range_h": 130,
   "range_side": "both",

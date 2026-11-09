@@ -25,6 +25,11 @@ echo.
 
 "%PICKED%" "webui\server.py" --open
 
+rem ---- 死亡取证：精确退出时刻 + 当时全量进程表 ----
+rem service.log 里 python 自己的记录止于「服务启动」，死亡方式看不见；
+>> "webui\service.log" echo [%date% %time%] python 退出 exit=%errorlevel%
+>> "webui\service.log" tasklist
+
 echo.
 echo Service stopped. (exit code %errorlevel% ^| 退出原因见 webui\service.log)
 pause
