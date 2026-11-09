@@ -130,6 +130,7 @@ class Sender:
     """
 
     RETRY_SEC = 5.0      # 硬件掉线后多久再试着连一次
+    RETRY_MAX_SEC = 60.0  # 一直连不上就退避到这个间隔，别每 5 秒扫一遍串口
 
     def __init__(self, mode="auto", port=""):
         self._lock = threading.Lock()
@@ -138,7 +139,10 @@ class Sender:
         self.hid = None                 # 真的连上了才有，端口号从 self.hid.port 读
         self.err = ""
         self._next_try = 0.0
+        self._wait = self.RETRY_SEC
+        self._retry_thread = None
         self._apply(mode, self.req_port)
+        self._start_retry()
 
     # ---- 硬件 ----
     def _open_hid(self):
@@ -164,6 +168,7 @@ class Sender:
                 self.hid = None
             self.mode, self.req_port = mode, port or ""
             self.err = ""
+            self._wait = self.RETRY_SEC
             if mode == "soft":
                 return
             try:
@@ -172,19 +177,45 @@ class Sender:
                 self.err = str(e)
                 self._next_try = time.time() + self.RETRY_SEC
 
-    def _maybe_retry(self):
-        if self.mode == "soft" or self.hid is not None:
+    def _start_retry(self):
+        if self._retry_thread is not None and self._retry_thread.is_alive():
             return
-        if time.time() < self._next_try:
-            return
-        try:
-            k = self._open_hid()
-        except Exception as e:  # noqa: BLE001
-            self.err = str(e)
-            self._next_try = time.time() + self.RETRY_SEC
-            return
-        with self._lock:
-            self.hid, self.err = k, ""
+        self._retry_thread = threading.Thread(
+            target=self._retry_loop, daemon=True, name="hid-retry")
+        self._retry_thread.start()
+
+    def _backoff(self):
+        self._next_try = time.time() + self._wait
+        self._wait = min(self.RETRY_MAX_SEC, self._wait * 1.7)
+
+    def _retry_loop(self):
+        """在后台补连硬件，绝不放进按键路径。
+
+        没有小板时 `find_port()` 要挨个串口 probe（每个 0.25s 超时），以前是在
+        `__call__` 里同步做的——按键一次卡几百毫秒，走位就变成一顿一顿，
+        看着就像「软件注入没生效」。现在按键直接走软件，连不连得上以后台为准。
+        """
+        while True:
+            time.sleep(0.5)
+            if self.hid is not None or self.mode == "soft":
+                continue
+            if time.time() < self._next_try:
+                continue
+            try:
+                k = self._open_hid()
+            except Exception as e:  # noqa: BLE001
+                self.err = str(e)
+                self._backoff()
+                continue
+            with self._lock:
+                if self.hid is None:          # 这期间没被别人抢先连上才装进去
+                    self.hid, self.err = k, ""
+                    self._wait = self.RETRY_SEC
+                else:
+                    try:
+                        k.close()
+                    except Exception:  # noqa: BLE001
+                        pass
 
     def configure(self, mode, port):
         """切换出口。配置没变就什么都不做——不能因为改了个血线就重连串口。"""
@@ -196,8 +227,6 @@ class Sender:
 
     # ---- 对外 ----
     def __call__(self, name, down):
-        if self.hid is None:
-            self._maybe_retry()
         k = self.hid
         if k is not None:
             try:
@@ -212,8 +241,16 @@ class Sender:
                     except Exception:  # noqa: BLE001
                         pass
                     self.hid = None
+                    self._wait = self.RETRY_SEC
                     self._next_try = time.time() + self.RETRY_SEC
-        return send_key(name, down) >= 1, "soft"
+        n = send_key(name, down)
+        if n < 1:
+            # SendInput 被系统拒了。最常见的原因是游戏跑在管理员权限下，
+            # UIPI 不允许低权限进程往它的窗口注入输入——这时候按键一点效果都没有，
+            # 必须报出来，不然面板还显示「软件注入」像在正常工作。
+            self.err = "软件注入被系统拦下：游戏以管理员身份运行，请用管理员身份启动服务"
+            return False, "soft"
+        return True, "soft"
 
     def release_all(self):
         k = self.hid
@@ -229,7 +266,7 @@ class Sender:
             return f"硬件 {self.hid.port}"
         if self.mode == "soft":
             return "软件注入"
-        return "软件注入（硬件不可用）"
+        return "软件注入（未检测到 CH9329）"
 
 
 
