@@ -14,8 +14,8 @@ def recorder(name, down):
     calls.append((name, down))
 
 
-def make(monsters=(), hp=100.0, fg=True, char=CHAR):
-    b = bot.Bot(get_state=lambda: {"fg": fg, "hp": hp, "char": char,
+def make(monsters=(), hp=100.0, mp=None, fg=True, char=CHAR):
+    b = bot.Bot(get_state=lambda: {"fg": fg, "hp": hp, "mp": mp, "char": char,
                                    "monsters": list(monsters)}, sender=recorder)
     b.cfg = dict(bot.DEFAULTS)
     return b
@@ -23,7 +23,8 @@ def make(monsters=(), hp=100.0, fg=True, char=CHAR):
 
 def step(b, now=None, **kw):
     st = {"fg": kw.get("fg", True), "hp": kw.get("hp", 100.0),
-          "char": kw.get("char", CHAR), "monsters": kw.get("monsters", list(kw.get("m", [])))}
+          "mp": kw.get("mp"), "char": kw.get("char", CHAR),
+          "monsters": kw.get("monsters", list(kw.get("m", [])))}
     b.get_state = lambda: st
     calls.clear()
     b._step(b.cfg, now=now)
@@ -269,7 +270,7 @@ print("[21] 攻击方向的取值校验")
 check("front 合法", bot.clamp_cfg({"range_side": "front"})["range_side"] == "front")
 check("乱写的值退回两侧", bot.clamp_cfg({"range_side": "up"})["range_side"] == "both")
 
-print("[22] 喝药链：主键按了血量没涨 → 按备用 1→5 换着喝")
+print("[22] 喝药链：主键按了血量没涨 → 按备用 1→4 换着喝")
 pot_presses = lambda c: [n for n, d in c if d and (n.startswith("pot") or n in ("KeyA", "KeyS"))]
 b = make(hp=30.0)
 b.cfg["pot_chain"] = ["KeyA", "KeyS"]
@@ -300,10 +301,38 @@ check("涨了 2% 就算生效，不换键", pot_presses(c) == [], pot_presses(c)
 
 print("[24] 备用药水键的配置清洗")
 check("只收认识的键", bot.clamp_cfg({"pot_chain": ["KeyA", "BadKey", "F5"]})["pot_chain"]
-      == ["KeyA", "", "F5", "", ""],
+      == ["KeyA", "", "F5", ""],
       bot.clamp_cfg({"pot_chain": ["KeyA", "BadKey", "F5"]})["pot_chain"])
-check("超过 5 格截断", len(bot.clamp_cfg({"pot_chain": ["KeyA"] * 9})["pot_chain"]) == 5)
-check("默认全空", bot.DEFAULTS["pot_chain"] == ["", "", "", "", ""])
+check("超过 4 格截断", len(bot.clamp_cfg({"pot_chain": ["KeyA"] * 9})["pot_chain"]) == 4)
+check("默认全空", bot.DEFAULTS["pot_chain"] == ["", "", "", ""])
+check("蓝药链同样清洗", bot.clamp_cfg({"mp_chain": ["KeyZ", "BadKey"]})["mp_chain"]
+      == ["KeyZ", "", "", ""],
+      bot.clamp_cfg({"mp_chain": ["KeyZ", "BadKey"]})["mp_chain"])
+
+print("[25] 喝蓝药：和红药同一套状态机，量的是蓝、按的是 mp_key")
+mp_presses = lambda c: [n for n, d in c if d and (n.startswith("pot") or n in ("KeyM", "KeyN"))]
+b3 = make(hp=50.0, mp=25.0)
+b3.cfg["mp_pct"] = 30.0
+b3.cfg["mp_key"] = "pot9"
+b3.cfg["mp_chain"] = ["KeyM", "KeyN"]
+t3 = 300.0
+c = step(b3, now=t3, hp=50.0, mp=25.0)
+check("蓝量低于线 → 按主键 pot9", mp_presses(c) == ["pot9"], mp_presses(c))
+c = step(b3, now=t3 + 0.5, hp=50.0, mp=25.0)
+check("验证期内不连按", mp_presses(c) == [], mp_presses(c))
+c = step(b3, now=t3 + 0.9, hp=50.0, mp=25.0)
+check("主键没反应 → 立刻换备用1 KeyM", mp_presses(c) == ["KeyM"], mp_presses(c))
+c = step(b3, now=t3 + 1.2, hp=50.0, mp=60.0)
+check("蓝量涨回来 → 认定喝到，停手", mp_presses(c) == [], mp_presses(c))
+c = step(b3, now=t3 + 10.0, hp=50.0, mp=20.0)
+check("下次低蓝直接用生效的 KeyM", mp_presses(c) == ["KeyM"], mp_presses(c))
+c = step(b3, now=t3 + 10.9, hp=50.0, mp=20.0)
+check("KeyM 也空 → 换 KeyN", mp_presses(c) == ["KeyN"], mp_presses(c))
+c = step(b3, now=t3 + 11.8, hp=50.0, mp=20.0)
+check("链全空绕完一圈 → 停手等间隔", mp_presses(c) == [], mp_presses(c))
+c = step(b3, now=t3 + 11.8 + 3.1, hp=50.0, mp=20.0)
+check("歇完间隔从头（pot9）再试", mp_presses(c) == ["pot9"], mp_presses(c))
+check("蓝够时不按蓝药键", mp_presses(step(b3, now=t3 + 20.0, hp=50.0, mp=80.0)) == [])
 
 print(f"\n通过 {ok} / {ok + fail}")
 sys.exit(1 if fail else 0)

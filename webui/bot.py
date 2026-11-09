@@ -328,8 +328,12 @@ DEFAULTS = {
     "hp_pct": 40.0,      # 血低于这个百分比就喝药
     "pot_sec": 3.0,      # 两次喝药的最小间隔（秒）
     "pot_key": "pot8",   # 用哪个键喝药：pot8 / pot9 / pot0
-    "pot_chain": ["", "", "", "", ""],
-    # ↑ 备用药水键 1~5：主键按了血量没回到线以上（药空了）就按这个顺序换着喝
+    "pot_chain": ["", "", "", ""],
+    # ↑ 备用红药键 1~4：主键按了血量没回到线以上（药空了）就按这个顺序换着喝
+    "mp_pct": 30.0,      # 蓝低于这个百分比就喝蓝药
+    "mp_key": "pot9",    # 用哪个键喝蓝药：pot8 / pot9 / pot0
+    "mp_chain": ["", "", "", ""],
+    # ↑ 备用蓝药键 1~4：主键按了蓝量没回到线以上就按这个顺序换着喝
     "range_px": 100.0,   # 攻击区域宽：人物中心左右各这么多像素
     "range_h": 120.0,    # 攻击区域高：以人物身体为中心上下各占一半（画面上画的就是它）
     "range_side": "both",  # 攻击方向：both 左右两侧 / front 只打身前（单体技能）
@@ -346,11 +350,12 @@ DEFAULTS = {
 }
 
 # 字符串型配置的合法取值，非法就退回默认，免得写进一个谁都不认识的模式
-ENUMS = {"pot_key": POT_KEYS, "input": ("auto", "hid", "soft"),
+ENUMS = {"pot_key": POT_KEYS, "mp_key": POT_KEYS, "input": ("auto", "hid", "soft"),
          "range_side": ("both", "front")}
 
 CLAMP = {
     "hp_pct": (10.0, 95.0),
+    "mp_pct": (10.0, 95.0),
     "pot_sec": (0.5, 30.0),
     "range_px": (40.0, 600.0),
     "range_h": (40.0, 400.0),
@@ -372,11 +377,12 @@ def clamp_cfg(raw):
         if isinstance(dv, bool):
             out[k] = bool(v)
         elif isinstance(dv, list):
-            # 备用药水键链：最多 5 格，只收认识的键名，不认识的清空
+            # 药水键链（红/蓝）：最多跟默认一样长，只收认识的键名，不认识的清空
+            n = len(dv)
             if isinstance(v, list):
                 out[k] = [x if (x == "" or x in CODE_VK or x in VK) else ""
-                          for x in (str(s).strip() for s in v)][:5]
-                out[k] += [""] * (5 - len(out[k]))
+                          for x in (str(s).strip() for s in v)][:n]
+                out[k] += [""] * (n - len(out[k]))
         elif isinstance(dv, str):
             if k == "hid_port":
                 out[k] = str(v or "").strip().upper()[:16]
@@ -532,6 +538,10 @@ class Bot:
         self._pot_key = None      # 当前在用的药水键（喝空了会顺着备用链往下换）
         self._pot_wait = False    # 刚按过药水键，正在等血量回到线以上
         self._pot_hp0 = 0.0       # 按下那一刻的血量：比它高就算喝到了
+        self._t_mpot = 0.0
+        self._mp_key = None       # 蓝药侧的状态，和上面三个一一对应
+        self._mp_wait = False
+        self._mp_mp0 = 0.0
         self._t_atk = 0.0
         self._t_jump = 0.0
         self._t_pick = 0.0
@@ -657,13 +667,22 @@ class Bot:
     POT_VERIFY_MS = 800      # 按下药水键后等多久确认「血量回来没有」
 
     def _pot_chain(self, cfg):
-        """喝药尝试顺序：主键在最前，备用 1~5 只留设了值的，去重。"""
+        """喝药尝试顺序：主键在最前，备用 1~4 只留设了值的，去重。"""
         seen, order = set(), []
         for k in [cfg["pot_key"], *cfg.get("pot_chain", [])]:
             if k and k not in seen:
                 seen.add(k)
                 order.append(k)
         return order or [cfg["pot_key"]]
+
+    def _mp_chain(self, cfg):
+        """喝蓝药尝试顺序：和红药同一套规则。"""
+        seen, order = set(), []
+        for k in [cfg["mp_key"], *cfg.get("mp_chain", [])]:
+            if k and k not in seen:
+                seen.add(k)
+                order.append(k)
+        return order or [cfg["mp_key"]]
 
     def _pot_step(self, cfg, hp, now):
         """喝药状态机。
@@ -703,6 +722,41 @@ class Bot:
             self._count("pot")
             self._set_status(act=f"喝药 {_key_label(self._pot_key)}", err="")
 
+    def _mpot_step(self, cfg, mp, now):
+        """喝蓝药状态机：和 _pot_step 同一套状态机，只是量的是蓝、按键是 mp_key。
+
+        正常：蓝量 < 蓝线且过了喝药间隔 → 按当前蓝药键，进入 0.8s 验证期。
+        验证：蓝量比按下那一刻高＝喝到了；到点没涨＝这格药空了 → 换备用键接着按。
+        兜底：整条链绕完一圈就停手，回到正常间隔再从头试。
+        """
+        chain = self._mp_chain(cfg)
+        if self._mp_key not in chain:
+            self._mp_key = chain[0]
+        thr = cfg["mp_pct"]
+        press = False
+        if self._mp_wait:
+            if mp > self._mp_mp0 + 0.3:
+                self._mp_wait = False
+                self._set_status(act=f"喝蓝 {_key_label(self._mp_key)} 生效", err="")
+            elif (now - self._t_mpot) * 1000.0 >= self.POT_VERIFY_MS:
+                self._mp_wait = False
+                idx = chain.index(self._mp_key)
+                if idx == len(chain) - 1:
+                    self._mp_key = chain[0]
+                    self._set_status(act="蓝药键全按过一轮都没回蓝，歇一会儿再试", err="蓝药可能喝完了")
+                else:
+                    self._mp_key = chain[idx + 1]
+                    self._set_status(act=f"{_key_label(chain[idx])} 没反应，换 {_key_label(self._mp_key)}", err="")
+                    press = True
+        elif mp < thr and now - self._t_mpot >= cfg["pot_sec"]:
+            press = True
+        if press:
+            self._tap(self._mp_key)
+            self._t_mpot = now
+            self._mp_mp0 = mp
+            self._mp_wait = True
+            self._set_status(act=f"喝蓝 {_key_label(self._mp_key)}", err="")
+
     def _step(self, cfg, now=None):
         """跑一轮决策。now 只有测试会传（假时钟），线上留空取真实时间。"""
         st = self.get_state() or {}
@@ -728,6 +782,12 @@ class Bot:
         # 1) 喝药：低于血线按当前药水键；按完没见血量涨回来就顺着备用键换
         if hp is not None:
             self._pot_step(cfg, hp, now)
+
+        # 1.5) 喝蓝：低于蓝线按蓝药键，逻辑和红药完全一致
+        mp = st.get("mp")
+        self._set_status(mp=mp)
+        if mp is not None:
+            self._mpot_step(cfg, mp, now)
 
         # 2) 拾取：无脑一直按，跟其它动作不冲突（不同键）
         if cfg["pick"] and (now - self._t_pick) * 1000.0 >= cfg["pick_ms"]:

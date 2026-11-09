@@ -1953,9 +1953,10 @@ def _bot_state():
         cbox = None                      # 人物已经丢了，别拿旧位置继续打
     with bar_lock:
         hp = bar_state["values"].get("hp")
+        mp = bar_state["values"].get("mp")
     with det_lock:
         mons = list(det_state["vis"])
-    return {"fg": _game_foreground(), "hp": hp, "char": cbox, "monsters": mons}
+    return {"fg": _game_foreground(), "hp": hp, "mp": mp, "char": cbox, "monsters": mons}
 
 
 game_bot = botmod.Bot(_bot_state)
