@@ -233,10 +233,15 @@ def client_region(hwnd):
 
 
 def _wait_foreground(hwnd, timeout=0.6):
+    """等到游戏真的成了前台窗口。
+
+    最小化也占着「前台」这个名分，但那种前台一帧都抓不到——所以必须连
+    IsIconic 一起判断，否则会把「还原失败」当成成功报给用户。
+    """
     u32 = ctypes.windll.user32
     t0 = time.perf_counter()
     while time.perf_counter() - t0 < timeout:
-        if u32.GetForegroundWindow() == hwnd:
+        if u32.GetForegroundWindow() == hwnd and not win32gui.IsIconic(hwnd):
             return True
         time.sleep(0.03)
     return False
@@ -260,17 +265,19 @@ def bring_to_front():
         return False, "未找到游戏窗口"
     u32 = ctypes.windll.user32
     SWP = win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW
+    was_min = bool(win32gui.IsIconic(hwnd))
+    ok_msg = "已还原并前置" if was_min else "已前置"
     try:
-        if win32gui.IsIconic(hwnd):
+        if was_min:
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
             time.sleep(0.2)
-        if u32.GetForegroundWindow() == hwnd:
-            return True, "已在前台"
+        if u32.GetForegroundWindow() == hwnd and not win32gui.IsIconic(hwnd):
+            return True, ok_msg
 
         # 1) 直接切（游戏刚被用过时这一步就够）
         u32.SetForegroundWindow(hwnd)
         if _wait_foreground(hwnd, 0.35):
-            return True, "已前置"
+            return True, ok_msg
 
         # 2) 模拟一次 ALT：解除前台锁，系统放行紧接着的切换
         u32.keybd_event(win32con.VK_MENU, 0, 0, 0)
@@ -278,14 +285,18 @@ def bring_to_front():
         time.sleep(0.03)
         u32.SetForegroundWindow(hwnd)
         if _wait_foreground(hwnd, 0.45):
-            return True, "已前置"
+            return True, ok_msg
 
         # 3) 置顶再取消置顶，最后再切一次
         u32.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, SWP)
         u32.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0, SWP)
         u32.SetForegroundWindow(hwnd)
         if _wait_foreground(hwnd, 0.45):
-            return True, "已前置"
+            return True, ok_msg
+        # 这里要分开报：最小化还还原不了，基本就是游戏跑在管理员权限下、当前
+        # 进程够不着它的窗口（UIPI 拦 ShowWindow），手动点任务栏一下就成。
+        if win32gui.IsIconic(hwnd):
+            return False, "窗口仍是最小化：游戏以管理员身份运行，脚本无权还原，请手动点任务栏"
         return False, "前置被系统拒绝（游戏是否以管理员身份运行？手动点一下游戏窗口即可）"
     except Exception as e:  # noqa: BLE001
         return False, f"{type(e).__name__}: {e}"
@@ -307,6 +318,7 @@ class Grabber(threading.Thread):
         self.lock = threading.Lock()
         self.frame = placeholder()
         self.window_found = False
+        self.window_minimized = False
         self.client_size = (0, 0)
         self.capture_fps = 0.0
         self.stream_fps = 0.0
@@ -342,7 +354,17 @@ class Grabber(threading.Thread):
                 region = client_region(hwnd) if hwnd else None
                 if region is None:
                     self.window_found = False
-                    self.error = "窗口未找到或已最小化" if not hwnd else "客户区尺寸异常"
+                    # 三种情况差别很大，别混成一句「客户区尺寸异常」：
+                    # 窗口没了 / 窗口最小化（能一键还原）/ 窗口在但尺寸不可用
+                    if not hwnd:
+                        self.window_minimized = False
+                        self.error = "未找到游戏窗口（标题含「冒险岛」）"
+                    elif win32gui.IsIconic(hwnd):
+                        self.window_minimized = True
+                        self.error = "游戏窗口已最小化，还原后才有画面"
+                    else:
+                        self.window_minimized = False
+                        self.error = "游戏客户区尺寸异常（窗口可能被完全遮住或还在加载）"
                     with self.lock:
                         self.frame = placeholder()
                         self.client_size = (0, 0)
@@ -360,6 +382,7 @@ class Grabber(threading.Thread):
                 with self.lock:
                     self.frame = frame
                     self.window_found = True
+                    self.window_minimized = False
                     self.client_size = (region["width"], region["height"])
                     self.last_frame_ts = time.time()
                     self.error = ""
@@ -2378,6 +2401,7 @@ async def stats():
     top = sorted(counts.items(), key=lambda kv: -kv[1])[:4]
     return JSONResponse({
         "window_found": grabber.window_found,
+        "window_minimized": grabber.window_minimized,
         "window_title": WINDOW_TITLE,
         "client_size": list(grabber.client_size),
         "capture_fps": round(grabber.capture_fps, 1),

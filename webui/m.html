@@ -158,7 +158,10 @@
 
     // 顶部状态：窗口丢失 > 静止 > 在动
     let cls = "dot on", text = "挂机中，画面在动";
-    if (!st.window_found) { cls = "dot bad"; text = "游戏窗口不在了"; }
+    if (!st.window_found) {
+      cls = "dot bad";
+      text = st.window_minimized ? "游戏窗口被最小化了，还原后才有画面" : "游戏窗口不在了";
+    }
     else if (motion && motion.ready && !motion.moving) {
       const idle = motion.idle_sec || 0;
       cls = idle > 60 ? "dot bad" : "dot warn";

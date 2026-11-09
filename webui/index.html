@@ -92,6 +92,8 @@
   .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--hint); }
   .dot.on { background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,.22); }
   .dot.off { background: #ef4444; }
+  /* 游戏窗口被最小化时角标可点，点了直接还原窗口 */
+  #badge.clickable { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
   /* ---- 一个窄面板：血条在左、指标在右，右侧留给按钮 ---- */
   .low { display: flex; gap: 14px; align-items: flex-start; }
   .side { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
@@ -1808,6 +1810,18 @@
     }
   });
 
+  // 画面断了通常就两种：窗口没了、窗口被最小化。最小化时角标变可点，
+  // 点一下直接还原+前置，省得再去任务栏里翻——挂机最常撞的就是这个。
+  $("badge").addEventListener("click", async () => {
+    if (grabberReady || !$("badge").classList.contains("clickable")) return;
+    try {
+      const r = await (await fetch("/api/window/focus", { cache: "no-store" })).json();
+      toast(r.ok ? "窗口已还原" : (r.msg || "还原失败"), !r.ok);
+    } catch (e) {
+      toast("还原失败：服务未响应", true);
+    }
+  });
+
   let filterTimer = null;
   $("filter").addEventListener("input", (e) => {
     clearTimeout(filterTimer);
@@ -2109,13 +2123,17 @@
     try {
       const s = await (await fetch("/api/stats", { cache: "no-store" })).json();
       const found = s.window_found;
+      const mini = !!s.window_minimized;      // 窗口在、只是被最小化 → 可以一键还原
       grabberReady = found;
       $("dot").className = "dot " + (found ? "on" : "off");
-      if (!paused) $("badge").textContent = found ? "实时" : "无信号";
+      if (!paused) {
+        $("badge").textContent = found ? "实时" : (mini ? "窗口最小化" : "无信号");
+      }
       // 窗口标题 / 报错信息改成角标上的悬浮提示，页面上不再占一行文字
       $("badge").title = found
         ? `窗口「${s.window_title}」`
-        : (s.error || "未找到游戏窗口");
+        : (s.error || "未找到游戏窗口") + (mini ? "\n点这里还原窗口" : "");
+      $("badge").classList.toggle("clickable", !found && mini);
       $("size").textContent = s.client_size[0] ? `${s.client_size[0]}×${s.client_size[1]}` : "—";
       $("cfps").textContent = found ? s.capture_fps.toFixed(1) : "—";
       $("sfps").textContent = found ? s.stream_fps.toFixed(1) : "—";
