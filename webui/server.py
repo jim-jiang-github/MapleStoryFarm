@@ -2549,6 +2549,10 @@ def mm_info():
 MM_BOX_COLOR = (200, 200, 200)    # BGR 灰：小地图框本身
 MM_ZONE_COLOR = (60, 220, 60)     # BGR 绿：活动范围两条边
 MM_DOT_COLOR = (255, 80, 255)     # BGR 品红：黄点当前位置
+MM_DOT_Y_OFF = 4                  # 品红点往下挪的像素数：标记和黄点几乎同位，
+                                  # 原样画会把黄点整个盖住（看着像紫点顶在黄点
+                                  # 上方、黄点丢了）。往下挪一点让黄点露出来。
+                                  # 只是画图偏移，跟踪数据（u/v）不动。
 
 
 def overlay_minimap(img):
@@ -2570,7 +2574,7 @@ def overlay_minimap(img):
     cv2.line(img, (zx1, y1), (zx1, y2), MM_ZONE_COLOR, 2)
     cv2.line(img, (zx2, y1), (zx2, y2), MM_ZONE_COLOR, 2)
     if info["px"]:
-        cv2.circle(img, (int(info["px"][0]), int(info["px"][1])),
+        cv2.circle(img, (int(info["px"][0]), int(info["px"][1]) + MM_DOT_Y_OFF),
                    3, MM_DOT_COLOR, -1)
     return img
 
