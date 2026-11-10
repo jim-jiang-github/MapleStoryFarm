@@ -188,15 +188,29 @@
   .slot.set { color: var(--text); font-weight: 600; }
   .slot.rec { border-color: #dc2626; background: #fef2f2; color: #dc2626; }
   .slot.rec::after { content: " 按键…"; }
-  /* 技能卡片：⠿ 拖动排序、格子录键、下拉选类型、画面上拖框调范围 */
+  /* 技能卡片：⠿ 拖动排序、格子录键、下拉选类型、数值填范围（配一张示意图） */
   .skcard {
     border: 1px solid var(--border); border-radius: 8px;
     background: #fff; padding: 7px 9px;
     display: flex; flex-direction: column; gap: 6px;
   }
   .skcard + .skcard { margin-top: 6px; }
-  .skcard.sel { border-color: #16a34a; box-shadow: 0 0 0 1px #16a34a; }
   .skcard.dragging { opacity: .4; }
+  /* 范围输入：左/右/上/下 四个数字框，单位是画面像素（相对人物身体中心） */
+  .skfields { display: flex; align-items: center; gap: 5px; flex: 1 1 auto; min-width: 0; }
+  .skfields label {
+    display: flex; align-items: center; gap: 2px; flex: 1 1 0; min-width: 0;
+    font-size: 10.5px; color: var(--hint);
+  }
+  .skfields input {
+    width: 100%; min-width: 0; font: inherit; font-size: 11px; color: var(--text);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 5px;
+    padding: 1px 3px; text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .skfields input:focus { outline: none; border-color: #16a34a; }
+  .skmini { display: block; width: 100%; height: 62px; border-radius: 6px;
+            background: #f8fafc; border: 1px solid var(--border); }
   .skhead { display: flex; align-items: center; gap: 7px; }
   .skhnd { cursor: grab; color: var(--hint); font-size: 13px; padding: 0 1px; user-select: none; }
   .skhnd:active { cursor: grabbing; }
@@ -210,11 +224,7 @@
            cursor: pointer; font-size: 12px; padding: 2px 4px; font-family: inherit; }
   .skdel:hover { color: #dc2626; }
   .skrow { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--hint); }
-  .skrow .skv {
-    color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
+  .skrow > span:first-child { flex: 0 0 auto; }
   .skjump { display: flex; align-items: center; gap: 5px; font-size: 11px;
             color: var(--muted); cursor: pointer; user-select: none; }
   .skjump input { margin: 0; }
@@ -624,7 +634,7 @@
               <span class="k">血线</span>
               <span class="v"><input id="hpRange" class="rng" type="range" min="10" max="95" step="5" value="40" title="血量低于这个百分比就喝药；读不到血量（血条没标定）时不会瞎按。HP 血条下面那个三角箭头就是这条线"><b id="hpVal">40%</b></span>
             </div>
-            <!-- 攻击距离/方向/高度三行不要了：技能系统里每个技能有自己的范围框（画面上拖） -->
+            <!-- 攻击距离/方向/高度三行不要了：技能系统里每个技能有自己的范围（卡片里填数字） -->
             <div class="row conf">
               <span class="k">放技能间隔</span>
               <span class="v"><input id="atkRange" class="rng" type="range" min="150" max="1200" step="10" value="420" title="两次放技能的最小间隔（毫秒）。太小会一直按着打不出伤害，太大浪费输出"><b id="atkVal">420ms</b></span>
@@ -661,7 +671,7 @@
             <div id="skillList"></div>
             <div class="row conf">
               <span class="k"></span>
-              <span class="v" style="justify-content:flex-start"><button id="addSkillBtn" class="mini" title="加一个技能：录快捷键 → 选群攻/单体 → 点「画面调整」在画面上拖出攻击范围">+ 添加技能</button><b class="sub">⠿ 拖动卡片换释放顺序</b></span>
+              <span class="v" style="justify-content:flex-start"><button id="addSkillBtn" class="mini" title="加一个技能：录快捷键 → 选群攻/单体 → 在卡片里填左/右/上/下（相对人物身体中心的像素）">+ 添加技能</button><b class="sub">⠿ 拖动卡片换释放顺序</b></span>
             </div>
               </div>
             </details>
@@ -690,7 +700,7 @@
     </div>
   </div>
 
-  <p class="note">双击选区进入编辑（拖动移动 · 拉角缩放 · 右上角 ✕ 删除）· 右键画面可添加排除区 · 改动即时保存到 webui/masks.json · 三条状态条由后台自动定位，换客户端/换分辨率会自己重定位；画面上始终画出定位框（白框=判定区，洋红框=整条槽，黄线=填充终点）。技能攻击范围在「技能」分组里点「画面调整」，在画面上拖绿框（地面）/橙虚框（跳放）调整，锚点是人物身体中心（蓝十字）。坐标真要手动框时，在地址后面加 <code>?cal=1</code> 放出「标定条」按钮</p>
+  <p class="note">双击选区进入编辑（拖动移动 · 拉角缩放 · 右上角 ✕ 删除）· 右键画面可添加排除区 · 改动即时保存到 webui/masks.json · 三条状态条由后台自动定位，换客户端/换分辨率会自己重定位；画面上始终画出定位框（白框=判定区，洋红框=整条槽，黄线=填充终点）。技能攻击范围在「技能」分组里直接填数字（左/右/上/下 = 离人物身体中心多少像素），卡片下面的小图实时显示框的形状；画面上那条橙框只用来对照，不能拖。坐标真要手动框时，在地址后面加 <code>?cal=1</code> 放出「标定条」按钮</p>
 </div>
 
 <div class="ctx" id="ctxMenu"></div>
@@ -969,7 +979,7 @@
     mctx.clearRect(0, 0, maskLayer.clientWidth, maskLayer.clientHeight);
     if (roiCal) { drawRoiBand(); return; }   // 调范围时只看这条带，别叠选区
     drawBarRects();
-    if (!maskOn) { drawSkillOverlay(); return; }   // 技能范围编辑不依赖屏蔽区开关
+    if (!maskOn) return;
 
     masks.forEach((m, i) => {
       const x = X(m.x1), y = Y(m.y1);
@@ -1031,7 +1041,6 @@
       mctx.strokeRect(X(r.x1), Y(r.y1), (r.x2 - r.x1) * L.w, (r.y2 - r.y1) * L.h);
       mctx.setLineDash([]);
     }
-    drawSkillOverlay();                      // 技能范围编辑框（开了才有内容）
   }
 
   function toNorm(e) {
@@ -1821,23 +1830,10 @@
 
   maskLayer.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
-    if (!maskOn && !barCal && !roiCal && skillSel < 0) return;
+    if (!maskOn && !barCal && !roiCal) return;
     e.preventDefault();
     maskLayer.setPointerCapture(e.pointerId);
     const p = toNorm(e);
-    if (skillSel >= 0) {
-      // 技能范围编辑模式：只响应两个范围框（把手=缩放，框内=平移），
-      // 点到框外什么都不做，绝不误改屏蔽区
-      const rects = skillRectsNorm();
-      const hit = rects && skillHitRect(rects, p);
-      if (hit) {
-        drag = { mode: "skill", which: hit.rect, handle: hit.handle,
-                 start: p, orig: { ...rects[hit.rect] },
-                 anchor: skillAnchorLive() };   // 拖动期间锚点冻结，防框漂移
-      }
-      drawMasks();
-      return;
-    }
     if (roiCal) {                        // 调范围：拖上边界 / 下边界 / 整条带走
       drag = { mode: "roi", edge: roiHit(p) || "band", start: p, orig: { ...roi } };
       drawMasks();
@@ -1882,26 +1878,8 @@
   });
 
   maskLayer.addEventListener("pointermove", (e) => {
-    if (!maskOn && !barCal && !roiCal && skillSel < 0) return;
+    if (!maskOn && !barCal && !roiCal) return;
     const p = toNorm(e);
-    if (skillSel >= 0) {
-      if (drag && drag.mode === "skill") {
-        const o = drag.orig;
-        const r = drag.handle < 0          // 整框平移，宽高不变
-          ? { x1: o.x1 + (p.x - drag.start.x), x2: o.x2 + (p.x - drag.start.x),
-              y1: o.y1 + (p.y - drag.start.y), y2: o.y2 + (p.y - drag.start.y) }
-          : resizeRect(o, drag.handle, p);
-        applySkillRect(drag.which, r);
-        updateSkillStrs();                 // 卡片上的 左右上下 数字实时跟
-        drawMasks();
-      } else {
-        const rects = skillRectsNorm();
-        const hit = rects && skillHitRect(rects, p);
-        maskLayer.style.cursor = hit
-          ? (hit.handle >= 0 ? HANDLE_CURSORS[hit.handle] : "move") : "default";
-      }
-      return;
-    }
     if (roiCal) {
       if (drag && drag.mode === "roi") {
         const o = drag.orig;
@@ -2228,11 +2206,9 @@
   let skillsNow = [];            // 当前技能配置（和后端 cfg.skills 同步）
   let skillLockUntil = 0;        // 本地刚改过技能：这段时间别让轮询覆盖
   let skillDragEl = null;        // 正在拖动排序的卡片
-  let skillSel = -1;             // 正在画面上编辑范围的技能下标（-1 = 没在编辑）
   let skillSnap = "";            // 上次同步的 skills JSON（没变不重画）
-  let lastBodyC = null;          // 最近一次轮询到的人物身体中心
+  let skillK = 1;                // 当前画面 / 技能基准宽度的比例（数值上限要跟着缩放）
   let lastFrameW = 0, lastFrameH = 0;
-  let lastFace = 0;              // 人物当前朝向（bot 状态：1 右 / -1 左 / 0 未知）
 
   function paintGroupSums() {
     const key = (id) => { const el = $(id); const s = el ? el.textContent.trim() : ""; return s || (el && el.dataset.hint) || "—"; };
@@ -2523,14 +2499,14 @@
 
   /* ================= 技能列表 =================
      键位分组整个换成了技能：每个技能一张卡（快捷键 / 群攻单体 / 可跳放），
-     卡片顺序 = 释放优先级（⠿ 拖动换位）；范围框在画面上拖（点「画面调整」），
-     以人物身体中心为锚点，绿色实线 = 地面范围、橙色虚线 = 跳放范围。 */
+     卡片顺序 = 释放优先级（⠿ 拖动换位）。
+     范围直接在卡片上用数字填（左/右/上/下，单位是画面像素，以人物身体中心为
+     基准、按「朝右」量），下面配一张示意图实时显示框的形状。
+     画面上那条橙色框仍然由后端画（按人物实际朝向翻），但它只用来「看」，
+     不能拖——以前在画面上拖框那套已经删掉。 */
   const skillList = $("skillList");
   const SK_DFLT = { key: "", type: "aoe", dir: "both", ground: [150, 150, 50, 40],
                     jump: false, jrect: [210, 210, 120, 40] };
-
-  const skillRectStr = (r) =>
-    `左${Math.round(r[0])} 右${Math.round(r[1])} 上${Math.round(r[2])} 下${Math.round(r[3])}`;
 
   function commitSkills() {
     skillLockUntil = Date.now() + 1200;
@@ -2538,26 +2514,110 @@
     setBot({ skills: skillsNow }).catch(botFail);
   }
 
+  // 两份技能配置是不是「实质一样」：数字容差 1px，免得后端四舍五入后
+  // 每轮轮询都把卡片重建一遍（正在数字框里打字时重建会丢焦点）
+  function sameSkills(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    const near = (x, y) => Math.abs(Number(x) - Number(y)) <= 1;
+    for (let i = 0; i < a.length; i++) {
+      const x = a[i], y = b[i];
+      if (x.key !== y.key || x.type !== y.type || (x.dir || "both") !== (y.dir || "both")
+          || !!x.jump !== !!y.jump) return false;
+      if (!x.ground.every((v, j) => near(v, y.ground[j]))) return false;
+      if (!!x.jump && !x.jrect.every((v, j) => near(v, y.jrect[j]))) return false;
+    }
+    return true;
+  }
+
   function syncSkills(cfg) {
     if (!Array.isArray(cfg.skills)) return;
-    if (skillDragEl || skillSel >= 0) return;   // 正在排序 / 编辑范围：别动
+    if (skillDragEl) return;                    // 正在拖动排序：别动
     if (rec && rec.skSkill) return;             // 正在录快捷键
     if (Date.now() < skillLockUntil) return;    // 本地刚改过，等回包
-    // 后端存的是「基准画面宽度 base_w」下的像素。换算到当前画面再显示/拖拽，
-    // 否则换分辨率或换系统缩放后，编辑框会比后端实际判定大/小一圈（判定已经
-    // 按同一比例缩放了，前端不跟就会「看到的不等于打到的」）。
+    // 后端存的是「基准画面宽度 base_w」下的像素。换算到当前画面再显示，
+    // 否则换分辨率或换系统缩放后，面板上的数字会和后端实际判定对不上。
     const bw = Number(cfg.base_w) || 0;
     const k = (bw > 0 && lastFrameW) ? lastFrameW / bw : 1;
-    const sc = (r) => r.map((v) => Math.round(Number(v) * k * 10) / 10);
-    const snap = JSON.stringify([cfg.skills, bw, Math.round(k * 1000)]);
-    if (snap === skillSnap) return;             // 没变别重画（重画会闪）
-    skillSnap = snap;
-    skillsNow = cfg.skills.map((s) => ({
+    skillK = k;
+    const sc = (r) => r.map((v) => Math.round(Number(v) * k));
+    const next = cfg.skills.map((s) => ({
       key: s.key || "", type: s.type || "aoe", dir: s.dir || "both",
       ground: sc(s.ground || SK_DFLT.ground),
       jump: !!s.jump, jrect: sc(s.jrect || SK_DFLT.jrect),
     }));
+    if (sameSkills(next, skillsNow)) {          // 只是回显：不重画，别打断输入
+      skillSnap = JSON.stringify([cfg.skills, bw, Math.round(k * 1000)]);
+      return;
+    }
+    skillsNow = next;
+    skillSnap = JSON.stringify([cfg.skills, bw, Math.round(k * 1000)]);
     renderSkills();
+  }
+
+  // 数字框改完别每敲一下就打一次后端：停手 400ms 再落库
+  let skillCommitT = 0;
+  function queueSkillCommit() {
+    skillLockUntil = Date.now() + 1500;      // 打字期间别让轮询把卡片重画（会丢焦点）
+    clearTimeout(skillCommitT);
+    skillCommitT = setTimeout(() => commitSkills(), 400);
+  }
+
+  /* 卡片底部的小示意图：画布中心 = 人物身体中心，绿色实线 = 地面范围，
+     橙色虚线 = 跳放范围。等比缩放，永远把最大的那张框塞进画布。 */
+  function drawSkillMini(card) {
+    const cv = card.querySelector(".skmini");
+    const s = skillsNow[+card.dataset.i];
+    if (!cv || !s) return;
+    const cw = cv.clientWidth, ch = cv.clientHeight;
+    if (!cw || !ch) return;                   // 面板收起着：等展开时再画
+    const dpr = window.devicePixelRatio || 1;
+    cv.width = Math.round(cw * dpr);
+    cv.height = Math.round(ch * dpr);
+    const c = cv.getContext("2d");
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.clearRect(0, 0, cw, ch);
+
+    const g = s.ground, j = s.jump ? s.jrect : null;
+    const pad = 9;
+    const cx = cw / 2, cy = ch / 2;
+    const halfW = Math.max(g[0], g[1], j ? j[0] : 0, j ? j[1] : 0, 20);
+    const halfH = Math.max(g[2], g[3], j ? j[2] : 0, j ? j[3] : 0, 20);
+    const k = Math.min((cw / 2 - pad) / halfW, (ch / 2 - pad) / halfH);
+    const box = (r) => ({ x: cx - r[0] * k, y: cy - r[2] * k,
+                          w: (r[0] + r[1]) * k, h: (r[2] + r[3]) * k });
+
+    // 人物站地面那条水平线 + 身体中心十字
+    c.strokeStyle = "#cbd5e1";
+    c.setLineDash([3, 3]);
+    c.lineWidth = 1;
+    c.beginPath();
+    c.moveTo(2, cy + .5); c.lineTo(cw - 2, cy + .5);
+    c.stroke();
+    c.setLineDash([]);
+    c.strokeStyle = "#185fa5";
+    c.lineWidth = 1.25;
+    c.beginPath();
+    c.moveTo(cx - 6, cy); c.lineTo(cx + 6, cy);
+    c.moveTo(cx, cy - 6); c.lineTo(cx, cy + 6);
+    c.stroke();
+
+    const paint = (r, line, fill, dash) => {
+      const b = box(r);
+      c.fillStyle = fill;
+      c.fillRect(b.x, b.y, b.w, b.h);
+      c.setLineDash(dash);
+      c.strokeStyle = line;
+      c.lineWidth = 1.4;
+      c.strokeRect(b.x + .5, b.y + .5, Math.max(0, b.w - 1), Math.max(0, b.h - 1));
+      c.setLineDash([]);
+    };
+    if (j) paint(j, "#d97706", "rgba(217,119,6,.10)", [5, 3]);
+    paint(g, "#16a34a", "rgba(22,163,74,.14)", []);
+
+    // 左上角说明：这张框是按「人物朝右」量的（身前技能朝左会整体镜像）
+    c.font = "600 9.5px system-ui, sans-serif";
+    c.fillStyle = "#94a3b8";
+    c.fillText(s.dir === "front" ? "身前 · 按朝右量" : "左右", 5, 11);
   }
 
   function renderSkills() {
@@ -2566,27 +2626,30 @@
     skillList.textContent = "";
     skillsNow.forEach((s, i) => {
       const card = document.createElement("div");
-      card.className = "skcard" + (i === skillSel ? " sel" : "");
+      const numRow = (w) => `
+        <div class="skfields">
+          ${["左", "右", "上", "下"].map((t, n) =>
+            `<label>${t}<input class="skn" type="number" data-w="${w}" data-i="${n}"
+               step="10" min="0" inputmode="numeric"
+               title="${t}边到人物身体中心有多少像素"></label>`).join("")}
+        </div>`;
+      card.className = "skcard";
       card.dataset.i = i;
       card.innerHTML = `
         <div class="skhead">
           <span class="skhnd" title="按住拖动，调整释放顺序（排前面的先匹配）">⠿</span>
           <button class="slot skkey" type="button" data-hint="按键" title="这个技能的快捷键，跟游戏里的技能键位对应。点格子 → 按一个键即设置；Del 清空、Esc 取消"></button>
           <select class="sktype" title="群攻：范围内怪 ≥2 时优先用；单体：只有 1 只时优先用。同类型里排前面的先用"><option value="aoe">群攻</option><option value="single">单体</option></select>
-          <select class="skdir" title="技能朝哪边打：左右 = 以人物为中心，框内两边都打；身前 = 只能打人物面前那半边（出手前会先转身对正，画面上的框会跟着人物朝向翻——框的左右两半边分别是朝左/朝右时打的区域）"><option value="both">左右</option><option value="front">身前</option></select>
+          <select class="skdir" title="技能朝哪边打：左右 = 以人物为中心，框内两边都打；身前 = 只能打人物面前那半边（出手前会先转身对正，画面上的框跟着人物朝向翻）"><option value="both">左右</option><option value="front">身前</option></select>
           <span class="sktag">SK${i + 1}</span>
           <button class="skdel" type="button" title="删除这个技能">✕</button>
         </div>
-        <div class="skrow">
-          <span>范围</span><span class="skv gstr"></span>
-          <button class="mini skedit" type="button" title="在画面上拖框调整：框内拖动 = 移动，拉边角 = 缩放，以人物身体中心为锚点（蓝十字），框会实时跟着人物走">画面调整</button>
-        </div>
+        <div class="skrow"><span>范围</span>${numRow("g")}</div>
+        <canvas class="skmini"></canvas>
         <label class="skjump"><input type="checkbox" class="skjp"> 可跳放（空中施放：跳 → 100ms → 技能键）</label>
         <div class="skjbox">
-          <div class="skrow">
-            <span>跳放</span><span class="skv jstr"></span>
-            <button class="mini skgrow" type="button" title="以地面范围为基础放大生成跳放范围，再手动微调">= 地面放大</button>
-          </div>
+          <div class="skrow"><span>跳放</span>${numRow("j")}</div>
+          <button class="mini skgrow" type="button" style="align-self:flex-start" title="以地面范围为基础放大生成跳放范围，之后再微调">= 以地面范围放大</button>
         </div>`;
       const at = () => skillsNow[i];
       // 快捷键格子：接进统一的键位录制（makeSlot）
@@ -2601,11 +2664,34 @@
       card.querySelector(".skdir").value = s.dir || "both";
       card.querySelector(".skjp").checked = !!s.jump;
       card.querySelector(".skjbox").style.display = s.jump ? "" : "none";
-      card.querySelector(".gstr").textContent = skillRectStr(s.ground);
-      card.querySelector(".jstr").textContent = skillRectStr(s.jrect);
-      const editBtn = card.querySelector(".skedit");
-      editBtn.textContent = skillSel === i ? "✓ 完成" : "画面调整";
-      editBtn.classList.toggle("on", skillSel === i);
+
+      // 四个数字框：把当前值填进去（正在输的那个不覆盖，免得把光标顶掉）
+      const nums = [...card.querySelectorAll(".skn")];
+      const arrOf = (el) => (el.dataset.w === "g" ? at().ground : at().jrect);
+      const paintNums = () => {
+        nums.forEach((el) => {
+          const v = String(Math.round(arrOf(el)[+el.dataset.i]));
+          if (el !== document.activeElement && el.value !== v) el.value = v;
+        });
+      };
+      paintNums();
+      drawSkillMini(card);
+      nums.forEach((el) => {
+        el.addEventListener("input", () => {
+          const t = at();
+          if (!t) return;
+          const v = Math.round(Number(el.value));
+          if (!Number.isFinite(v)) return;
+          arrOf(el)[+el.dataset.i] = Math.max(0, Math.min(Math.round(600 * skillK), v));
+          drawSkillMini(card);
+          queueSkillCommit();
+        });
+        el.addEventListener("blur", () => {
+          if (at()) el.value = String(Math.round(arrOf(el)[+el.dataset.i]));
+        });
+        // 数字框里敲键别被全局键位录制/快捷键处理抢走
+        el.addEventListener("keydown", (e) => e.stopPropagation());
+      });
 
       card.querySelector(".sktype").addEventListener("change", (e) => {
         if (!at()) return;
@@ -2615,6 +2701,7 @@
       card.querySelector(".skdir").addEventListener("change", (e) => {
         if (!at()) return;
         at().dir = e.target.value;
+        drawSkillMini(card);
         commitSkills(); drawMasks();
       });
       card.querySelector(".skjp").addEventListener("change", (e) => {
@@ -2625,20 +2712,15 @@
       });
       card.querySelector(".skdel").addEventListener("click", () => {
         skillsNow.splice(i, 1);
-        if (skillSel === i) skillSel = -1;
-        else if (skillSel > i) skillSel--;
-        commitSkills(); renderSkills(); drawMasks();
+        commitSkills(); renderSkills();
       });
       card.querySelector(".skgrow").addEventListener("click", () => {
         if (!at()) return;
         const g = at().ground;
         at().jrect = [Math.round(g[0] * 1.35), Math.round(g[1] * 1.35),
                       Math.round(g[2] * 1.5 + 20), Math.round(g[3] * 1.35)];
-        commitSkills(); renderSkills(); drawMasks();
-      });
-      editBtn.addEventListener("click", () => {
-        if (skillSel === i) stopSkillEdit();   // 再点一次 = 确认收起
-        else startSkillEdit(i);
+        paintNums(); drawSkillMini(card);
+        commitSkills();
       });
 
       // ⠿ 拖动排序：按住把手才允许拖整卡（下拉/格子不受影响）
@@ -2658,13 +2740,15 @@
         const old = skillsNow.slice();
         const cards = [...skillList.querySelectorAll(".skcard")];
         skillsNow = cards.map((c) => old[+c.dataset.i]);
-        const myNew = cards.indexOf(card);
-        if (skillSel >= 0) skillSel = myNew;
-        commitSkills(); renderSkills(); drawMasks();
+        commitSkills(); renderSkills();
       });
       skillList.appendChild(card);
     });
   }
+
+  // 面板是折叠的：展开时画布才有宽度，那时候再画一次示意图
+  const skillPanel = skillList && skillList.closest("details");
+  if (skillPanel) skillPanel.addEventListener("toggle", () => { if (skillPanel.open) renderSkills(); });
 
   skillList.addEventListener("dragover", (e) => {
     if (!skillDragEl) return;
@@ -2685,178 +2769,6 @@
     commitSkills(); renderSkills();
   });
 
-  function updateSkillStrs() {
-    const card = skillList && skillList.querySelector(`.skcard[data-i="${skillSel}"]`);
-    const s = skillsNow[skillSel];
-    if (!card || !s) return;
-    card.querySelector(".gstr").textContent = skillRectStr(s.ground);
-    card.querySelector(".jstr").textContent = skillRectStr(s.jrect);
-  }
-
-  /* ---- 画面上的范围框编辑（画在 maskLayer 上，锚定人物身体中心） ---- */
-  const SK_G_LINE = "#16a34a", SK_G_FILL = "rgba(22,163,74,.14)";
-  const SK_J_LINE = "#d97706", SK_J_FILL = "rgba(217,119,6,.10)";
-
-  // 编辑期间用 rAF 持续重绘：人物在画面里走动时，范围框实时跟着走
-  let skillRaf = 0;
-  function skillLoop() {
-    if (skillSel < 0) { skillRaf = 0; return; }
-    drawMasks();
-    skillRaf = requestAnimationFrame(skillLoop);
-  }
-
-  function startSkillEdit(i) {
-    skillSel = i;
-    renderSkills();
-    if (!skillRaf) skillRaf = requestAnimationFrame(skillLoop);
-    toast("拖绿色框调整范围（框会跟着人物走），调完点「✓ 完成」或按 Esc");
-  }
-
-  function stopSkillEdit() {
-    if (skillSel < 0) return;
-    const i = skillSel, s = skillsNow[i];
-    skillSel = -1;
-    renderSkills(); drawMasks();
-    if (s) toast(`SK${i + 1} 范围已保存：${skillRectStr(s.ground)}`
-                 + (s.jump ? ` · 跳放 ${skillRectStr(s.jrect)}` : ""));
-  }
-
-  function skillAnchorLive() {
-    // 人物身体中心实时锚点。没定位到人物时退回画面正中心——和 bot 丢人时
-    // 的兜底锚点一致（后端 center_char_box），照样能编辑、所见即所打，
-    // 等定位回来（画面出现 ME 框）就自动接上真锚点。
-    if (lastBodyC) return { c: lastBodyC, live: true };
-    if (!lastFrameW || !lastFrameH) return null;
-    return { c: [lastFrameW / 2, lastFrameH / 2], live: false };
-  }
-
-  function skillAnchorNow() {
-    // 拖动那一会儿锚点冻结在按下那一刻：不然人物一动框跟着漂，鼠标和框对不上
-    if (drag && drag.mode === "skill" && drag.anchor) return drag.anchor;
-    return skillAnchorLive();
-  }
-
-  function skillRectsNorm() {
-    const s = skillsNow[skillSel];
-    const a = skillAnchorNow();
-    if (skillSel < 0 || !s || !a || !lastFrameW || !lastFrameH) return null;
-    const [cx, cy] = a.c, W = lastFrameW, H = lastFrameH;
-    const mk = (r) => ({ x1: (cx - r[0]) / W, y1: (cy - r[2]) / H,
-                         x2: (cx + r[1]) / W, y2: (cy + r[3]) / H });
-    return { g: mk(s.ground), j: s.jump ? mk(s.jrect) : null };
-  }
-
-  function skillHitRect(rects, p) {
-    for (const key of ["g", "j"]) {          // 先看把手（把手优先于框体）
-      const r = rects[key];
-      if (!r) continue;
-      const h = hitHandle(r, p);             // 复用选区的九点柄判定
-      if (h >= 0) return { rect: key, handle: h };
-    }
-    for (const key of ["g", "j"]) {          // 地面框优先（通常在里面、更常用）
-      const r = rects[key];
-      if (r && inside(r, p)) return { rect: key, handle: -1 };
-    }
-    return null;
-  }
-
-  function applySkillRect(which, r) {
-    const s = skillsNow[skillSel];
-    const a = skillAnchorNow();
-    if (!s || !a || !lastFrameW || !lastFrameH) return;
-    const [cx, cy] = a.c, W = lastFrameW, H = lastFrameH;
-    const c0 = (v) => Math.max(0, Math.round(v));
-    const four = [c0(cx - r.x1 * W), c0(r.x2 * W - cx),
-                  c0(cy - r.y1 * H), c0(r.y2 * H - cy)];
-    if (which === "g") s.ground = four;
-    else s.jrect = four;
-  }
-
-  function drawSkillOverlay() {
-    if (skillSel < 0 || !skillsNow[skillSel]) return;
-    const rects = skillRectsNorm();
-    if (!rects) return;
-    const s = skillsNow[skillSel];
-    const dir_ = s.dir || "both";
-    const a = skillAnchorNow();
-    // 先画跳放（虚线橙），地面框叠在上面
-    for (const [r, line, fill, dash, tag] of [
-      [rects.j, SK_J_LINE, SK_J_FILL, [6, 4], "跳放"],
-      [rects.g, SK_G_LINE, SK_G_FILL, [], "地面"],
-    ]) {
-      if (!r) continue;
-      const x = X(r.x1), y = Y(r.y1);
-      const w = (r.x2 - r.x1) * L.w, h = (r.y2 - r.y1) * L.h;
-      if (w < 4 || h < 4) continue;
-      mctx.fillStyle = fill;
-      mctx.fillRect(x, y, w, h);
-      mctx.setLineDash(dash);
-      mctx.lineWidth = 1.5;
-      mctx.strokeStyle = line;
-      mctx.strokeRect(x + .5, y + .5, w - 1, h - 1);
-      mctx.setLineDash([]);
-      mctx.font = "600 10px ui-monospace, Menlo, Consolas, monospace";
-      mctx.fillStyle = line;
-      mctx.fillText(tag, x + 4, y + 11);
-    }
-    // 把手：地面框八点（中心不算，拖中心=拖整框）、跳放框四角
-    for (const [r, line, all] of [[rects.g, SK_G_LINE, true], [rects.j, SK_J_LINE, false]]) {
-      if (!r) continue;
-      const pts = handlePts(r);
-      pts.forEach(([nx, ny], idx) => {
-        if (idx === 4) return;
-        if (!all && idx % 2 === 1) return;   // 只画四角 0/2/6/8
-        const hx = X(nx), hy = Y(ny);
-        mctx.fillStyle = "#fff";
-        mctx.fillRect(hx - 3.5, hy - 3.5, 7, 7);
-        mctx.strokeStyle = line;
-        mctx.lineWidth = 1.25;
-        mctx.strokeRect(hx - 3.5, hy - 3.5, 7, 7);
-      });
-    }
-    // 锚点：人物身体中心（蓝十字），框都以它为基准
-    const ax = X(a.c[0] / lastFrameW);
-    const ay = Y(a.c[1] / lastFrameH);
-    mctx.strokeStyle = "#185fa5";
-    mctx.lineWidth = 1.5;
-    mctx.beginPath();
-    mctx.moveTo(ax - 7, ay); mctx.lineTo(ax + 7, ay);
-    mctx.moveTo(ax, ay - 7); mctx.lineTo(ax, ay + 7);
-    mctx.stroke();
-    // 方向提示（身前技能）：框按「朝右」量、按这个形态存；人物朝左时整体镜像。
-    // 画个虚线灰框表示镜像后的位置，一眼看出人转向后框会翻到哪
-    if (dir_ === "front" && rects.g) {
-      const gr = rects.g;
-      const axn = a.c[0] / lastFrameW;
-      const mr = { x1: 2 * axn - gr.x2, y1: gr.y1, x2: 2 * axn - gr.x1, y2: gr.y2 };
-      mctx.setLineDash([5, 4]);
-      mctx.strokeStyle = "#94a3b8";
-      mctx.lineWidth = 1;
-      mctx.strokeRect(X(mr.x1) + .5, Y(mr.y1) + .5,
-                      (mr.x2 - mr.x1) * L.w, (mr.y2 - mr.y1) * L.h);
-      mctx.setLineDash([]);
-      mctx.font = "600 11px system-ui, sans-serif";
-      mctx.fillStyle = "#64748b";
-      mctx.fillText("朝左时（镜像）", X(mr.x1) + 4, Y(mr.y1) + 14);
-      mctx.fillStyle = SK_G_LINE;
-      mctx.fillText("朝右时（现在调的）", X(gr.x1) + 4, Y(gr.y1) - 6);
-    }
-    // 顶部提示条：怎么操作、怎么收尾；锚点是兜底值时一并说明
-    mctx.font = "600 12px system-ui, sans-serif";
-    const hint = `SK${skillSel + 1} 范围编辑 · 拖框移动 / 拉角缩放 · 完成点「✓ 完成」或按 Esc`
-      + (dir_ === "front" ? " · 身前技能按朝右量，朝左自动镜像" : "")
-      + (a.live ? "" : " ·（还没定位到人物：暂以画面中心为锚，定位后自动跟随）");
-    const tw = mctx.measureText(hint).width;
-    mctx.fillStyle = "rgba(15,23,42,.82)";
-    mctx.fillRect(8, 8, tw + 16, 24);
-    mctx.fillStyle = "#e2e8f0";
-    mctx.fillText(hint, 16, 24);
-  }
-
-  // Esc 退出范围编辑（录键的 Esc 由录制逻辑自己处理，这里让开）
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && skillSel >= 0 && !rec) stopSkillEdit();
-  });
 
   async function pollBot() {
     try {
@@ -2871,7 +2783,6 @@
       if (!r.cfg) return;
       paintBotCfg(r.cfg);
       const st = r.status || {};
-      if (typeof st.face === "number") lastFace = st.face;   // 身前技能的画面框跟着朝向翻
       // 状态行已删，异常状态（出错/失焦/识别没开）挂到挂机按钮的悬浮提示上，不占面板
       const warn = st.err
         || (r.detect_on ? "" : "识别没开，脚本看不到怪（只会巡逻）")
@@ -2973,8 +2884,7 @@
         }
       }
       paintChar(s.char);          // 人物定位状态（有无模板 / 匹配分 / 是否已定位）
-      // 技能范围编辑的锚点：人物身体中心（全分辨率像素）+ 画面尺寸
-      if (s.char && Array.isArray(s.char.body_c)) lastBodyC = s.char.body_c;
+      // 技能范围的像素是按「量的时候画面多宽」存的：记下当前帧尺寸，同步配置时换算
       if (s.client_size && s.client_size[0]) {
         lastFrameW = s.client_size[0];
         lastFrameH = s.client_size[1];

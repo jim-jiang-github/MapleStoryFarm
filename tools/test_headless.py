@@ -612,6 +612,55 @@ srv.game_bot.cfg["skills"] = _cfg0["skills"]
 with srv.char_lock:
     srv.char_state["box"], srv.char_state["ts"] = _cb, _ct
 
+# 朝向：挂机关着的时候靠「手动走位的位移」观察（server.observe_face，找人线程里
+# 一直在跑），身前技能的框跟着翻——用户实测的诉求：按方向键走，框得跟着翻
+print("  -- 画框回归：挂机关着手动走，身前技能框跟着翻")
+with srv.char_lock:
+    _face0, _anc0 = srv.char_state["face"], srv.char_state["face_anchor"]
+    srv.char_state["face"], srv.char_state["face_anchor"] = 0, None
+srv.game_bot.cfg["on"] = False
+srv.game_bot.cfg["base_w"] = 0              # 1:1，数字好核对
+srv.game_bot._status["face"] = 0            # bot 那份朝向是停着的旧值，不该被用到
+srv.game_bot.cfg["skills"] = [{"key": "KeyS", "type": "single", "dir": "front",
+                               "ground": [30, 170, 60, 60], "jump": False,
+                               "jrect": [30, 170, 100, 60]}]
+
+
+def _span_face():
+    im = _flat.copy()
+    srv.draw_skill_ranges(im, _box)
+    xs = np.nonzero(np.any(im != 150, axis=2))[1]
+    return None if len(xs) == 0 else (int(xs.min()), int(xs.max()))
+
+
+srv.observe_face(_box)                                      # 第一帧只立锚点
+_f0 = _span_face()
+srv.observe_face([_box[0] + 40, _box[1], _box[2] + 40, _box[3]])   # 往右挪 40px
+_fr = _span_face()
+srv.observe_face([_box[0] - 60, _box[1], _box[2] - 60, _box[3]])   # 再往左挪 100px
+_fl = _span_face()
+check("没走过时朝向未知：身前框两边对称展开", _f0 and _f0[1] - _f0[0] >= 300, _f0)
+check("往右走 40px → 朝右：框只往右边伸", _fr and _f0 and _fr[0] > _f0[0] + 80,
+      (_f0, _fr))
+check("往左走 → 朝左：框整体镜像翻到左边", _fl and _fr and _fl[1] < _fr[1] - 80,
+      (_fr, _fl))
+
+# 端到端：真靠找人线程发现「名字牌往右挪了」（不是手工喂 observe_face）
+with srv.char_lock:
+    srv.char_state["face"], srv.char_state["face_anchor"] = 0, None
+set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30, char_dx=0))
+check("先认出人物、立起朝向观测锚点",
+      wait_until(lambda: srv.char_state["face_anchor"] is not None, timeout=8))
+set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30, char_dx=45))
+check("名字牌往右挪 → 观察到的朝向变成右", wait_until(
+    lambda: srv.char_state["face"] == 1, timeout=8), srv.char_state["face"])
+
+with srv.char_lock:
+    srv.char_state["face"], srv.char_state["face_anchor"] = _face0, _anc0
+srv.game_bot.cfg["base_w"] = _cfg0.get("base_w", 0)
+srv.game_bot.cfg["on"] = _cfg0["on"]
+srv.game_bot.cfg["skills"] = _cfg0["skills"]
+
 # 拾取
 set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30, mobs=[]))
 mark_events()

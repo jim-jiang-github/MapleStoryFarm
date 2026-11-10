@@ -1544,12 +1544,41 @@ char_state = {
     "frame_size": None,   # 标定/上次重标时的画面尺寸 (W, H)：只有它变了才允许改尺度
     "sweep_fails": 0,     # 连扫几次都没结果就停手，别每 4 秒全尺度空扫
     "roi": CHAR_ROI_DEFAULT,   # 搜索范围的归一化矩形 (x1, y1, x2, y2)；默认整宽、上下 8%~90%
+    "face": 0,            # 从画面位移观察到的朝向（1 右 / -1 左 / 0 未知）：挂机关着时也更新
+    "face_anchor": None,  # 朝向观测锚点：人物身体中心的上一次参考位置
     "error": "",
 }
 # 找人的线程句柄。以前用一个 [False] 布尔记「起过了」，一旦线程因为异常挂了，
 # 这个标记还是 True，之后就不再有人去匹配了 —— 表现就是「清掉模板之后再传图，
 # 人物标记再也不回来」。改成看 is_alive()，挂了能自己重新拉起来。
 char_thread = None
+
+
+def observe_face(box):
+    """从人物框的水平位移观察朝向（阈值和 bot._watch_face 是同一套）。
+
+    bot 只在挂机跑的时候才观测朝向：挂机关着、你手动用方向键走的时候，画面上
+    那个「身前」技能的框就一直是停在上一次的朝向。这里在找人线程里一直观测，
+    手动走两步框就跟着翻（模板抖动只有 ±几像素，凑不够阈值，不会误翻）。
+    """
+    cx = (float(box[0]) + float(box[2])) / 2.0
+    with char_lock:
+        a = char_state["face_anchor"]
+        if a is None:
+            char_state["face_anchor"] = cx
+            return
+        d = cx - a
+        if d >= botmod.MOVE_FACE_PX:
+            char_state["face"], char_state["face_anchor"] = 1, cx
+        elif d <= -botmod.MOVE_FACE_PX:
+            char_state["face"], char_state["face_anchor"] = -1, cx
+
+
+def reset_face():
+    """朝向记忆作废（丢人/没模板）：别拿旧朝向画框。"""
+    with char_lock:
+        char_state["face"] = 0
+        char_state["face_anchor"] = None
 
 
 def _clamp_thresh(v) -> float:
@@ -2149,6 +2178,7 @@ def char_loop():
             time.sleep(0.5)
             continue
         now = time.time()
+        face_box = None            # 这次被采信的框：拿去观测朝向（锁外调用，锁不可重入）
         with char_lock:
             char_state["error"] = ""
             char_state["score"] = round(score, 3)
@@ -2163,6 +2193,7 @@ def char_loop():
                 # 到点就把标记收掉，别在旧位置留一个「幽灵 ME」。
                 if ev != "hold":
                     char_state["ts"] = now
+                    face_box = shown
                 # 老配置没有 calib_w（不知道模板是按多宽的画面标定的）：既然这个
                 # 尺度在当前画面上真认到了人，就把当前画面宽度记成标定宽度。
                 # 以后窗口尺寸一变（换 DPI / RDP 重连）就能按比例自愈，不用重标。
@@ -2176,6 +2207,10 @@ def char_loop():
                 if char_state["misses"] > CHAR_REACQ_MISS:   # 连续没命中就当丢了
                     char_state["box"] = None
                     char_state["ts"] = 0.0
+                    char_state["face"] = 0                    # 没定位就没有朝向可言
+                    char_state["face_anchor"] = None
+        if face_box is not None:
+            observe_face(face_box)
         # 丢了 4 秒还没回来：可能是窗口大小/分辨率变了，重标一次尺度
         with char_lock:
             lost_long = char_state["misses"] > CHAR_FPS * 4
@@ -2279,6 +2314,11 @@ def draw_skill_ranges(img, box):
     color = BOT_RANGE_ON if on else BOT_RANGE_OFF
     h, w = img.shape[:2]
     face = int(st.get("face") or 0)
+    if not on:
+        # 挂机关着的时候 bot 不跑，它那份朝向停在上一次不动了：改用在找人线程里
+        # 一直观测到的朝向（observe_face），这样你手动按方向键走，框也会跟着翻。
+        with char_lock:
+            face = int(char_state["face"] or 0)
     k = botmod.skill_scale(cfg, (w, h))   # 和 bot 决策用同一个系数，所见即所打
     for i, sk in enumerate(skills[:6]):
         dir_ = sk.get("dir") or "both"
