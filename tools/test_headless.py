@@ -751,6 +751,62 @@ with srv.grabber.lock:
     srv.grabber.client_size = _cs
 check("失败的这次没有改动尺度", srv.char_state["scale"] == _sc, srv.char_state["scale"])
 
+# ---------------- S10 抓屏优先级：窗口直读 > 抓屏幕 ----------------
+print("[S10] 抓屏优先级：先读游戏窗口绘制表面（原生像素），失败才退回抓屏幕")
+class _FakeSct:
+    """假装是 mss 的抓屏对象：返回什么由测试说了算。"""
+    def __init__(self, img=None, boom=False):
+        self.img, self.boom, self.calls = img, boom, 0
+    def grab(self, region):
+        self.calls += 1
+        if self.boom:
+            raise RuntimeError("BitBlt: Access is denied.")
+        return self.img.copy()
+
+_REGION = {"left": 0, "top": 0, "width": 1366, "height": 768}
+_real_grab_window = srv.grab_window
+try:
+    # ① 窗口直读成功 → 用它，且客户区尺寸跟着帧走（不是 GetClientRect 的值）
+    srv.grab_window = lambda hwnd: np.full((768, 1366, 3), 40, np.uint8)
+    g = srv.grabber
+    g.win_fails, g.screen_until = 0, 0.0
+    fake = _FakeSct(np.full((768, 2049, 3), 90, np.uint8))
+    got = g._grab(fake, 1, _REGION)
+    check("窗口直读成功时优先用它", got is not None and got[1] == "window", got and got[1])
+    check("窗口直读时不去抓屏幕", fake.calls == 0, fake.calls)
+    check("帧尺寸来自帧本身（原生像素）", got[0].shape[:2] == (768, 1366), got[0].shape)
+
+    # ② 窗口直读抛异常 →退回抓屏幕，帧尺寸换成屏幕抓到的
+    def _boom(hwnd):
+        raise RuntimeError("BitBlt 失败（错误码 5）")
+    srv.grab_window = _boom
+    g.win_fails, g.screen_until = 0, 0.0
+    fake = _FakeSct(np.full((1152, 2049, 3), 90, np.uint8))
+    got = g._grab(fake, 1, _REGION)
+    check("窗口直读失败时退回抓屏幕", got is not None and got[1] == "screen", got and got[1])
+    check("退回时用的是屏幕帧的尺寸", got[0].shape[:2] == (1152, 2049), got[0].shape)
+
+    # ③ 窗口全黑（游戏没在渲染）不能当有效帧
+    srv.grab_window = lambda hwnd: np.zeros((768, 1366, 3), np.uint8)
+    g.win_fails, g.screen_until = 0, 0.0
+    fake = _FakeSct(np.full((768, 1366, 3), 90, np.uint8))
+    got = g._grab(fake, 1, _REGION)
+    check("窗口画面全黑时不当真，改用屏幕", got is not None and got[1] == "screen",
+          got and got[1])
+
+    # ④ 两条路都失败 → 返回 None，且错误信息里两条原因都在
+    srv.grab_window = _boom
+    g.win_fails, g.screen_until = 0, 0.0
+    got = g._grab(_FakeSct(boom=True), 1, _REGION)
+    check("两条路都失败时返回 None", got is None, got)
+    check("错误信息里同时写了窗口和屏幕的原因",
+          "窗口" in g.error and "屏幕" in g.error and "Access is denied" in g.error,
+          g.error)
+finally:
+    srv.grab_window = _real_grab_window
+    srv.grabber.win_fails, srv.grabber.screen_until = 0, 0.0
+    srv.grabber.error = ""
+
 # ---------------- S8 既有单测套件 ----------------
 print("[S8] 既有单测套件")
 for t in ("test_bot.py", "test_charbox.py", "test_sender.py",

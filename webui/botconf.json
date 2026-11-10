@@ -64,6 +64,7 @@
   "patrol_sec": 2.5,
   "move": true,
   "dy_tol": 150,
+  "base_w": 2049,
   "input": "auto",
   "hid_port": ""
 }

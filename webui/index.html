@@ -2929,14 +2929,19 @@
       const s = await (await fetch("/api/stats", { cache: "no-store" })).json();
       const found = s.window_found;
       const mini = !!s.window_minimized;      // 窗口在、只是被最小化 → 可以一键还原
-      grabberReady = found;
-      $("dot").className = "dot " + (found ? "on" : "off");
+      // 窗口在、但抓屏一直失败 / 帧已经好几秒没更新 —— 这时候画面和所有读数都是旧的，
+      // 必须显式说出来，否则会误判成「人物识别不到」去调模板。
+      const stalled = found && (!!s.error || s.frame_age_ms > 1500);
+      grabberReady = found && !stalled;
+      $("dot").className = "dot " + (found && !stalled ? "on" : "off");
       if (!paused) {
-        $("badge").textContent = found ? "实时" : (mini ? "窗口最小化" : "无信号");
+        $("badge").textContent = found
+          ? (stalled ? "抓屏失败" : "实时")
+          : (mini ? "窗口最小化" : "无信号");
       }
       // 窗口标题 / 报错信息改成角标上的悬浮提示，页面上不再占一行文字
-      $("badge").title = found
-        ? `窗口「${s.window_title}」`
+      $("badge").title = (found && !stalled)
+        ? `窗口「${s.window_title}」· ${s.capture_mode === "window" ? "窗口直读（原生像素）" : "屏幕抓取"}`
         : (s.error || "未找到游戏窗口") + (mini ? "\n点这里还原窗口" : "");
       $("badge").classList.toggle("clickable", !found && mini);
       $("cfps").textContent = found ? `${s.capture_fps.toFixed(1)} 帧/秒` : "—";

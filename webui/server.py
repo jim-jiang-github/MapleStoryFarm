@@ -325,6 +325,89 @@ def placeholder(msg=b"NO WINDOW"):
     return img
 
 
+# ---------------- 抓屏：优先读游戏窗口的绘制表面（原生像素） ----------------
+# 以前用 mss 抓「屏幕上的一个区域」，踩到两个坑，而且都会表现成「人物识别不到」：
+#   ① 权限：游戏以管理员身份运行（High 完整性）时，普通权限的服务 BitBlt 整屏会
+#      被系统拒绝（实测 GetLastError=Access denied）。抓屏就此静默死掉，界面还在
+#      刷几秒前的旧帧，看着像模板/尺度出了问题。
+#   ② DPI：游戏是 DPI-unaware 进程，150% 缩放下它按 1366x768 渲染、再由 Windows
+#      把整幅位图拉伸 1.5 倍铺到 2049x1152 物理像素上。抓屏幕 = 抓被拉糊的大图，
+#      白算 2.25 倍像素，而且名字牌尺寸随系统缩放/RDP 分辨率漂移（scale 卡 1.0 的病根）。
+# 改成 BitBlt 游戏窗口自己的 DC：拿到的是游戏原生渲染尺寸（1366x768），清晰、
+# 模板 1:1 就能匹配（实测 0.998）、尺寸只跟游戏自己的渲染设置有关，与 DPI/RDP 无关，
+# 而且窗口 DC 不受完整性级别限制（实测普通权限也能读到管理员窗口的画面）。
+
+class _BmpHeader(ctypes.Structure):
+    _fields_ = [("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32),
+                ("biHeight", ctypes.c_int32), ("biPlanes", ctypes.c_uint16),
+                ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+                ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
+                ("biYPelsPerMeter", ctypes.c_int32), ("biClrUsed", ctypes.c_uint32),
+                ("biClrImportant", ctypes.c_uint32)]
+
+
+def _call_unaware(fn):
+    """在「DPI 不感知」的线程上下文里调用 fn。
+
+    本进程声明成 per-monitor aware，直接问 GetClientRect 拿到的是被 Windows
+    **拉伸后**的物理尺寸（2049x1152）。临时把当前线程切成 unaware，问到的才是
+    游戏自己的渲染尺寸（1366x768）——也就是窗口 DC 那张位图的真实大小。
+    """
+    u32 = ctypes.windll.user32
+    old = None
+    try:
+        u32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        u32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        old = u32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-1))   # UNAWARE
+    except Exception:  # noqa: BLE001  老系统没这个 API
+        old = None
+    try:
+        return fn()
+    finally:
+        if old:
+            try:
+                u32.SetThreadDpiAwarenessContext(ctypes.c_void_p(old))
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def native_client_size(hwnd):
+    """游戏窗口的原生客户区尺寸（游戏自己渲染的像素数）。"""
+    r = _call_unaware(lambda: win32gui.GetClientRect(hwnd))
+    return r[2] - r[0], r[3] - r[1]
+
+
+def grab_window(hwnd):
+    """BitBlt 游戏窗口的绘制表面，返回原生分辨率 BGR 帧；失败抛异常。"""
+    w, h = native_client_size(hwnd)
+    if w < 64 or h < 64:
+        raise RuntimeError(f"客户区尺寸异常 {w}x{h}")
+    u32, gdi = ctypes.windll.user32, ctypes.windll.gdi32
+    hdc = u32.GetDC(hwnd)
+    if not hdc:
+        raise RuntimeError("GetDC 取不到窗口 DC")
+    mdc = bmp = None
+    try:
+        mdc = gdi.CreateCompatibleDC(hdc)
+        bmp = gdi.CreateCompatibleBitmap(hdc, w, h)
+        gdi.SelectObject(mdc, bmp)
+        if not gdi.BitBlt(mdc, 0, 0, w, h, hdc, 0, 0, 0x00CC0020):
+            raise RuntimeError(f"BitBlt 失败（错误码 {ctypes.get_last_error()}）")
+        bi = _BmpHeader(biSize=ctypes.sizeof(_BmpHeader), biWidth=w, biHeight=-h,
+                        biPlanes=1, biBitCount=32, biCompression=0)
+        buf = (ctypes.c_char * (w * h * 4))()
+        if not gdi.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(bi), 0):
+            raise RuntimeError("GetDIBits 取不到像素")
+        # GetDIBits 给的是 BGRA，前三个通道正好是 BGR
+        return np.frombuffer(buf, np.uint8).reshape(h, w, 4)[:, :, :3].copy()
+    finally:
+        if bmp:
+            gdi.DeleteObject(bmp)
+        if mdc:
+            gdi.DeleteDC(mdc)
+        u32.ReleaseDC(hwnd, hdc)
+
+
 class Grabber(threading.Thread):
     """持续抓取游戏客户区，保留最新一帧供 Web 层取用。"""
 
@@ -343,6 +426,10 @@ class Grabber(threading.Thread):
         self.last_frame_ts = 0.0
         self.error = ""
         self.running = True
+        self.mode = "window"      # window = 读窗口绘制表面（原生像素）；screen = 退回抓屏幕
+        self.win_fails = 0        # 窗口抓取连续失败次数
+        self.win_error = ""       # 窗口抓取为什么失败（和屏幕的错误分开记，好排查）
+        self.screen_until = 0.0   # 在这之前不再试窗口抓取（避免每帧白折腾）
 
     def snapshot(self):
         with self.lock:
@@ -360,6 +447,39 @@ class Grabber(threading.Thread):
                 return True
             time.sleep(0.01)
         return False
+
+    def _grab(self, sct, hwnd, region):
+        """抓一帧：先读窗口绘制表面（原生像素），不行再退回抓屏幕。
+
+        返回 (frame, "window" | "screen")；两条路都失败返回 None 并写好 self.error。
+        窗口这条路是首选：不受完整性级别限制、给的是原生像素、跟 DPI 无关。
+        只有它连续失败（窗口没在渲染 / 被反作弊挡）才退回屏幕抓取，2 秒后再试。
+        """
+        now = time.time()
+        if now >= self.screen_until:
+            try:
+                frame = grab_window(hwnd)
+                # 全黑 = 窗口没在画（最小化、切场景、或反作弊拦了），别当成好帧
+                if int(frame[::8, ::8].max()) >= 8:
+                    self.win_fails = 0
+                    self.win_error = ""
+                    return frame, "window"
+                self.win_error = "窗口画面全黑（游戏没在渲染？）"
+            except Exception as e:  # noqa: BLE001
+                self.win_error = f"{type(e).__name__}: {e}"
+            self.win_fails += 1
+            if self.win_fails >= 30:      # 连续失败半秒以上，先歇 2 秒再试
+                self.win_fails = 0
+                self.screen_until = now + 2.0
+
+        try:
+            raw = sct.grab(region)
+            return np.asarray(raw)[:, :, :3].copy(), "screen"
+        except Exception as e:  # noqa: BLE001
+            self.error = (f"抓屏失败｜窗口：{self.win_error or '未尝试'}"
+                          f"｜屏幕：{type(e).__name__}: {e}")
+            time.sleep(0.2)
+            return None
 
     def run(self):
         with SCREENSHOT() as sct:
@@ -387,19 +507,21 @@ class Grabber(threading.Thread):
                     time.sleep(0.25)
                     continue
 
-                try:
-                    raw = sct.grab(region)
-                    frame = np.asarray(raw)[:, :, :3].copy()
-                except Exception as e:  # noqa: BLE001
-                    self.error = f"{type(e).__name__}: {e}"
-                    time.sleep(0.2)
+                got = self._grab(sct, hwnd, region)
+                if got is None:
                     continue
+                frame, mode = got
 
                 with self.lock:
                     self.frame = frame
                     self.window_found = True
                     self.window_minimized = False
-                    self.client_size = (region["width"], region["height"])
+                    # 客户区尺寸以**实际抓到的帧**为准：窗口抓取给的是原生像素
+                    # （1366x768），屏幕抓取给的是被 DPI 拉伸后的（2049x1152）。
+                    # 下游（人物中心兜底、技能范围等比、前端画框）都吃这个值，
+                    # 三者必须同源，否则「看到的就是打不到的」。
+                    self.client_size = (frame.shape[1], frame.shape[0])
+                    self.mode = mode
                     self.last_frame_ts = time.time()
                     self.error = ""
                 count += 1
@@ -2012,6 +2134,11 @@ def char_loop():
         if not enabled or not has_tpl or not grabber.window_found:
             time.sleep(0.25)
             continue
+        if time.time() - grabber.stamp() > 1.0:
+            # 抓屏断了：别拿几秒前的旧帧算分数、更别拿它给 ME 框续命
+            # （续命会在冻结的画面上钉一个「幽灵 ME」，看着就像识别不到）
+            time.sleep(0.25)
+            continue
         try:
             frame = grabber.snapshot()
             box, score = find_char(frame)
@@ -2036,6 +2163,12 @@ def char_loop():
                 # 到点就把标记收掉，别在旧位置留一个「幽灵 ME」。
                 if ev != "hold":
                     char_state["ts"] = now
+                # 老配置没有 calib_w（不知道模板是按多宽的画面标定的）：既然这个
+                # 尺度在当前画面上真认到了人，就把当前画面宽度记成标定宽度。
+                # 以后窗口尺寸一变（换 DPI / RDP 重连）就能按比例自愈，不用重标。
+                if char_state["calib_w"] is None:
+                    char_state["calib_w"] = int(frame.shape[1])
+                    _save_char_conf()
             else:
                 char_state["pending"] = None
                 char_state["guard"] = 0
@@ -2581,6 +2714,7 @@ async def stats():
         "window_minimized": grabber.window_minimized,
         "window_title": WINDOW_TITLE,
         "client_size": list(grabber.client_size),
+        "capture_mode": grabber.mode,
         "capture_fps": round(grabber.capture_fps, 1),
         "stream_fps": stream_fps,
         "frame_age_ms": round(age, 0),
