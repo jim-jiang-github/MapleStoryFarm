@@ -103,6 +103,8 @@ def _key_label(name):
 TURN_SETTLE_MS = 130
 TURN_TAP_MS = 50          # 转身时方向键按住多久：够游戏认一次转向，又不至于真的迈一步
 JUMP_COOLDOWN_MS = 900    # 两次跳的最小间隔：起跳+落地+站稳要这么久，比这快就是原地抽搐
+MOVE_FACE_PX = 10         # 朝向观测阈值：身体中心往一边累计挪过这么多像素 = 朝那边
+                         # （模板匹配的抖动就 ±几像素，凑不够这个数，不会误翻）
 JUMP_CAST_MS = 100        # 跳放连招：按下跳键后隔这么久再按技能键（起跳到能出手的手感值）
 
 KEYEVENTF_EXTENDEDKEY = 0x0001
@@ -606,6 +608,7 @@ class Bot:
         self._held = 0            # 当前按住的左右方向：-1 / 0 / 1
         self._down = set()        # 当前真的按住没松的键（别对没按的键发抬起）
         self._face = 0            # 上一次转向的方向（攻击朝这一侧）
+        self._face_anchor = None  # 朝向观测锚点：人物身体中心的最近参考位置
         self._t_turn = 0.0        # 上一次转身的时刻：转完要等一帧再打，否则打的是旧朝向
         self._was_fg = False      # 上一轮游戏是否在前台（重新拿回焦点时朝向不可信）
         self._t_pot = 0.0
@@ -657,7 +660,7 @@ class Bot:
         on = bool(on)
         self.update_cfg({"on": on}, save=save)
         if on:
-            self._face = 0            # 刚开：不知道角色现在朝哪，第一下必须转身
+            self._reset_face()        # 刚开：不知道角色现在朝哪，第一下必须转身
             self._t_turn = 0.0
             self._ensure_thread()
         else:
@@ -709,6 +712,30 @@ class Bot:
         self._held = 0
 
     # ---- 状态 ----
+    def _reset_face(self):
+        """朝向记忆作废（死亡/失焦回来/丢定位）：锚点一起清，从当前位移重新攒。"""
+        self._face = 0
+        self._face_anchor = None
+
+    def _watch_face(self, char):
+        """朝向从观察到的位移来：人物在画面上往哪边挪，就朝哪边。
+
+        _face 原来只记「自己按过什么键」——你手动走两步、被击退、复活，
+        记忆就失准了，身前技能的框和判定全跟着错。这里直接看身体中心
+        相对锚点的累计位移：往一边挪过 MOVE_FACE_PX 就算朝那边并把锚点
+        挪过来。匹配抖动（±几像素）永远凑不够阈值，不会误翻；bot 自己
+        走路/巡逻产生的位移和按键记忆是同向的，互相印证不打架。
+        """
+        cx = _cx(char)
+        if self._face_anchor is None:
+            self._face_anchor = cx
+            return
+        d = cx - self._face_anchor
+        if d >= MOVE_FACE_PX:
+            self._face, self._face_anchor = 1, cx
+        elif d <= -MOVE_FACE_PX:
+            self._face, self._face_anchor = -1, cx
+
     def _set_status(self, **kw):
         with self._lock:
             self._status.update(kw)
@@ -727,6 +754,10 @@ class Bot:
                 cfg = dict(self.cfg)
             if not cfg["on"]:
                 self.release_all()
+                # 挂机关着也继续观测朝向：画面上的身前技能框得跟着你手动转向翻
+                st = self.get_state() or {}
+                if st.get("char"):
+                    self._watch_face(st["char"])
                 self._set_status(act="已停止")
                 time.sleep(0.1)
                 continue
@@ -838,7 +869,7 @@ class Bot:
         self._set_status(hp=hp)
         if hp is not None and hp <= 0:
             # 死了：复活点出生时朝向右，之前的朝向记忆不可信
-            self._face = 0
+            self._reset_face()
 
         # 失焦：绝对不能发按键（会打进别的窗口），同时把按住的键松开
         if not st.get("fg"):
@@ -849,7 +880,7 @@ class Bot:
         if not self._was_fg:
             # 重新拿回焦点：这期间你可能手动走过、转过，朝向记忆作废，下一轮先转身
             self._was_fg = True
-            self._face = 0
+            self._reset_face()
 
         now = time.time() if now is None else float(now)
 
@@ -872,9 +903,10 @@ class Bot:
         char = st.get("char")
         if not char:
             self._set_dir(0)
-            self._face = 0            # 人都没定位到，朝向记忆一并作废
+            self._reset_face()        # 人都没定位到，朝向记忆一并作废
             self._set_status(act="找不到人物", target="")
             return
+        self._watch_face(char)        # 朝向跟实际位移走：手动走两步也能翻框
 
         # 3) 技能选择：逐个技能算判定框（skill_rects），数框里的怪。
         #    列表顺序 = 优先级；某个技能框里怪 ≥2 → 优先群攻，只有 1 只 → 优先

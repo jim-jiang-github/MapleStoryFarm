@@ -440,5 +440,26 @@ c = step(b3, now=t3 + 11.8 + 3.1, hp=50.0, mp=20.0)
 check("歇完间隔从头（pot9）再试", mp_presses(c) == ["pot9"], mp_presses(c))
 check("蓝够时不按蓝药键", mp_presses(step(b3, now=t3 + 20.0, hp=50.0, mp=80.0)) == [])
 
+print("[26] 朝向跟观察到的位移走（手动走两步，框也要跟着翻）")
+b = make()
+b.cfg["patrol"] = False              # 无怪+巡逻关：bot 自己一个键都不发
+step(b, now=100.0, m=[])
+check("静止开局 face=0（不知道朝哪）", b.snapshot()[1]["face"] == 0, b.snapshot()[1])
+moved_r = [CHAR[0] + 30, CHAR[1], CHAR[2] + 30, CHAR[3]]
+step(b, now=100.1, m=[], char=moved_r)
+check("手动右移 30px → face=1", b.snapshot()[1]["face"] == 1, b.snapshot()[1])
+step(b, now=100.2, m=[], char=[moved_r[0] + 3, CHAR[1], moved_r[2] + 3, CHAR[3]])
+check("±3px 匹配抖动不翻面", b.snapshot()[1]["face"] == 1, b.snapshot()[1])
+moved_l = [CHAR[0] - 60, CHAR[1], CHAR[2] - 60, CHAR[3]]
+step(b, now=100.3, m=[], char=moved_l)
+check("手动左移 → face=-1", b.snapshot()[1]["face"] == -1, b.snapshot()[1])
+step(b, now=100.4, m=[], char=moved_l)   # 原地不动：face 保持 -1
+check("原地不动 face 不变", b.snapshot()[1]["face"] == -1, b.snapshot()[1])
+b._reset_face()
+step(b, now=100.5, m=[], char=moved_l)
+check("复位后从当前位移重新攒（face=0）", b.snapshot()[1]["face"] == 0, b.snapshot()[1])
+step(b, now=100.6, m=[], char=[moved_l[0] - 15, CHAR[1], moved_l[2] - 15, CHAR[3]])
+check("复位后继续左移 → 又是 face=-1", b.snapshot()[1]["face"] == -1, b.snapshot()[1])
+
 print(f"\n通过 {ok} / {ok + fail}")
 sys.exit(1 if fail else 0)

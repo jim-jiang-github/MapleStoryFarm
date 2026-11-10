@@ -180,8 +180,8 @@ CHAR_TPL_PX = (CHAR_XY[0] - 2, CHAR_XY[1] - CHAR_TH - 2,
                CHAR_XY[0] + CHAR_TW + 2, CHAR_XY[1] + 2)   # 上传模板用的框
 
 
-def make_scene(hp=0.6, mp=0.8, exp=0.3, mobs=(), with_char=True):
-    """合成一帧。mobs: [(类名, (x, y, w, h))] 画面绝对坐标。"""
+def make_scene(hp=0.6, mp=0.8, exp=0.3, mobs=(), with_char=True, char_dx=0):
+    """合成一帧。mobs: [(类名, (x, y, w, h))] 画面绝对坐标。char_dx：名字牌水平位移。"""
     img = np.full((H, W, 3), 40, np.uint8)
     bars = srv.bar_snapshot()
     for kind, frac in (("hp", hp), ("mp", mp), ("exp", exp)):
@@ -198,8 +198,8 @@ def make_scene(hp=0.6, mp=0.8, exp=0.3, mobs=(), with_char=True):
         cv2.rectangle(img, (x1, y1), (x1 + fw, y2),
                       _hue_bgr(r.get("hue") or FALLBACK_HUE[kind]), -1)
     if with_char:
-        cv2.putText(img, CHAR_TEXT, CHAR_XY, cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                    (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(img, CHAR_TEXT, (CHAR_XY[0] + char_dx, CHAR_XY[1]),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
     for name, (x, y, w, h) in mobs:
         cv2.rectangle(img, (int(x), int(y)), (int(x + w), int(y + h)),
                       MOB_BGR[name], -1)
@@ -493,6 +493,23 @@ check("身前技能：左边的怪照打（先点左对正再出 KeyS）", wait_
             and "KeyS" in press_keys(new_events()), timeout=8),
     detail=str(new_events()[-14:]))
 post("/api/bot/set", {"skills": SKILLS})
+
+# 朝向跟人物实际位移走：无怪+巡逻关（bot 不发任何键），合成画面里把人物
+# 挪动，身前技能的朝向也得跟着翻——用户手动转向时框不能僵在旧的一边
+post("/api/bot/set", {"patrol": False})
+set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30, mobs=[]))
+time.sleep(0.6)
+face0 = srv.game_bot.snapshot()[1]["face"]
+set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30, mobs=[], char_dx=40))
+check("人物右移 40px → 朝向翻成右（face=1）", wait_until(
+    lambda: srv.game_bot.snapshot()[1]["face"] == 1, timeout=8),
+    detail=f"face0={face0} now={srv.game_bot.snapshot()[1]['face']}")
+set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30, mobs=[], char_dx=-50))
+check("人物左移 → 朝向翻成左（face=-1）", wait_until(
+    lambda: srv.game_bot.snapshot()[1]["face"] == -1, timeout=8),
+    detail=str(srv.game_bot.snapshot()[1]))
+set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30, mobs=[]))
+post("/api/bot/set", {"patrol": True})
 
 # 拾取
 set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30, mobs=[]))
