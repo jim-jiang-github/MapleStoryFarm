@@ -828,5 +828,30 @@ check("mm_zone 乱序自动整理", bot.clamp_cfg({"mm_zone": [0.8, 1, 0.2, 0]})
 check("mm_zone 非法 → 空（关）", bot.clamp_cfg({"mm_zone": "x"})["mm_zone"] == [])
 check("mm_zone 太窄 → 空（关）", bot.clamp_cfg({"mm_zone": [0.4, 0, 0.41, 1]})["mm_zone"] == [])
 
+# 巡逻按范围扫：黄点在跟时过了 patrol_sec 也不换向（扫到边才掉头）
+b = make()
+b.cfg["patrol"] = True
+b.cfg["mm_zone"] = Z
+b._patrol_dir = 1                        # 往右扫，黄点在范围中间
+b._t_patrol = time.time() - 10           # 早就过了 2.5s 换向间隔
+c = step(b, m=[], size=(1366, 768), roi=None, dot=[0.5, 0.5], now=time.time())
+check("范围开着：过时不掉头，继续往右扫", b._patrol_dir == 1, b._patrol_dir)
+check("范围开着：还是按着 right", "right" in down_keys(c), c)
+# 黄点丢了（None）：退回定时换向
+b2 = make()
+b2.cfg["patrol"] = True
+b2.cfg["mm_zone"] = Z
+b2._patrol_dir = 1
+b2._t_patrol = time.time() - 10
+step(b2, m=[], size=(1366, 768), roi=None, dot=None, now=time.time())
+check("黄点丢了：定时换向照常", b2._patrol_dir == -1, b2._patrol_dir)
+# 没圈范围：定时换向照常
+b3 = make()
+b3.cfg["patrol"] = True
+b3._patrol_dir = 1
+b3._t_patrol = time.time() - 10
+step(b3, m=[], size=(1366, 768), roi=None, dot=[0.5, 0.5], now=time.time())
+check("没圈范围：定时换向照常", b3._patrol_dir == -1, b3._patrol_dir)
+
 print(f"\n通过 {ok} / {ok + fail}")
 sys.exit(1 if fail else 0)

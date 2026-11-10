@@ -1224,7 +1224,11 @@ class Bot:
                 self._set_dir(0)
                 self._set_status(act=why)
             elif cfg["patrol"]:
-                if now - self._t_patrol >= cfg["patrol_sec"]:
+                # 圈了小地图范围且黄点在跟：巡逻按范围扫——从左走到右、到边
+                # 掉头，不按定时换向（不然就是原地左右抽搐，扫不完整个范围）。
+                # 黄点丢了/没圈范围：退回定时换向的老行为。
+                mm_zone_on = bool(cfg.get("mm_zone")) and st.get("dot") is not None
+                if not mm_zone_on and now - self._t_patrol >= cfg["patrol_sec"]:
                     self._patrol_dir = -self._patrol_dir
                     self._t_patrol = now
                 if not self._can_walk(self._patrol_dir, char, size, roi):
