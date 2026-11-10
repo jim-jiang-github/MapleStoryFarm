@@ -372,6 +372,16 @@
   }
   #detect { white-space: nowrap; }
   .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  /* 外网穿透：按钮下面那行公网地址（点一下复制完整链接，带口令） */
+  .wanline {
+    margin-top: 8px; padding: 6px 9px; display: none;
+    font-size: 11.5px; line-height: 1.5; color: #1d4ed8;
+    background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 7px;
+    word-break: break-all; cursor: pointer;
+  }
+  .wanline.show { display: block; }
+  .wanline b { color: #7c2d12; font-weight: 600; }
+  #wanBtn.busy { background: #fff7ed; border-color: #fdba74; color: #9a3412; }
   /* 包按钮用的 span：display:contents 让里面的按钮仍按 .actions 的 flex 排 */
   #calBox { display: contents; }
   #calBox[hidden] { display: none; }
@@ -696,6 +706,7 @@
           <button id="modeBtn">模式: 速度</button>
           <button id="botBtn" title="自动打怪：血低喝药、打范围内的怪、全程按 Z 拾取。只有游戏窗口在前台时才会发按键">挂机: 关</button>
           <button id="focusBtn" title="把游戏窗口抬到最前并给焦点（截图前必做）">前置游戏</button>
+          <button id="wanBtn" title="一键内网穿透：生成一个带口令的 https 公网地址，手机在外面（4G/别处 WiFi）也能看画面。再点一下关掉">外网: 关</button>
           <input type="file" id="charFile" accept="image/*" hidden>
           <!-- 标定/自动定位平时用不上：auto 定位在后台自己跑，坐标存在 webui/bars.json。
                真要手动框的时候在地址后面加 ?cal=1 把这两个按钮放出来。 -->
@@ -707,6 +718,7 @@
         <div class="filterrow">
           <input id="filter" placeholder="只识别某类，如 Stump（留空 = 全部）" spellcheck="false" />
         </div>
+        <div class="wanline" id="wanLine"></div>
       </div>
     </div>
   </div>
@@ -2535,6 +2547,101 @@
     }
   });
 
+  /* ================= 外网穿透（一键） =================
+     后端 /api/tunnel/start 自己起 cloudflared（没有就退 tunnelmole），公网地址从
+     子进程输出里抓；这里只管按钮文案、轮询和「点一下复制带口令的完整链接」。
+     口令在起隧道时自动生成（不能裸奔：这个页面等于能看你屏幕），本机 127.0.0.1 免。 */
+  let wanTimer = null;
+  let wanTries = 0;
+
+  async function copyText(txt) {
+    try {
+      await navigator.clipboard.writeText(txt);
+      return true;
+    } catch (_) { /* 局域网 http 直连时没有 clipboard API */ }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = txt; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch (_) { return false; }
+  }
+
+  function paintWan(d) {
+    const btn = $("wanBtn"), line = $("wanLine");
+    const busy = !d.running && !d.err && !d.url && (d.elapsed || 0) > 0;
+    btn.classList.toggle("on", !!d.running);
+    btn.classList.toggle("busy", busy);
+    btn.textContent = d.running ? "外网: 开" : (busy ? "外网: 建立中…" : "外网: 关");
+    if (d.url) {
+      line.dataset.url = d.mobile || d.url;
+      line.classList.add("show");
+      line.innerHTML = "手机打开 → <b>" + (d.mobile || d.url) + "</b>（点这里复制）";
+      line.title = "桌面版：" + (d.desktop || d.url) + (d.token ? "　口令：" + d.token : "");
+    } else if (d.err) {
+      line.dataset.url = "";
+      line.classList.add("show");
+      line.textContent = "外网没起来：" + d.err;
+    } else if (d.hint) {
+      // 进程半路退了（网络/防火墙）：把它的最后一行输出当线索
+      line.dataset.url = "";
+      line.classList.add("show");
+      line.textContent = "外网断了：" + d.hint;
+    } else {
+      line.dataset.url = "";
+      line.classList.remove("show");
+    }
+  }
+
+  async function wanPoll() {
+    let d = null;
+    try {
+      d = await fetch("/api/tunnel", { cache: "no-store" }).then(r => r.json());
+    } catch (_) { return; }
+    paintWan(d);
+    if (d.running && !d.url && !d.err && wanTries++ < 40) {
+      wanTimer = setTimeout(wanPoll, 700);        // 等分配地址，最多约 28 秒
+    } else if (d.running) {
+      wanTimer = setTimeout(wanPoll, 5000);       // 起来了：5 秒看一眼进程还在不在
+    } else {
+      wanTimer = null;
+    }
+  }
+
+  $("wanBtn").addEventListener("click", async () => {
+    const btn = $("wanBtn");
+    btn.disabled = true;
+    try {
+      const cur = await fetch("/api/tunnel", { cache: "no-store" }).then(r => r.json());
+      const stop = cur.running || ((cur.elapsed || 0) > 0 && !cur.err);
+      if (stop) {
+        await postJSON("/api/tunnel/stop", {});
+        clearTimeout(wanTimer); wanTimer = null;
+        paintWan({ running: false, url: "", err: "", token: "" });
+        toast("外网已关闭");
+      } else {
+        await postJSON("/api/tunnel/start", {});
+        toast("正在建立公网地址，几秒后这里会出现链接…");
+        wanTries = 0;
+        clearTimeout(wanTimer);
+        wanTimer = setTimeout(wanPoll, 700);
+      }
+    } catch (e) {
+      toast("外网操作失败：" + (e && e.message ? e.message : e));
+      wanPoll();
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $("wanLine").addEventListener("click", async () => {
+    const u = $("wanLine").dataset.url;
+    if (!u) return;
+    toast(await copyText(u) ? "已复制：" + u : u);
+  });
+
   /* ================= 技能列表 =================
      键位分组整个换成了技能：每个技能一张卡（快捷键 / 群攻单体 / 方向 / 可跳放），
      卡片顺序 = 释放优先级（⠿ 拖动换位）。
@@ -2840,6 +2947,7 @@
   }
   pollBot();
   setInterval(pollBot, 500);
+  wanPoll();        // 刷新页面后把「外网: 开/关」和已有链接恢复出来
 
   /* 面板上两个实时参数：识别阈值（浮点）和稳定帧数（整数）。共用一套绑定：
      拖动时先改数字（立刻有反馈），停手 120ms 再发请求，避免每一像素都打一次后端。 */

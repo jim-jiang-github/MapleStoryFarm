@@ -5,13 +5,17 @@ Run:  python webui/server.py
 Open: http://127.0.0.1:8765
 """
 import asyncio
+import atexit
 import base64
 import collections
 import ctypes
 import json
 import os
 import re
+import secrets
+import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -2820,6 +2824,150 @@ async def _token_gate(request, call_next):
         return await call_next(request)
     return Response("需要访问口令：在地址后面加 ?k=你的口令 再打开一次", status_code=401,
                     media_type="text/plain; charset=utf-8")
+
+
+# ---------- 一键内网穿透（面板上的「外网」按钮） ----------
+# 和 tools/tunnel.py 同一套判断：优先 cloudflared（MJPEG 长连接能真跑起来），
+# 没有才退回 tunnelmole。区别是这里由服务器自己看管子进程，面板点一下就起，
+# 不用再开一个黑窗口、也不用记端口。
+TUNNEL_CF_RE = re.compile(r"https://[A-Za-z0-9-]+\.trycloudflare\.com")
+TUNNEL_TM_RE = re.compile(r"https://[A-Za-z0-9._-]+\.tunnelmole\.(?:net|io)")
+
+tunnel_state = {
+    "proc": None,       # 隧道子进程（cloudflared / npx tunnelmole）
+    "url": "",          # 解析出来的公网地址（https://xxx.trycloudflare.com）
+    "tool": "",         # 这次用的是哪个工具
+    "err": "",          # 起不来 / 半路退出的原因
+    "log": collections.deque(maxlen=40),
+    "t0": 0.0,          # 启动时刻：面板拿它显示「正在建立…」
+}
+tunnel_lock = threading.Lock()
+
+
+def _find_cloudflared():
+    """找 cloudflared：环境变量 → 内置 tools/bin → PATH。"""
+    env = (os.environ.get("CLOUDFLARED") or "").strip()
+    if env and Path(env).exists():
+        return env
+    # 源码运行：项目根/tools/bin；打包后：_MEIPASS/tools/bin（build_exe.py 带进来）
+    p = apppaths.RES_DIR.parent / "tools" / "bin" / "cloudflared.exe"
+    if p.exists() and p.stat().st_size > 10 * 1024 * 1024:   # 残缺文件不算
+        return str(p)
+    return shutil.which("cloudflared")
+
+
+def _tunnel_alive():
+    p = tunnel_state["proc"]
+    return bool(p and p.poll() is None)
+
+
+def _tunnel_reader(proc, pattern):
+    """读子进程输出：一边攒日志，一边抓第一条公网地址。"""
+    try:
+        for line in proc.stdout:
+            tunnel_state["log"].append(line.rstrip())
+            if not tunnel_state["url"]:
+                m = pattern.search(line)
+                if m:
+                    tunnel_state["url"] = m.group(0)
+                    _log(f"外网地址 {m.group(0)}")
+    except Exception:  # noqa: BLE001  进程被强杀时读管道会抛，无所谓
+        pass
+
+
+def _tunnel_stop(reason=""):
+    with tunnel_lock:
+        proc = tunnel_state["proc"]
+        tunnel_state["proc"] = None
+        tunnel_state["url"] = ""
+        tunnel_state["t0"] = 0.0
+        if reason:
+            tunnel_state["err"] = reason
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+atexit.register(_tunnel_stop)   # 服务退出时别留个孤儿隧道
+
+
+def _tunnel_payload():
+    with tunnel_lock:
+        alive = _tunnel_alive()
+        url = tunnel_state["url"]
+        # 进程已经退了但没解析出网址：把最后一行输出当提示（多半是网络/端口问题）
+        hint = ""
+        if not alive and not url and tunnel_state["log"]:
+            hint = tunnel_state["log"][-1]
+        return {"running": alive, "url": url, "tool": tunnel_state["tool"],
+                "err": tunnel_state["err"], "hint": hint, "token": PREVIEW_TOKEN,
+                "elapsed": round(time.time() - tunnel_state["t0"], 1) if tunnel_state["t0"] else 0,
+                "log": list(tunnel_state["log"])[-8:]}
+
+
+@app.get("/api/tunnel")
+async def tunnel_get():
+    d = _tunnel_payload()
+    tail = f"?k={d['token']}" if d["token"] else ""
+    d["mobile"] = f"{d['url']}/m{tail}" if d["url"] else ""
+    d["desktop"] = f"{d['url']}/{tail}" if d["url"] else ""
+    return JSONResponse(d)
+
+
+@app.post("/api/tunnel/start")
+async def tunnel_start():
+    global PREVIEW_TOKEN
+    with tunnel_lock:
+        if _tunnel_alive():
+            return JSONResponse({"ok": True, "running": True, "tool": tunnel_state["tool"]})
+        tunnel_state["log"].clear()
+        tunnel_state["url"], tunnel_state["err"] = "", ""
+        tunnel_state["t0"] = time.time()
+
+        cf = _find_cloudflared()
+        if cf:
+            tool = "cloudflared"
+            cmd = [cf, "tunnel", "--no-autoupdate", "--url", f"http://localhost:{PORT}"]
+            pattern = TUNNEL_CF_RE
+        else:
+            npx = shutil.which("npx")
+            if not npx:
+                msg = ("没找到 cloudflared（tools/bin/cloudflared.exe），也没有 Node/npx 可跑 "
+                       "tunnelmole。装上 cloudflared 再点一次。")
+                tunnel_state["err"] = msg
+                return JSONResponse({"error": msg}, status_code=400)
+            tool = "tunnelmole"
+            cmd = [npx, "-y", "tunnelmole", str(PORT)]
+            pattern = TUNNEL_TM_RE
+
+        # 公开地址等于「能看你的屏幕 + 能把游戏窗口提到前台」，不能裸奔：
+        # 没口令就现生成一个，之后局域网/外网访问都要带 ?k=（本机 127.0.0.1 免）。
+        if not PREVIEW_TOKEN:
+            PREVIEW_TOKEN = "msfarm" + secrets.token_hex(3)
+            _log(f"外网访问口令已生成：{PREVIEW_TOKEN}")
+
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                bufsize=1, encoding="utf-8", errors="replace", creationflags=flags)
+        except Exception as e:  # noqa: BLE001
+            tunnel_state["err"] = f"启动 {tool} 失败：{e}"
+            return JSONResponse({"error": tunnel_state["err"]}, status_code=500)
+        tunnel_state["proc"], tunnel_state["tool"] = proc, tool
+        threading.Thread(target=_tunnel_reader, args=(proc, pattern),
+                         name="tunnel-reader", daemon=True).start()
+        _log(f"内网穿透启动：{tool} -> localhost:{PORT}")
+    return JSONResponse({"ok": True, "running": True, "tool": tool})
+
+
+@app.post("/api/tunnel/stop")
+async def tunnel_stop():
+    _tunnel_stop()
+    _log("内网穿透已停止")
+    return JSONResponse({"ok": True, "running": False})
 
 
 def encode(frame, width=None, quality=JPEG_QUALITY):

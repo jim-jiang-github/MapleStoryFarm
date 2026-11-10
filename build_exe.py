@@ -142,6 +142,19 @@ def optional_pyserial():
             "--hidden-import", "serial.tools.list_ports"]
 
 
+def tunnel_flags():
+    """带上 cloudflared.exe：面板上的「外网」一键穿透要用它。
+
+    不带也能启动，只是按钮点了会提示先装 cloudflared（tunnelmole 兜底要 Node）。
+    """
+    p = ROOT / "tools" / "bin" / "cloudflared.exe"
+    if not p.exists() or p.stat().st_size < 10 * 1024 * 1024:   # 残缺文件不算
+        log("tools/bin/cloudflared.exe 不在 -> 包里不带内置穿透（按钮会提示装它）")
+        return []
+    log(f"cloudflared {p.stat().st_size / 1048576:.0f} MB（内网穿透）")
+    return ["--add-data", f"{p}{os.pathsep}tools/bin"]
+
+
 def prepare_dist():
     """上一次的产物目录先改名让路，**不删**。
 
@@ -236,6 +249,7 @@ def build(onefile, with_accurate, clean, dry_run=False):
     ]
     cmd += model_flags(with_accurate)
     cmd += optional_pyserial()
+    cmd += tunnel_flags()
 
     # ultralytics：模型/跟踪器运行时按名字导入，必须整包收
     cmd += [
