@@ -203,14 +203,20 @@ c = step(b, char=None)
 check("不按方向/攻击", not any(k in ("left", "right", ATK) for k in down_keys(c)), c)
 check("状态是找不到人物", b.snapshot()[1]["act"] == "找不到人物", b.snapshot()[1])
 
-print("[13] 巡逻：没怪时按住一个方向，到点换向")
+print("[13] 找怪：没圈范围站住等；圈了范围从左扫到右（不再定时换向）")
 b = make()
 c = step(b)
-first = b._held
-check("按住了一个方向", first in (-1, 1) and down_keys(c) in (["left"], ["right"]), c)
-b._t_patrol -= 3.0
-c = step(b)
-check("换向", b._held == -first, (first, b._held))
+check("没圈范围：站住不发方向键", down_keys(c) == [], c)
+check("没圈范围：状态是守株待兔", "守株待兔" in b.snapshot()[1]["act"], b.snapshot()[1])
+b2 = make()
+b2.cfg["mm_zone"] = [0.2, 0.0, 0.8, 1.0]
+b2._patrol_dir = 1
+c = step(b2, dot=[0.5, 0.5])
+check("圈了范围：按住一个方向扫", b2._held in (-1, 1) and down_keys(c) in (["left"], ["right"]), c)
+d = b2._held
+for _ in range(3):
+    step(b2, dot=[0.5, 0.5])
+check("没有定时换向：方向一直不变", b2._held == d, (d, b2._held))
 
 print("[14] 配置钳位")
 cfg = bot.clamp_cfg({"hp_pct": 300, "pot_sec": 0,
@@ -604,8 +610,7 @@ check("歇完间隔从头（pot9）再试", mp_presses(c) == ["pot9"], mp_presse
 check("蓝够时不按蓝药键", mp_presses(step(b3, now=t3 + 20.0, hp=50.0, mp=80.0)) == [])
 
 print("[26] 朝向跟观察到的位移走（手动走两步，框也要跟着翻）")
-b = make()
-b.cfg["patrol"] = False              # 无怪+巡逻关：bot 自己一个键都不发
+b = make()                           # 无怪+没圈范围：bot 自己一个键都不发
 step(b, now=100.0, m=[])
 check("静止开局 face=0（不知道朝哪）", b.snapshot()[1]["face"] == 0, b.snapshot()[1])
 moved_r = [CHAR[0] + 30, CHAR[1], CHAR[2] + 30, CHAR[3]]
@@ -651,7 +656,6 @@ step(b3, m=[], char=None, size=(1280, 720))
 check("站着丢 → 最后位置在中线左边，往右（中间）走", b3._held == 1, b3._held)
 
 b2 = make()
-b2.cfg["patrol"] = False
 step(b2, now=10.0, m=[], char=CHAR)                    # 真人：观测锚点立在 630
 step(b2, now=10.1, m=[], char=None, size=(1280, 720))  # 丢定位：锚点应作废
 step(b2, now=10.2, m=[], char=[CHAR[0] - 500, CHAR[1], CHAR[2] - 500, CHAR[3]])
@@ -733,19 +737,11 @@ check("状态写明是追出识别区", "追出识别区" in b.snapshot()[1]["ac
 
 # 怪在屏幕那一头，走到底（含追击余量）也够不着 → 不追，转成巡逻，不会傻站着
 b = make()
-b._patrol_dir = -1
-b._t_patrol = time.time()                 # 刚换过向，别让计时器插一脚
 c = step(b, m=[{"name": "Stump", "box": [1150, 300, 1210, 360], "conf": 0.9}],
          char=EDGE_R, size=(1366, 768), roi=ROI_N)
 check("够不着的怪 → 不往右追", "right" not in down_keys(c), c)
 check("够不着的那只不当目标", b.snapshot()[1]["target"] == "", b.snapshot()[1])
-check("改成巡逻往回走（不是干站着）", "left" in down_keys(c), c)
-# 关掉巡逻也不许「到边界顶墙」：状态要说明够不着
-b = make()
-b.cfg["patrol"] = False
-c = step(b, m=[{"name": "Stump", "box": [1150, 300, 1210, 360], "conf": 0.9}],
-         char=EDGE_R, size=(1366, 768), roi=ROI_N)
-check("巡逻关着 → 站住但状态说清楚（够不着）",
+check("没圈范围：站住等怪（状态说清够不着）",
       "right" not in down_keys(c) and "够不着" in b.snapshot()[1]["act"],
       (c, b.snapshot()[1]))
 # 同一位置，怪在左边（往里走）→ 照走，它得能自己走回来
@@ -754,25 +750,23 @@ c = step(b, m=[{"name": "Stump", "box": [500, 300, 560, 360], "conf": 0.9}],
          char=EDGE_R, size=(1366, 768), roi=ROI_N)
 check("目标在左边（往识别区里走）→ 允许走过来", "left" in down_keys(c), c)
 
-# 巡逻撞到左边界 → 立刻掉头
+# 扫范围撞到识别区左边界 → 立刻掉头
 EDGE_L = [420, 300, 480, 320]             # 名字牌中心 450 < lo+1，已经在墙外
 b = make()
-b.cfg["patrol"] = True
+b.cfg["mm_zone"] = [0.2, 0.0, 0.8, 1.0]
 b._patrol_dir = -1
-b._t_patrol = time.time()                 # 刚换过向，别让计时器插一脚
-c = step(b, m=[], char=EDGE_L, size=(1366, 768), roi=ROI_N)
-check("巡逻往左撞墙 → 这一帧不按 left", "left" not in down_keys(c), c)
-check("巡逻方向翻过来了", b._patrol_dir == 1, b._patrol_dir)
-step(b, m=[], char=EDGE_L, size=(1366, 768), roi=ROI_N)
-check("下一帧就按住 right 往回巡逻", b._held == 1, b._held)
+c = step(b, m=[], char=EDGE_L, size=(1366, 768), roi=ROI_N, dot=[0.5, 0.5])
+check("往左扫撞识别区墙 → 这一帧不按 left", "left" not in down_keys(c), c)
+check("扫的方向翻过来了", b._patrol_dir == 1, b._patrol_dir)
+step(b, m=[], char=EDGE_L, size=(1366, 768), roi=ROI_N, dot=[0.5, 0.5])
+check("下一帧就按住 right 往回扫", b._held == 1, b._held)
 
-print("\n[30] 巡逻途中丢定位：人往巡逻方向出界了，反方向走回来")
+print("\n[30] 扫范围途中丢定位：人往扫的方向出界了，反方向走回来")
 b = make()
-b.cfg["patrol"] = True
+b.cfg["mm_zone"] = [0.2, 0.0, 0.8, 1.0]
 b._patrol_dir = -1
-b._t_patrol = time.time()                 # 刚换过向，别让计时器插一脚
-c = step(b, m=[], char=CHAR, size=(1366, 768), roi=ROI_N)
-check("丢失前正往左巡逻", b._held == -1, b._held)
+c = step(b, m=[], char=CHAR, size=(1366, 768), roi=ROI_N, dot=[0.5, 0.5])
+check("丢失前正往左扫", b._held == -1, b._held)
 c = step(b, m=[], char=None, size=(1366, 768), roi=ROI_N)
 check("往右走回来（巡逻的反方向）", b._held == 1 and "left" not in down_keys(c), c)
 check("往回走不受识别区边界拦（人已经在墙外，得让它走回来）",
@@ -789,36 +783,33 @@ check("_mm_block：贴右墙 → 封右", bot._mm_block(Z, [0.85, 0.5]) == 1,
 check("_mm_block：没圈范围不拦", bot._mm_block([], [0.99, 0.5]) is None)
 check("_mm_block：黄点丢了不拦", bot._mm_block(Z, None) is None)
 
-# 怪在右边（识别区外但够得着）：黄点已在右墙 → 不追，转巡逻
+# 怪在右边（识别区外但够得着）：黄点已在右墙 → 不追，转扫范围
 b = make()
-b.cfg["patrol"] = True
 b.cfg["mm_zone"] = Z
 b._patrol_dir = 1                        # 巡逻本来要往右
 far_r = [{"name": "Stump", "box": [1100, 300, 1160, 360], "conf": 0.9}]
 c = step(b, m=far_r, size=(1366, 768), dot=[0.79, 0.5])
 check("黄点贴右墙：不往右追", "right" not in down_keys(c), c)
 check("目标被当不存在", b.snapshot()[1].get("target") == "", b.snapshot()[1])
+check("转成扫范围往回走（不是干站着）", "left" in down_keys(c), c)
 # 黄点丢了（None）：墙失效，照常追出去（fail-open，别钉死）
 b2 = make()
 b2.cfg["mm_zone"] = Z
 c = step(b2, m=far_r, size=(1366, 768), dot=None)
 check("黄点丢了：照常追", "right" in down_keys(c), c)
 
-# 巡逻撞小地图墙：立刻掉头（识别区那道墙还远着）
+# 扫范围撞小地图墙：立刻掉头（识别区那道墙还远着）
 b = make()
-b.cfg["patrol"] = True
 b.cfg["mm_zone"] = Z
-b._patrol_dir = -1                       # 往左巡逻，黄点已贴左墙
-b._t_patrol = time.time()
+b._patrol_dir = -1                       # 往左扫，黄点已贴左墙
 c = step(b, m=[], size=(1366, 768), roi=None, dot=[0.15, 0.5])
-check("巡逻撞小地图左墙 → 这一帧不按 left", "left" not in down_keys(c), c)
-check("巡逻方向翻过来了", b._patrol_dir == 1, b._patrol_dir)
+check("扫范围撞小地图左墙 → 这一帧不按 left", "left" not in down_keys(c), c)
+check("扫的方向翻过来了", b._patrol_dir == 1, b._patrol_dir)
 c = step(b, m=[], size=(1366, 768), roi=None, dot=[0.15, 0.5])
 check("下一帧往右巡逻", b._held == 1, b._held)
 
 # 没圈范围的配置：一切如旧
 b = make()
-b.cfg["patrol"] = True
 c = step(b, m=far_r, size=(1366, 768), dot=[0.99, 0.5])
 check("没圈范围：照常往右追", "right" in down_keys(c), c)
 
@@ -828,30 +819,26 @@ check("mm_zone 乱序自动整理", bot.clamp_cfg({"mm_zone": [0.8, 1, 0.2, 0]})
 check("mm_zone 非法 → 空（关）", bot.clamp_cfg({"mm_zone": "x"})["mm_zone"] == [])
 check("mm_zone 太窄 → 空（关）", bot.clamp_cfg({"mm_zone": [0.4, 0, 0.41, 1]})["mm_zone"] == [])
 
-# 巡逻按范围扫：黄点在跟时过了 patrol_sec 也不换向（扫到边才掉头）
+# 扫范围：没有定时换向这回事了，方向只看边（扫到边才掉头）
 b = make()
-b.cfg["patrol"] = True
 b.cfg["mm_zone"] = Z
 b._patrol_dir = 1                        # 往右扫，黄点在范围中间
-b._t_patrol = time.time() - 10           # 早就过了 2.5s 换向间隔
 c = step(b, m=[], size=(1366, 768), roi=None, dot=[0.5, 0.5], now=time.time())
-check("范围开着：过时不掉头，继续往右扫", b._patrol_dir == 1, b._patrol_dir)
+check("范围开着：方向不变继续往右扫", b._patrol_dir == 1, b._patrol_dir)
 check("范围开着：还是按着 right", "right" in down_keys(c), c)
-# 黄点丢了（None）：退回定时换向
+# 黄点丢了（None）：站住等，方向不乱翻
 b2 = make()
-b2.cfg["patrol"] = True
 b2.cfg["mm_zone"] = Z
 b2._patrol_dir = 1
-b2._t_patrol = time.time() - 10
-step(b2, m=[], size=(1366, 768), roi=None, dot=None, now=time.time())
-check("黄点丢了：定时换向照常", b2._patrol_dir == -1, b2._patrol_dir)
-# 没圈范围：定时换向照常
+c2 = step(b2, m=[], size=(1366, 768), roi=None, dot=None, now=time.time())
+check("黄点丢了：站住等，方向不乱翻", b2._held == 0 and b2._patrol_dir == 1,
+      (b2._held, b2._patrol_dir))
+# 没圈范围：站住等怪
 b3 = make()
-b3.cfg["patrol"] = True
 b3._patrol_dir = 1
-b3._t_patrol = time.time() - 10
-step(b3, m=[], size=(1366, 768), roi=None, dot=[0.5, 0.5], now=time.time())
-check("没圈范围：定时换向照常", b3._patrol_dir == -1, b3._patrol_dir)
+c3 = step(b3, m=[], size=(1366, 768), roi=None, dot=[0.5, 0.5], now=time.time())
+check("没圈范围：站住等怪，不乱走", b3._held == 0 and down_keys(c3) == [],
+      (b3._held, c3))
 
 print(f"\n通过 {ok} / {ok + fail}")
 sys.exit(1 if fail else 0)

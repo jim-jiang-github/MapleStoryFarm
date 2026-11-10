@@ -16,7 +16,8 @@
      跳（Alt）→ 100ms → 技能键。范围只盖一边的技能每刀前重新点一次方向键
      对正——朝向读不到，宁可按一下也不空放
   4) 有目标但所有技能都罩不到 → 朝它走（只按左右，这个场景没有纵向移动）
-  5) 视野内没目标 → 左右巡逻（可选，默认开）
+  5) 视野内没目标 → 圈了小地图范围就从左扫到右找怪（到边才掉头）；
+     没圈范围就站在原地等（旧的定时换向巡逻已删）
 
 安全前提，必须遵守：
   **只有游戏窗口在前台时才发按键。** 否则等于往当前获得焦点的窗口里打字/点鼠标。
@@ -366,8 +367,8 @@ DEFAULTS = {
     ],
     "pick": True,        # 全程按 Z 拾取
     "pick_ms": 130,      # 拾取按键间隔（毫秒）
-    "patrol": True,      # 视野里没怪时左右来回走
-    "patrol_sec": 2.5,   # 巡逻换向间隔（秒）
+    # （旧的「定时换向巡逻」已删）找怪只有一种走法：圈了小地图范围就
+    # 从左扫到右、到边掉头；没圈范围就站在原地等怪，怪出现了照常追着打。
     "move": True,        # 怪在技能范围外时走过去
     "dy_tol": 150,       # 纵向容差：目标候选带在技能范围并集之下再扩这么多（像素）
     "base_w": 0,
@@ -400,7 +401,6 @@ CLAMP = {
     "mp_pct": (10.0, 95.0),
     "pot_sec": (0.5, 30.0),
     "pick_ms": (60, 2000),
-    "patrol_sec": (0.5, 20.0),
     "dy_tol": (40, 400),
     "base_w": (0, 8192),
 }
@@ -818,7 +818,6 @@ class Bot:
         self._t_jump = 0.0
         self._t_sk = {}         # 每个技能上次出手的时刻（键 = 技能键名）
         self._t_pick = 0.0
-        self._t_patrol = 0.0
         self._patrol_dir = 1
         self._mm_wall = None      # 小地图墙（-1/1/None），每帧按黄点重算
 
@@ -1223,26 +1222,21 @@ class Bot:
             if why == "高度够不着":
                 self._set_dir(0)
                 self._set_status(act=why)
-            elif cfg["patrol"]:
-                # 圈了小地图范围且黄点在跟：巡逻按范围扫——从左走到右、到边
-                # 掉头，不按定时换向（不然就是原地左右抽搐，扫不完整个范围）。
-                # 黄点丢了/没圈范围：退回定时换向的老行为。
-                mm_zone_on = bool(cfg.get("mm_zone")) and st.get("dot") is not None
-                if not mm_zone_on and now - self._t_patrol >= cfg["patrol_sec"]:
-                    self._patrol_dir = -self._patrol_dir
-                    self._t_patrol = now
+            elif bool(cfg.get("mm_zone")) and st.get("dot") is not None:
+                # 圈了小地图范围且黄点在跟：扫满整个范围——从左走到右、
+                # 到边才掉头（定时换向只会原地抽搐，扫不完）。
+                # 没圈范围 / 黄点丢了：站住等怪（「守株待兔」）。
                 if not self._can_walk(self._patrol_dir, char, size, roi):
-                    # 巡逻撞到识别区边界：立刻掉头，别顶着墙一直走
+                    # 撞到边界（识别区或小地图墙）：立刻掉头，别顶着墙一直走
                     self._patrol_dir = -self._patrol_dir
-                    self._t_patrol = now
                 if self._can_walk(self._patrol_dir, char, size, roi):
                     self._set_dir(self._patrol_dir)
                     self._face = self._patrol_dir
-                    self._set_status(act="巡逻找怪", err="")
+                    self._set_status(act="扫范围找怪", err="")
                 else:
                     self._set_dir(0)
-                    self._set_status(act="巡逻到头了（小地图边界）" if self._mm_wall is not None
-                                    else "巡逻到头了（识别区边界）")
+                    self._set_status(act="扫到头了（小地图边界）" if self._mm_wall is not None
+                                    else "扫到头了（识别区边界）")
             else:
                 self._set_dir(0)
                 self._set_status(act=why or "守株待兔")

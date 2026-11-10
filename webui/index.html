@@ -729,10 +729,6 @@
               <span class="v"><button id="pickBtn" class="mini on" title="全程无脑按拾取键捡东西，跟打怪互不影响">开</button><button id="pickKey" class="slot" data-hint="Z" title="捡东西按的键，跟游戏里的「拾取」对应。点格子 → 按一个键即设置" data-cfg="pick_key" data-def="KeyZ"></button><b class="sub">130ms</b></span>
             </div>
             <div class="row conf">
-              <span class="k">巡逻找怪</span>
-              <span class="v"><button id="patrolBtn" class="mini on" title="视野里没有怪时左右来回走；关掉就站在原地等">开</button><b class="sub">2.5s 换向</b></span>
-            </div>
-            <div class="row conf">
               <span class="k">小地图限位</span>
               <span class="v">
                 <button id="mmBtn" class="mini" title="在预览画面上直接拖一个矩形 = 允许人物活动的范围（圈小地图上那块）。人物黄点贴到范围边，出界方向就走不动——这是世界坐标的绝对墙，追怪、巡逻都不会越出去；黄点丢了会自动放开（不会把人钉死在原地）。再点一次「完成」保存，Esc 取消。">圈范围</button>
@@ -2605,8 +2601,6 @@
     }
   }
   $("pickBtn").addEventListener("click", () => toggleBotFlag("pick", $("pickBtn")));
-  $("patrolBtn").addEventListener("click", () => toggleBotFlag("patrol", $("patrolBtn")));
-
   function paintBotBtn(cfg) {
     $("botBtn").textContent = cfg.on ? "挂机: 开" : "挂机: 关";
     $("botBtn").className = cfg.on ? "on" : "";
@@ -2625,8 +2619,6 @@
     }
     $("pickBtn").classList.toggle("on", !!cfg.pick);
     $("pickBtn").textContent = cfg.pick ? "开" : "关";
-    $("patrolBtn").classList.toggle("on", !!cfg.patrol);
-    $("patrolBtn").textContent = cfg.patrol ? "开" : "关";
     paintBotBtn(cfg);
   }
 

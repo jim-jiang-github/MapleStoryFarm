@@ -30,11 +30,11 @@
         11.0,
         30.0
       ],
-      "jump": true,
+      "jump": false,
       "jrect": [
         0.0,
         92.0,
-        73.0,
+        27.0,
         0.0
       ],
       "cd_ms": 0
@@ -45,14 +45,14 @@
       "dir": "front",
       "ground": [
         0.0,
-        96.0,
-        52.0,
+        81.0,
+        38.0,
         25.0
       ],
-      "jump": true,
+      "jump": false,
       "jrect": [
         0.0,
-        88.0,
+        69.0,
         83.0,
         40.0
       ],
@@ -61,11 +61,21 @@
   ],
   "pick": true,
   "pick_ms": 130,
-  "patrol": true,
-  "patrol_sec": 2.5,
   "move": true,
   "dy_tol": 150,
   "base_w": 1366,
   "input": "auto",
-  "hid_port": ""
+  "hid_port": "",
+  "mm_box": [
+    0.005,
+    0.095,
+    0.187,
+    0.223
+  ],
+  "mm_zone": [
+    0.229,
+    0.063,
+    0.454,
+    0.643
+  ]
 }
