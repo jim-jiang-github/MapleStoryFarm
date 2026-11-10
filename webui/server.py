@@ -20,9 +20,13 @@ from pathlib import Path
 
 
 # 抓屏坐标必须是物理像素，这一步要在抓屏/窗口调用之前做。
-# 不做的话，改过系统缩放后 GetClientRect 会返回放大后的值（实测 1366x768 被报成
-# 2049x1152），而 mss 按物理像素抓图，抓到的区域比窗口大一圈 → 画面混进别的窗口、
-# 人物框和屏蔽区全错位（表现就是「重启一下就好了」）。
+# 不做的话，150% 缩放下 GetClientRect 给的是缩放前的逻辑值（实测物理 2049x1152 的
+# 客户区被报成 1366x768），而 mss 按物理像素抓图，抓到的区域比窗口大一圈 → 画面混进
+# 别的窗口、人物框和屏蔽区全错位（表现就是「重启一下就好了」）。
+# 注意这两个数字是 1.5 倍关系，不是巧合：游戏 Maplestory_Classic.exe 自己是
+# **DPI-unaware**，在 150% 下按 1366x768 渲染、再由 Windows 位图拉伸到 2049x1152。
+# 我们抓物理像素，所以名字牌的像素尺寸也跟着 ×1.5 —— 换 DPI / RDP 重连后模板尺度
+# 必须重标，这就是 char_state["calib_w"] 那套自愈存在的理由。
 try:
     ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
 except Exception:  # noqa: BLE001  老系统没有这个函数
