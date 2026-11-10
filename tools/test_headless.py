@@ -304,9 +304,11 @@ check("GET /api/motion 200", code == 200 and isinstance(motion, dict))
 code, stats = get("/api/stats")
 check("GET /api/stats 200 且含 bot_on/window_found",
       code == 200 and "bot_on" in stats and "window_found" in stats)
-check("技能卡两张示意图：地面/跳放各画各的（不再共用一张画布）",
-      b'data-w="g"' in html and b'data-w="j"' in html)
-check("「以地面范围放大」按钮已删除（两套范围互不派生）",
+check("技能范围是四条滑块（左/右/上/下），不再是四个数字输入框",
+      b'skgrid' in html and b'class="skr"' in html and b'type="number"' not in html)
+check("卡片里不再画示意图（范围只画在实时画面上，不重复占一块画布）",
+      b"skmini" not in html)
+check("「以地面范围放大」按钮仍是删掉的状态（两套范围互不派生）",
       b"skgrow" not in html)
 check("stats.char 带 body_c（技能范围编辑的锚点）",
       "body_c" in stats.get("char", {}))
