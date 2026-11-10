@@ -511,6 +511,15 @@ check("人物左移 → 朝向翻成左（face=-1）", wait_until(
 set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30, mobs=[]))
 post("/api/bot/set", {"patrol": True})
 
+# 丢人兜底端到端：画面里没有人物（识别不到）→ 默认锚在画面正中心，
+# 靠近中心的怪照打，不整段停摆（窗口都没了才认栽停手）
+set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30, with_char=False,
+                     mobs=[("mob_Blue_Snail", (700, 350, 40, 30))]))
+mark_events()
+check("丢人时靠近画面中心的怪照打（中心兜底锚点）", wait_until(
+    lambda: "KeyS" in press_keys(new_events()), timeout=10),
+    detail=str(new_events()[-12:]))
+
 # 画框回归（用户实测「技能框都没了」的两条根因）：
 #   ① 身前技能左右不对称（左30 右170）时，朝左必须整体镜像——不许砍成 30px 窄条
 #   ② 挂机关着也得是看得见的颜色——灰线在岩石背景上等于隐形
@@ -544,6 +553,28 @@ check("挂机关着画框依旧可见（不再是灰线隐形）", _sp_off is no
 srv.game_bot.cfg["on"] = _cfg0["on"]
 srv.game_bot.cfg["skills"] = _cfg0["skills"]
 srv.game_bot._status["face"] = 0
+
+# 丢人兜底：识别不到人物时技能框锚到画面正中心（bot 此刻打的就是这个位置，
+# 所见即所打）；ME 标记不画（不造假分数）
+print("  -- 画框回归：丢人时技能框锚到画面正中心")
+with srv.char_lock:
+    _cb, _ct = srv.char_state["box"], srv.char_state["ts"]
+    srv.char_state["box"], srv.char_state["ts"] = None, 0.0
+srv.game_bot.cfg["skills"] = [{"key": "KeyS", "type": "single", "dir": "both",
+                               "ground": [150, 150, 60, 60], "jump": False,
+                               "jrect": [150, 150, 220, 140]}]
+im = _flat.copy()
+srv.overlay_char(im)
+ys, xs = np.nonzero(np.any(im != 150, axis=2))
+check("丢人时技能框还在（不随 ME 消失）", len(xs) > 0, len(xs))
+if len(xs):
+    check("锚在画面正中心（水平 ±15px 内）",
+          abs((xs.min() + xs.max()) / 2 - 640) <= 15, (int(xs.min()), int(xs.max())))
+    check("垂直也居中（±15px 内）",
+          abs((ys.min() + ys.max()) / 2 - 360) <= 15, (int(ys.min()), int(ys.max())))
+srv.game_bot.cfg["skills"] = _cfg0["skills"]
+with srv.char_lock:
+    srv.char_state["box"], srv.char_state["ts"] = _cb, _ct
 
 # 拾取
 set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30, mobs=[]))

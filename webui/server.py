@@ -2028,7 +2028,12 @@ def _bot_state():
         mp = bar_state["values"].get("mp")
     with det_lock:
         mons = list(det_state["vis"])
-    return {"fg": _game_foreground(), "hp": hp, "mp": mp, "char": cbox, "monsters": mons}
+    # 画面尺寸：人物识别不到时 bot 拿它在画面正中心造个假锚点继续打
+    # （client_size 在窗口丢/最小化时是 (0,0)，那种时候给 None 走停手逻辑）
+    cw, chh = grabber.client_size
+    size = (int(cw), int(chh)) if cw and chh else None
+    return {"fg": _game_foreground(), "hp": hp, "mp": mp, "char": cbox,
+            "size": size, "monsters": mons}
 
 
 game_bot = botmod.Bot(_bot_state)
@@ -2121,6 +2126,14 @@ def overlay_char(img):
         score = char_state["score"]
         ts = char_state["ts"]
     if box is None or ts <= 0 or time.time() - ts > CHAR_LOST_AFTER:
+        # 识别不到人物：ME 标记不画（不造假分数），但技能范围照画——锚点
+        # 换成画面正中心，和 bot 此时的判定用的是同一个兜底（bot.py 的
+        # center_char_box），所见即所打，丢了人也能看出够不够得着。
+        h, w = img.shape[:2]
+        try:
+            draw_skill_ranges(img, botmod.center_char_box(w, h))
+        except Exception:  # noqa: BLE001
+            pass                 # 画不画得出来都不该影响推流
         return img
     h, w = img.shape[:2]
     # 名字牌细框（1px）：模板实际命中的位置，标定/换图时用来肉眼核对

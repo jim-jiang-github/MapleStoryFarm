@@ -523,6 +523,17 @@ def char_body_box(box):
     return [cx - bw, y1 - gap - body_h, cx + bw, y1 - gap]
 
 
+def center_char_box(w, h):
+    """画面正中心对应的假名字牌框：人物识别不到时的兜底锚点。
+
+    只保证身体中心正好落在画面中心——bot/画图对 char 框真正用到的只有
+    身体中心（skill_rects/_cx 全从中心换算），牌子实际高矮无所谓，就按
+    16px 的 1:1 尺度造一个。决策和画框（server.overlay_char）必须用这
+    同一个函数，所见即所打。
+    """
+    return [w / 2.0 - 8.0, h / 2.0 + 38.0, w / 2.0 + 8.0, h / 2.0 + 54.0]
+
+
 def _intersects(a, b):
     """两个 [x1,y1,x2,y2] 框是否有交集（ touching 不算，得真叠上）。"""
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
@@ -602,6 +613,7 @@ class Bot:
         {"fg": bool,            # 游戏窗口是否在前台
          "hp": float | None,    # 血量百分比 0~100，读不到就是 None
          "char": [x1,y1,x2,y2] | None,      # 人物名字牌框（全分辨率像素）
+         "size": (w, h) | None,             # 画面尺寸：char 丢了拿它造中心锚点
          "monsters": [{"name","box","conf"}]}
     按键通过 self.sender(name, down) 发，测试时可以换成记录器。
     """
@@ -623,6 +635,7 @@ class Bot:
         self._down = set()        # 当前真的按住没松的键（别对没按的键发抬起）
         self._face = 0            # 上一次转向的方向（攻击朝这一侧）
         self._face_anchor = None  # 朝向观测锚点：人物身体中心的最近参考位置
+        self._synth = False       # 这一轮是不是在用「画面中心」假锚点撑着
         self._t_turn = 0.0        # 上一次转身的时刻：转完要等一帧再打，否则打的是旧朝向
         self._was_fg = False      # 上一轮游戏是否在前台（重新拿回焦点时朝向不可信）
         self._t_pot = 0.0
@@ -916,11 +929,27 @@ class Bot:
 
         char = st.get("char")
         if not char:
-            self._set_dir(0)
-            self._reset_face()        # 人都没定位到，朝向记忆一并作废
-            self._set_status(act="找不到人物", target="")
-            return
-        self._watch_face(char)        # 朝向跟实际位移走：手动走两步也能翻框
+            # 识别不到人物：默认人就在画面正中心（相机锁人，角色基本贴着
+            # 画面中间），拿假锚点继续打，别整段停摆。连画面尺寸都没有
+            # （窗口都没了）才像以前那样松手认栽。
+            size = st.get("size")
+            if not size:
+                self._set_dir(0)
+                self._reset_face()
+                self._synth = False
+                self._set_status(act="找不到人物", target="")
+                return
+            if not self._synth:
+                # 刚从「找得到人」掉进「找不到」：朝向记忆作废一次（假锚点
+                # 观测不到位移，顺便清掉观测锚点，免得找回真人时中心→真人
+                # 的跳变被当成位移翻面）。之后保持记忆——每帧都作废的话
+                # face 永远是 0，会一直转身永远打不出手。
+                self._reset_face()
+                self._synth = True
+            char = center_char_box(float(size[0]), float(size[1]))
+        else:
+            self._synth = False
+            self._watch_face(char)    # 朝向跟实际位移走：手动走两步也能翻框
 
         # 3) 技能选择：逐个技能算判定框（skill_rects），数框里的怪。
         #    列表顺序 = 优先级；某个技能框里怪 ≥2 → 优先群攻，只有 1 只 → 优先

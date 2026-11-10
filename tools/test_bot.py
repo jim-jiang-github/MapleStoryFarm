@@ -28,6 +28,7 @@ def make(monsters=(), hp=100.0, mp=None, fg=True, char=CHAR):
 def step(b, now=None, **kw):
     st = {"fg": kw.get("fg", True), "hp": kw.get("hp", 100.0),
           "mp": kw.get("mp"), "char": kw.get("char", CHAR),
+          "size": kw.get("size"),
           "monsters": kw.get("monsters", list(kw.get("m", [])))}
     b.get_state = lambda: st
     calls.clear()
@@ -474,6 +475,38 @@ step(b, now=100.5, m=[], char=moved_l)
 check("复位后从当前位移重新攒（face=0）", b.snapshot()[1]["face"] == 0, b.snapshot()[1])
 step(b, now=100.6, m=[], char=[moved_l[0] - 15, CHAR[1], moved_l[2] - 15, CHAR[3]])
 check("复位后继续左移 → 又是 face=-1", b.snapshot()[1]["face"] == -1, b.snapshot()[1])
+
+print("[27] 人物识别不到 → 默认在画面正中心，照常打（不整段停摆）")
+check("center_char_box 的身体中心正好落在画面中心",
+      bot._cx(bot.char_body_box(bot.center_char_box(1280, 720))) == 640.0
+      and bot._cy(bot.char_body_box(bot.center_char_box(1280, 720))) == 360.0,
+      bot.char_body_box(bot.center_char_box(1280, 720)))
+b = make()
+c = step(b, m=[{"name": "Stump", "box": [700, 300, 760, 360], "conf": 0.9}],
+         char=None, size=(1280, 720))     # 假锚点身体中心 (640,360)，怪中心 730
+check("第一帧照常先转身", down_keys(c) == ["right"], c)
+settle(b)
+c = step(b, m=[{"name": "Stump", "box": [700, 300, 760, 360], "conf": 0.9}],
+         char=None, size=(1280, 720))
+check("对正后照常出手（不会因为每帧丢人一直转身）", down_keys(c) == [ATK], c)
+c = step(b, m=[{"name": "Stump", "box": [700, 300, 760, 360], "conf": 0.9}],
+         char=None, size=(1280, 720))
+check("冷却中不重复出手", ATK not in down_keys(c), c)
+b2 = make()
+b2.cfg["patrol"] = False
+step(b2, now=10.0, m=[], char=CHAR)                    # 真人：观测锚点立在 630
+step(b2, now=10.1, m=[], char=None, size=(1280, 720))  # 掉进假锚点：锚点应作废
+step(b2, now=10.2, m=[], char=[CHAR[0] - 500, CHAR[1], CHAR[2] - 500, CHAR[3]])
+check("找回真人后不把中心→真人的跳变当位移翻面（锚点已清）",
+      b2.snapshot()[1]["face"] == 0, b2.snapshot()[1])
+step(b2, now=10.3, m=[], char=[CHAR[0] - 515, CHAR[1], CHAR[2] - 515, CHAR[3]])
+check("之后真人继续左移才翻面", b2.snapshot()[1]["face"] == -1, b2.snapshot()[1])
+print("[27b] 画面尺寸也没有（窗口没了）→ 还是老的停手行为")
+b = make()
+c = step(b, m=[{"name": "Stump", "box": [700, 300, 760, 360], "conf": 0.9}],
+         char=None, size=None)
+check("不按方向/攻击", not any(k in ("left", "right", ATK) for k in down_keys(c)), c)
+check("状态是找不到人物", b.snapshot()[1]["act"] == "找不到人物", b.snapshot()[1])
 
 print(f"\n通过 {ok} / {ok + fail}")
 sys.exit(1 if fail else 0)

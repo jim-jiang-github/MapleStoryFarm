@@ -2698,11 +2698,12 @@
   }
 
   function skillAnchorLive() {
-    // 人物身体中心实时锚点。没定位到人物时退回画面中心偏下（人站的常见高度），
-    // 照样能编辑——等定位回来（画面出现 ME 框）就自动接上真锚点。
+    // 人物身体中心实时锚点。没定位到人物时退回画面正中心——和 bot 丢人时
+    // 的兜底锚点一致（后端 center_char_box），照样能编辑、所见即所打，
+    // 等定位回来（画面出现 ME 框）就自动接上真锚点。
     if (lastBodyC) return { c: lastBodyC, live: true };
     if (!lastFrameW || !lastFrameH) return null;
-    return { c: [lastFrameW / 2, lastFrameH * 0.62], live: false };
+    return { c: [lastFrameW / 2, lastFrameH / 2], live: false };
   }
 
   function skillAnchorNow() {
