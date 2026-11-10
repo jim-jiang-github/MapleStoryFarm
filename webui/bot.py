@@ -1037,13 +1037,19 @@ class Bot:
                 self._set_status(act="守株待兔")
             return
 
-        # 怪多优先群攻、单只优先单体（按技能自己的框数怪，跳放框里的也算）；
-        # 想要的类型里没有能用的，就退回任意可用技能
+        # 站放优先：只要还有任何技能的「地面框」罩到怪，就绝不跳。跳一次要
+        # 跳→100ms→技能键，能站着打就别浪费，何况两个框重叠时站放本来也打得到。
+        # 所有地面框都空了，才轮到跳放框。
         def _n(gm, jm):
             seen = {id(m) for m in gm}
             return len(gm) + sum(1 for m in jm if id(m) not in seen)
-        want = "aoe" if any(_n(gm, jm) >= 2 for _, _, _, gm, jm in cands) else "single"
-        pool = [c for c in cands if c[0]["type"] == want] or cands
+        pool0 = ([c for c in cands if c[3]] or    # c[3] = 地面框里的怪
+                 [c for c in cands if c[4]] or    # c[4] = 只在跳放框里的怪
+                 cands)
+        # 怪多优先群攻、单只优先单体（按技能自己的框数怪，跳放框里的也算）；
+        # 想要的类型里没有能用的，就退回这一池里任意可用技能
+        want = "aoe" if any(_n(gm, jm) >= 2 for _, _, _, gm, jm in pool0) else "single"
+        pool = [c for c in pool0 if c[0]["type"] == want] or pool0
         sk, g, j, gm, jm = pool[0]
 
         mb = _nearest_box(gm or jm, _cx(char))

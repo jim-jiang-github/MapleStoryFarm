@@ -2235,6 +2235,8 @@ CHAR_COLOR = (255, 200, 0)      # BGR 天蓝，和识别框（绿/红/怪种色�
 BOT_RANGE_ON = (0, 190, 255)    # BGR 橙黄：挂机在跑
 BOT_RANGE_OFF = (0, 140, 210)   # 暗一档的橙：挂机关着也画——灰色在岩石背景上
                                 # 根本看不见，之前就吃过这个亏（框“凭空消失”）
+BOT_JUMP_ON = (255, 210, 0)     # BGR 青：跳放框。跟地面框区分开色，两块重叠时
+BOT_JUMP_OFF = (205, 170, 0)    # 也一眼看得出哪条框是哪套范围。
 
 
 _fg_grab_at = 0.0               # 上次抢前台的时刻（限速用）
@@ -2367,20 +2369,24 @@ def draw_skill_ranges(img, box):
             if x2 - x1 < 6 or y2 - y1 < 6:
                 continue                   # 贴边/太扁就别画成一坨
             thick = 2 if (on and not is_jump) else 1
+            # 跳放框换个颜色：和地面框同色时两块叠在一起分不清哪条是哪条，
+            # 调范围的时候根本看不出改的是哪个。
+            jcol = BOT_JUMP_ON if on else BOT_JUMP_OFF
+            rc_col = jcol if is_jump else color
             if is_jump:
-                _dash(img, (x1, y1), (x2, y1), color, thick)
-                _dash(img, (x1, y2), (x2, y2), color, thick)
-                _dash(img, (x1, y1), (x1, y2), color, thick)
-                _dash(img, (x2, y1), (x2, y2), color, thick)
+                _dash(img, (x1, y1), (x2, y1), rc_col, thick)
+                _dash(img, (x1, y2), (x2, y2), rc_col, thick)
+                _dash(img, (x1, y1), (x1, y2), rc_col, thick)
+                _dash(img, (x2, y1), (x2, y2), rc_col, thick)
             else:
-                cv2.rectangle(img, (x1, y1), (x2, y2), color, thick, cv2.LINE_AA)
+                cv2.rectangle(img, (x1, y1), (x2, y2), rc_col, thick, cv2.LINE_AA)
             label = tag + ("J" if is_jump else "") + arrow
             (tw_, th_), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
             tx = max(4, min(x1 + 4, w - tw_ - 6))
             ty = y1 - 4 if y1 - 4 > th_ else y2 + th_ + 4
             cv2.rectangle(img, (tx - 3, ty - th_ - 3), (tx + tw_ + 3, ty + 2), TXT_BG, -1)
             cv2.putText(img, label, (tx, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
-                        color, 1, cv2.LINE_AA)
+                        rc_col, 1, cv2.LINE_AA)
     return img
 
 

@@ -418,6 +418,37 @@ settle(b)
 c = step(b, m=far_left)
 check("第一个技能够不着 → 用第二个 KeyD", down_keys(c) == ["KeyD"], c)
 
+print("[21d] 站放优先：跳放框里有更多怪，也先站着打（两个框重叠时同理）")
+b = make()
+b.cfg["skills"] = [
+    # 能站放：地面框盖住身边这只；它的跳放框也盖着头顶那两只（两框重叠）
+    {"key": "KeyS", "type": "single", "ground": [200, 200, 60, 60],
+     "jump": True, "jrect": [400, 400, 320, 60]},
+    # 只能跳放：地面框罩不到任何东西
+    {"key": "KeyD", "type": "aoe", "ground": [0, 0, 40, 40],
+     "jump": True, "jrect": [400, 400, 320, 60]},
+]
+near = [{"name": "N", "box": [690, 300, 750, 360], "conf": 0.9}]
+top = [{"name": "T1", "box": [560, 120, 620, 180], "conf": 0.9},
+       {"name": "T2", "box": [660, 120, 720, 180], "conf": 0.9}]
+step(b, m=near + top)
+settle(b)
+c = step(b, m=near + top)
+check("有站放机会 → 站着放 KeyS，不起跳", down_keys(c) == ["KeyS"], c)
+check("状态写的是放技能，不是跳放",
+      b.snapshot()[1]["act"] == f"放技能 {bot._key_label('KeyS')}", b.snapshot()[1])
+
+print("[21e] 一个技能都站放不了 → 这才轮到跳放")
+b = make()
+b.cfg["skills"] = [
+    {"key": "KeyS", "type": "single", "ground": [0, 0, 40, 40],
+     "jump": False, "jrect": [0, 0, 0, 0]},
+    {"key": "KeyD", "type": "aoe", "ground": [0, 0, 40, 40],
+     "jump": True, "jrect": [400, 400, 320, 60]},
+]
+c = step(b, m=top)
+check("所有地面框都空 → 跳放 KeyD", down_keys(c) == [JUMP, "KeyD"], c)
+
 print("[21d] 技能没录按键 → 跳过，不算候选")
 b = make()
 b.cfg["skills"] = [
