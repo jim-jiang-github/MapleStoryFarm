@@ -1,4 +1,8 @@
 @echo off
+
+rem NOTE: This file MUST stay GBK(ANSI)-encoded with CRLF line endings.
+rem       cmd parses .bat in the system ANSI codepage - saving it as UTF-8
+rem       garbles the Chinese filename below and the call fails.
 rem ---------------------------------------------------------------
 rem Start the service as Administrator.
 rem
@@ -24,4 +28,4 @@ if errorlevel 1 (
 
 echo Running as Administrator - software key injection is available.
 echo.
-call "%~dp0ÂêØÂä®È¢ÑËßà.bat"
+call "%~dp0∆Ù∂Ø‘§¿¿.bat"

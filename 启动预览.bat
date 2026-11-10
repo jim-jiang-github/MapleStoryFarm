@@ -1,4 +1,8 @@
 @echo off
+
+rem NOTE: This file MUST stay GBK(ANSI)-encoded with CRLF line endings.
+rem       cmd parses .bat in the system ANSI codepage - saving it as UTF-8
+rem       garbles the Chinese filename below and the call fails.
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 title Capture Preview
@@ -25,11 +29,11 @@ echo.
 
 "%PICKED%" "webui\server.py" --open
 
-rem ---- æ­»äº¡å–è¯ï¼šç²¾ç¡®é€€å‡ºæ—¶åˆ» + å½“æ—¶å…¨é‡è¿›ç¨‹è¡¨ ----
-rem service.log é‡Œ python è‡ªå·±çš„è®°å½•æ­¢äºã€ŒæœåŠ¡å¯åŠ¨ã€ï¼Œæ­»äº¡æ–¹å¼çœ‹ä¸è§ï¼›
->> "webui\service.log" echo [%date% %time%] python é€€å‡º exit=%errorlevel%
+rem ---- ËÀÍöÈ¡Ö¤£º¾«È·ÍË³öÊ±¿Ì + µ±Ê±È«Á¿½ø³Ì±í ----
+rem service.log Àï python ×Ô¼ºµÄ¼ÇÂ¼Ö¹ÓÚ¡¸·şÎñÆô¶¯¡¹£¬ËÀÍö·½Ê½¿´²»¼û£»
+>> "webui\service.log" echo [%date% %time%] python ÍË³ö exit=%errorlevel%
 >> "webui\service.log" tasklist
 
 echo.
-echo Service stopped. (exit code %errorlevel% ^| é€€å‡ºåŸå› è§ webui\service.log)
+echo Service stopped. (exit code %errorlevel% ^| ÍË³öÔ­Òò¼û webui\service.log)
 pause
