@@ -498,8 +498,15 @@
      列变高，缩略图正好压在 HP 条上——回文档流就永远不会重叠。 */
   .charpot {
     display: flex; justify-content: flex-start; align-items: center; gap: 8px;
+    /* 血条列只有 158px 宽：缩略图 + 两个按钮一行放不下，必须允许换行，
+       否则「重标尺度」会被挤出卡片右边裁掉（以前只露出半个「重」字）。 */
+    flex-wrap: wrap; row-gap: 6px;
     margin-bottom: 8px;
   }
+  /* 「人物识别区 / 重标尺度」两个按钮自成一行：靠 flex-basis 100% 强制换行，
+     不跟缩略图挤；按钮间距用 gap，别再用 .mini 自带的 margin-left。 */
+  .cbtns { display: flex; gap: 6px; flex: 1 1 100%; min-width: 0; }
+  .cbtns .mini { margin-left: 0; }
   .cwrap { display: flex; align-items: center; justify-content: flex-end; gap: 7px; overflow: visible; }
   .ctpl { position: relative; display: inline-flex; flex: 0 0 auto; cursor: pointer; }
   .ctpl img {
@@ -602,9 +609,11 @@
                 <b class="cdel" id="charDel" title="删掉当前模板">×</b>
               </span>
               <b class="cneed" id="charNeed" title="点这里截图上传；也支持 Ctrl+V 粘贴 / 把图拖进来">⚠ 上传名字牌截图 · 点这里或 Ctrl+V</b>
-              <button id="roiBtn" class="mini" title="程序只会在你圈出来的一块区域里找「你的人物」。点这里，画面会变暗、出现一个亮框：拖四条边，把亮框收到人物会出现的那块就行，不用很精确。范围收小了认人更快更准，也不会把任务栏、聊天里印着的同名字错认成你的人物。
+              <span class="cbtns">
+                <button id="roiBtn" class="mini" title="程序只会在你圈出来的一块区域里找「你的人物」。点这里，画面会变暗、出现一个亮框：拖四条边，把亮框收到人物会出现的那块就行，不用很精确。范围收小了认人更快更准，也不会把任务栏、聊天里印着的同名字错认成你的人物。
 这个框同时是挂机走路的左右边界：人物身体中心一走出框外，名字牌就被切掉一半，认人会变难。所以框别框得太窄，至少要覆盖你想让它打怪的那段路。（框外一点点有怪时它还会追出去打，但追出去那段是「靠上一帧的框继续跟人」，追踪不如框内稳。）">人物识别区</button>
-              <button id="recalBtn" class="mini" title="人物明明在画面上、ME 框却一直不出现（比如换过分辨率、拉大过游戏窗口）→ 点这里按当前窗口重新标定名字牌的像素尺度">重标尺度</button>
+                <button id="recalBtn" class="mini" title="人物明明在画面上、ME 框却一直不出现（比如换过分辨率、拉大过游戏窗口）→ 点这里按当前窗口重新标定名字牌的像素尺度">重标尺度</button>
+              </span>
             </div>
             <div class="row conf">
               <span class="k">人物匹配精度</span>
