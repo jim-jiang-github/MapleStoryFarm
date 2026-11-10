@@ -2237,18 +2237,46 @@ BOT_RANGE_OFF = (0, 140, 210)   # 暗一档的橙：挂机关着也画——灰�
                                 # 根本看不见，之前就吃过这个亏（框“凭空消失”）
 
 
+_fg_grab_at = 0.0               # 上次抢前台的时刻（限速用）
+
+
 def _game_foreground():
-    """游戏窗口是不是当前前台窗口。
+    """游戏窗口是不是可以安全收按键。
 
     这是挂机脚本最要紧的一道闸：不是前台就绝不发按键，否则等于往你正在用的
     窗口里打字、按方向键。
+
+    「没有任何窗口持焦」（GetForegroundWindow() == 0）算放行，不是漏洞：
+    远程桌面断开、客户端最小化、锁屏这些情况会话还是 Active、窗口都还在，
+    但桌面上谁也没拿焦点。这种时候按键打不到别人的窗口（压根没人接收），
+    却正是最需要挂机的时候。以前一刀切判成「不在前台」，一断远程就整段停摆。
     """
     hwnd = find_window()
     if not hwnd:
         return False
+    try:
+        if win32gui.IsIconic(hwnd) or not win32gui.IsWindowVisible(hwnd):
+            return False                 # 最小化/隐藏：没帧可抓，打了也是白打
+    except Exception:
+        pass
     # 用 win32gui 而不是 ctypes.windll：后者默认按 c_int 返回，64 位句柄会被
     # 截成 32 位，和 find_window() 给的整数对不上，闸门就永远判成「不在前台」。
-    return int(win32gui.GetForegroundWindow()) == int(hwnd)
+    fg = int(win32gui.GetForegroundWindow())
+    if fg == int(hwnd):
+        return True
+    if fg == 0:
+        # 桌面没人持焦，这时候 SendInput 的键根本没有接收方（打了也白打），
+        # 顺手把游戏抬回前台。限速是因为这个函数每帧（10Hz）都会被问一次。
+        global _fg_grab_at
+        now = time.time()
+        if now - _fg_grab_at >= 1.5:
+            _fg_grab_at = now
+            try:
+                ctypes.windll.user32.SetForegroundWindow(int(hwnd))
+            except Exception:
+                pass
+        return True
+    return False
 
 
 def _bot_state():

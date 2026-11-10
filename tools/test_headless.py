@@ -86,6 +86,31 @@ def _try(fn):
         return False
 
 
+# ---------------- S0 前台闸门的口径 ----------------
+# 回归：远程桌面最小化/断开时 GetForegroundWindow() 返回 0，以前被当成
+# 「不在前台」→ 挂机整段停摆。现在只有「别的窗口真的在前台」才拦。
+print("[S0] 前台闸门口径（远程断开不停摆）")
+
+_real_fg = srv._game_foreground
+_gw = srv.win32gui.GetForegroundWindow
+_ic = srv.win32gui.IsIconic
+_iv = srv.win32gui.IsWindowVisible
+srv.find_window = lambda: 4321
+srv.win32gui.IsWindowVisible = lambda h: True
+srv.win32gui.IsIconic = lambda h: False
+srv.win32gui.GetForegroundWindow = lambda: 4321
+check("前台就是游戏 → 放行", _real_fg() is True)
+srv.win32gui.GetForegroundWindow = lambda: 0
+check("没人持焦（远程最小化/断开）→ 放行", _real_fg() is True)
+srv.win32gui.GetForegroundWindow = lambda: 9999
+check("别的窗口在前台 → 拦住（防误注入）", _real_fg() is False)
+srv.win32gui.GetForegroundWindow = lambda: 4321
+srv.win32gui.IsIconic = lambda h: True
+check("游戏最小化 → 拦住（一帧都抓不到）", _real_fg() is False)
+srv.find_window = lambda: None
+srv.win32gui.GetForegroundWindow, srv.win32gui.IsIconic = _gw, _ic
+srv.win32gui.IsWindowVisible = _iv
+
 # ---------------- S0 替身注入 ----------------
 print("[S0] 替身注入（合成画面 / 假 YOLO / 录音按键）")
 
