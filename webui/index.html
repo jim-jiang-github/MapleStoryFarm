@@ -567,6 +567,7 @@
               </span>
               <b class="cneed" id="charNeed" title="点这里截图上传；也支持 Ctrl+V 粘贴 / 把图拖进来">⚠ 上传名字牌截图 · 点这里或 Ctrl+V</b>
               <button id="roiBtn" class="mini" title="程序只会在你圈出来的一块区域里找「你的人物」。点这里，画面会变暗、出现一个亮框：拖四条边，把亮框收到人物会出现的那块就行，不用很精确。范围收小了认人更快更准，也不会把任务栏、聊天里印着的同名字错认成你的人物">人物识别区</button>
+              <button id="recalBtn" class="mini" title="人物明明在画面上、ME 框却一直不出现（比如换过分辨率、拉大过游戏窗口）→ 点这里按当前窗口重新标定名字牌的像素尺度">重标尺度</button>
             </div>
             <div class="row conf">
               <span class="k">人物匹配精度</span>
@@ -1398,6 +1399,23 @@
   $("roiBtn").addEventListener("click", () => {
     if (roiCal) stopRoiCal(false);
     else startRoiCal();
+  });
+  /* 重标尺度：换过分辨率/拉大窗口后名字牌变大变小，旧尺度匹配不上（分数卡 0.6、
+     ME 框一直不出现）。点一下按当前窗口重新扫一遍尺度。 */
+  $("recalBtn").addEventListener("click", async () => {
+    const btn = $("recalBtn");
+    btn.disabled = true;
+    const old = btn.textContent;
+    btn.textContent = "重标中…";
+    try {
+      const r = await (await fetch("/api/char/recalibrate", { method: "POST" })).json();
+      toast(r.ok ? `尺度重标完成：×${r.scale}（分数 ${r.score}）` : (r.msg || "重标失败"));
+    } catch (e) {
+      toast("重标失败：" + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = old;
+    }
   });
   $("pasteCancel").addEventListener("click", closePaste);
   pasteBox.addEventListener("mousedown", (e) => { if (e.target === pasteBox) closePaste(); });

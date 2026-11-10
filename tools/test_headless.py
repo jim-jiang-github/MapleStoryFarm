@@ -682,6 +682,39 @@ check("MJPEG /stream 持续输出 JPEG 帧",
       b"\xff\xd8" in chunk and len(chunk) > 8192, f"{len(chunk)}B")
 get("/api/detect/toggle")          # 收尾：识别关掉
 
+# ---------------- S9 尺度自愈（窗口尺寸变了） ----------------
+print("[S9] 窗口变大 → 尺度重标（用户实测：模板 1366 截的，游戏拉到 2049 名字牌是 1.5 倍）")
+set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30))
+check("基线：能正常找到人物", wait_until(
+    lambda: get("/api/char")[1]["box"] is not None, timeout=8))
+_base = get("/api/char")[1]
+check("基线：标定宽度 = 当前画面宽 1366", _base["calib_w"] == 1366, _base["calib_w"])
+# 整幅画面放大 1.5 倍：名字牌跟着变大，等价于把游戏窗口从 1366 拉到 2049。
+# 尺度还停在旧值 → 真实环境里匹配分掉到 0.6、框消失（合成字没那么脆，
+# 这里不靠「框丢不丢」触发，直接调重标接口——它和后台自动重标是同一段逻辑）
+_big = cv2.resize(make_scene(hp=0.99, mp=0.80, exp=0.30),
+                  None, fx=1.5, fy=1.5, interpolation=cv2.INTER_LINEAR)
+set_frame(_big)
+time.sleep(0.4)
+code, r = post("/api/char/recalibrate", {})
+check("重标接口返回成功", code == 200 and r.get("ok"), r)
+check("尺度换到了 ≈1.5 倍", abs(r.get("scale", 0) - _base["scale"] * 1.5) < 0.12,
+      f"base={_base['scale']} new={r.get('scale')}")
+check("标定宽度更新成新画面宽", r.get("calib_w") == int(_big.shape[1]), r.get("calib_w"))
+check("重标后 ME 框还在", wait_until(
+    lambda: get("/api/char")[1]["box"] is not None, timeout=8),
+    detail=str(get("/api/char")[1]))
+# 没画面时重标要老实报错，不能瞎改尺度
+_sc = srv.char_state["scale"]
+with srv.grabber.lock:
+    _cs = srv.grabber.client_size
+    srv.grabber.client_size = (0, 0)
+code, r = post("/api/char/recalibrate", {})
+check("没画面时重标返回失败提示", code == 400 and not r.get("ok"), r)
+with srv.grabber.lock:
+    srv.grabber.client_size = _cs
+check("失败的这次没有改动尺度", srv.char_state["scale"] == _sc, srv.char_state["scale"])
+
 # ---------------- S8 既有单测套件 ----------------
 print("[S8] 既有单测套件")
 for t in ("test_bot.py", "test_charbox.py", "test_sender.py",

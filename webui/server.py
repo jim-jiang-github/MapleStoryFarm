@@ -1409,12 +1409,14 @@ char_state = {
     "box": None,          # 最近一次命中的框 [x1,y1,x2,y2]（全分辨率）
     "dir": "above",       # 箭头恒朝上（名字牌在脚下）。原来的「朝下/朝上」选项已去掉。
     "scale": 1.0,         # 匹配用的缩放（上传的图和实际画面像素尺度不一致时自动标定）
+    "calib_w": None,      # 标定尺度时的画面宽度：名字牌像素尺寸 ∝ 窗口宽度，靠它自愈
     "score": 0.0,
     "ts": 0.0,
     "misses": 0,
     "pending": None,      # 嫌疑跳变候选 (box, hits)：攒够帧数才切过去
     "guard": 0,           # 当前 pending 的命中帧数（0 = 正常跟踪）
     "frame_size": None,   # 标定/上次重标时的画面尺寸 (W, H)：只有它变了才允许改尺度
+    "sweep_fails": 0,     # 连扫几次都没结果就停手，别每 4 秒全尺度空扫
     "roi": CHAR_ROI_DEFAULT,   # 搜索范围的归一化矩形 (x1, y1, x2, y2)；默认整宽、上下 8%~90%
     "error": "",
 }
@@ -1469,7 +1471,8 @@ def _save_char_conf():
     try:
         CHAR_CONF_FILE.write_text(json.dumps(
             {"enabled": char_state["enabled"], "thresh": char_state["thresh"],
-             "scale": char_state["scale"], "roi": list(char_state["roi"])}
+             "scale": char_state["scale"], "calib_w": char_state["calib_w"],
+             "roi": list(char_state["roi"])}
         ), encoding="utf-8")
     except Exception:
         pass
@@ -1484,9 +1487,14 @@ def _load_char_conf():
     char_state["thresh"] = _clamp_thresh(raw.get("thresh", CHAR_THRESH_DEFAULT))
     char_state["dir"] = "above"      # 箭头固定朝上：旧配置文件里的 dir 一律忽略
     try:
-        char_state["scale"] = min(1.6, max(0.25, float(raw.get("scale", 1.0))))
+        char_state["scale"] = min(3.0, max(0.25, float(raw.get("scale", 1.0))))
     except (TypeError, ValueError):
         char_state["scale"] = 1.0
+    try:                             # 旧配置没有这一项：留 None，下次跟丢时按扫描标定
+        cw = raw.get("calib_w")
+        char_state["calib_w"] = int(cw) if cw and int(cw) > 0 else None
+    except (TypeError, ValueError):
+        char_state["calib_w"] = None
     roi = raw.get("roi")
     if isinstance(roi, (list, tuple)) and len(roi) in (2, 4):
         char_state["roi"] = _clamp_roi(*roi)   # 旧配置的 2 元组自动补成整宽矩形
@@ -1653,22 +1661,23 @@ def _char_scale_sweep(gray, frame_gray):
 
     全程在**全分辨率**上扫：曾经试过半分辨率粗扫省时间，但名字牌在半分辨率下只剩
     十几像素宽，笔画糊成一片，0.5 和 0.32 分数一样 —— 扫出来的尺度全是错的。
-    全图扫 0.40~1.60（步长 4%）约 200ms，只在「上传」和「跟丢 4 秒后重标」时跑，
-    不进每帧路径。
+    全图扫 0.30~3.00（步长 5%）几百毫秒，只在「上传」和「跟丢 4 秒后重标」时跑，
+    不进每帧路径。上限放到 3.0 是因为窗口能从 1366 拉到 2049（名字牌 1.5 倍），
+    以前卡在 1.62，大窗口的尺度根本扫不到，只能永远 1:1 匹配不上。
     """
     rx1, ry1, rx2, ry2 = _char_roi(frame_gray.shape)
     fw = _white_map(frame_gray[ry1:ry2, rx1:rx2])   # 只在人物可能出现的范围里扫，跟 find_char 一致
     H, W = fw.shape[:2]
     best = None                          # (score, scale, sig)
-    for sc in np.arange(0.40, 1.621, 0.04):
+    for sc in np.arange(0.30, 3.001, 0.05):
         got = _probe_scale(fw, gray, round(float(sc), 3))
         if got is not None and (best is None or got[0] > best[0]):
             best = got
     if best is None:
         return 0.0, 1.0
     if best[0] >= CHAR_SCALE_COARSE_MIN:
-        # 在最佳尺度附近再细调一次，免得 4% 的步长把分数压在 0.93 这种半高不高的位置
-        for d in (-0.03, -0.015, 0.015, 0.03):
+        # 在最佳尺度附近再细调一次，免得 5% 的步长把分数压在 0.93 这种半高不高的位置
+        for d in (-0.035, -0.02, 0.02, 0.035):
             got = _probe_scale(fw, gray, round(best[1] + d, 3))
             if got is not None and got[0] > best[0]:
                 best = got
@@ -1685,8 +1694,10 @@ def _install_char_tpl(gray):
     _set_char_tpl(gray, scale)
     with char_lock:
         char_state["scale"] = scale
-        # 记住标定时的画面尺寸：以后只有这个尺寸变了，才允许重标尺度
+        # 记住标定时的画面尺寸/宽度：以后窗口一变，名字牌像素尺寸跟着变，
+        # 就按宽度比例把尺度换过去（calib_w 是给这条自愈用的）
         char_state["frame_size"] = (fg.shape[1], fg.shape[0])
+        char_state["calib_w"] = int(fg.shape[1])
     _save_char_conf()
     # 立刻在整幅画面上跑一次，命中就把标记点上，前端马上能看到
     box, sc2 = find_char(frame)
@@ -1904,37 +1915,88 @@ def chase_char_box(cur, new, pending):
     return _bbox_int(cur), (_bbox_int(new), hits), "hold"
 
 
-def _auto_recalibrate(frame):
-    """长时间跟丢后重标尺度 —— 只在**窗口尺寸真的变了**时才做。
+def _char_score(frame_gray, tpl_mask):
+    """在人物搜索 ROI 里跑一次匹配，返回最高分（不判门限、不加位置惩罚）。
 
-    以前只要跟丢 4 秒就重扫一遍，结果人物不在画面里时，扫描在半空里凑出一个 0.88
-    的假峰（比如把 54×15 的模板压到 21×6），把好模板改成坏的：之后不但找不着人，
-    还会在血条边缘画个 ME 0.83。名字牌是 2D UI，像素尺寸只跟窗口大小/分辨率有关，
-    窗口尺寸没变就没有理由改尺度。
+    只用来「验证某个候选尺度对不对」：把模板缩到该尺度，在当前帧上算分。
     """
-    with char_lock:
-        tpl = char_state["tpl"]
-        old = char_state["scale"]
-        prev_size = char_state["frame_size"]
-    if tpl is None:
-        return False
-    H, W = frame.shape[:2]
-    if prev_size is None:
-        # 第一次进来只记尺寸，不改模板：此时手里没有「变化」这个证据
-        with char_lock:
-            char_state["frame_size"] = (W, H)
-        return False
-    if prev_size == (W, H):
-        return False                      # 窗口没变过，尺度不可能变
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    score, scale = _char_scale_sweep(tpl, gray)
-    if score < CHAR_SCALE_MIN_SCORE or abs(scale - old) <= 0.02:
-        return False
+    rx1, ry1, rx2, ry2 = _char_roi(frame_gray.shape)
+    fw = _white_map(frame_gray[ry1:ry2, rx1:rx2])
+    if fw.shape[0] <= tpl_mask.shape[0] or fw.shape[1] <= tpl_mask.shape[1]:
+        return 0.0
+    res = cv2.matchTemplate(fw, tpl_mask, cv2.TM_CCOEFF_NORMED)
+    _, mx, _, _ = cv2.minMaxLoc(res)
+    return float(mx)
+
+
+def _apply_char_scale(tpl, scale, frame_gray):
+    """把模板重采样到 scale 并记账（尺度 + 标定宽度 + 画面尺寸），落盘。"""
     _set_char_tpl(tpl, scale)
     with char_lock:
         char_state["scale"] = scale
-        char_state["score"] = round(score, 3)
+        char_state["calib_w"] = int(frame_gray.shape[1])
+        char_state["frame_size"] = (frame_gray.shape[1], frame_gray.shape[0])
+        char_state["misses"] = 0
+        char_state["sweep_fails"] = 0
     _save_char_conf()
+
+
+def _auto_recalibrate(frame, force=False):
+    """跟丢后纠正匹配尺度 —— 名字牌是 2D UI，像素尺寸只跟窗口大小走。
+
+    以前只认「窗口尺寸变了」这一个证据，而且 frame_size 只存在内存里：重启后
+    第一次进来只纪录尺寸就 return，从此永远认为「窗口没变过」，尺度卡死在旧值上
+    （用户实测：模板是 1366 窗口下截的，游戏拉到 2049 后名字牌大了 1.5 倍，
+    匹配分只有 0.6，框永远不出现，怎么等都不会自己好）。
+
+    现在两条路，按可靠性排序：
+      ① 有 calib_w（标定时的窗口宽度）→ 尺度正比于窗口宽度，直接算出来，
+         在当前帧上验证：分数到门限才采纳。比例是确定的，没有假峰风险。
+      ② 没有 calib_w（老配置/第一次）→ 全尺度扫描兜底，门槛 0.88，
+         宁可不动也别把好模板改成坏的（老注释里那次的教训）。
+    窗口宽度没变、也没有待验证的比例 → 什么都不做，别每 4 秒扫一遍。
+    force=True（手动重标）：跳过下面两道「省着点」的闸门，立刻扫。
+    """
+    with char_lock:
+        tpl = char_state["tpl"]
+        old_scale = char_state["scale"]
+        calib_w = char_state["calib_w"]
+        prev_size = char_state["frame_size"]
+        thresh = char_state["thresh"]
+    if tpl is None:
+        return False
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    H, W = gray.shape[:2]
+
+    # ① 窗口宽度变了 → 按比例换算尺度，验证过关就采纳
+    if calib_w and abs(W - calib_w) >= 4:
+        pred = min(3.0, max(0.25, old_scale * float(W) / float(calib_w)))
+        if abs(pred - old_scale) > 0.02:
+            tpl_w = _tpl_mask_at(tpl, pred)
+            if (tpl_w.shape[1] >= CHAR_MIN_W and tpl_w.shape[0] >= CHAR_MIN_H
+                    and _char_score(gray, tpl_w) >= thresh):
+                _apply_char_scale(tpl, round(pred, 3), gray)
+                return True
+
+    # ② 兜底：全尺度扫描。窗口尺寸没变过就没必要扫（缩放不会自己变）。
+    #    扫不出结果最多试 3 次（人物可能正好被特效/对话框遮住），之后等窗口
+    #    尺寸再变才重扫——不然每 4 秒一轮全尺度扫描太费 CPU。
+    if not force:
+        if prev_size == (W, H):
+            return False
+        with char_lock:
+            if char_state["sweep_fails"] >= 3:
+                return False
+    score, scale = _char_scale_sweep(tpl, gray)
+    if score < max(CHAR_SCALE_MIN_SCORE, thresh) or abs(scale - old_scale) <= 0.02:
+        with char_lock:
+            char_state["sweep_fails"] += 1
+            if char_state["sweep_fails"] >= 3:
+                char_state["frame_size"] = (W, H)    # 放弃，等窗口尺寸下次变化
+        return False
+    _apply_char_scale(tpl, scale, gray)
+    with char_lock:
+        char_state["sweep_fails"] = 0
     return True
 
 
@@ -2935,11 +2997,36 @@ async def char_status():
             "size": list(char_state["size"]),
             "dir": char_state["dir"],
             "scale": char_state["scale"],
+            "calib_w": char_state["calib_w"],   # 标定尺度时的画面宽度（排查「换分辨率后认不到人」）
             "guard": char_state["guard"],
             "roi": list(char_state["roi"]),   # 搜索范围（归一化矩形 x1,y1,x2,y2）
             "error": char_state["error"],
             "thread": _char_thread_alive(),   # 找人线程是否活着（排查「标记不动了」）
         })
+
+
+@app.post("/api/char/recalibrate")
+async def char_recalibrate():
+    """手动重标匹配尺度（页面「重标」按钮 / 排查用）。
+
+    什么时候要用：换了分辨率、拉大/缩小了游戏窗口之后，名字牌的像素尺寸变了，
+    但旧尺度还留在配置里——表现就是「人物明明在，框就是不出现」、分数卡在 0.6。
+    后台本来会在长时间跟丢时自愈（见 _auto_recalibrate），这里给一个立刻执行的入口。
+    """
+    frame = grabber.snapshot()
+    h, w = frame.shape[:2]
+    if grabber.client_size[0] == 0:
+        return JSONResponse({"ok": False, "msg": "现在没有画面（游戏窗口不可见）"},
+                            status_code=400)
+    ok = await asyncio.to_thread(_auto_recalibrate, frame, True)
+    with char_lock:
+        out = {"ok": bool(ok), "scale": char_state["scale"],
+               "score": round(char_state["score"], 3),
+               "calib_w": char_state["calib_w"], "frame_w": int(w),
+               "thresh": char_state["thresh"]}
+    if not ok:
+        out["msg"] = "没找到可靠的尺度（人物不在画面里，或模板本身不对）——试试重新框一次名字牌"
+    return JSONResponse(out)
 
 
 @app.post("/api/char/template")
