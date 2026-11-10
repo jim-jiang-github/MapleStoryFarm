@@ -142,6 +142,21 @@ def optional_pyserial():
             "--hidden-import", "serial.tools.list_ports"]
 
 
+def optional_psutil():
+    """装了 psutil 就带上：启动横幅要靠它滤掉虚拟网卡（Hyper-V/WSL/VMware/VPN）。
+
+    没有也能跑，只是过滤退化成「默认出口网卡 + 排除 127/169.254」——大部分
+    机器只连一个 WiFi，结果一样，多网卡时才会多显示一行用不上的地址。
+    """
+    try:
+        import psutil  # noqa: F401
+    except ImportError:
+        log("没装 psutil -> 局域网地址只能靠默认出口那张网卡过滤虚拟网卡")
+        return []
+    log("带上 psutil（滤掉虚拟网卡的局域网地址）")
+    return ["--hidden-import", "psutil"]
+
+
 def tunnel_flags():
     """带上 cloudflared.exe：面板上的「外网」一键穿透要用它。
 
@@ -249,6 +264,7 @@ def build(onefile, with_accurate, clean, dry_run=False):
     ]
     cmd += model_flags(with_accurate)
     cmd += optional_pyserial()
+    cmd += optional_psutil()
     cmd += tunnel_flags()
 
     # ultralytics：模型/跟踪器运行时按名字导入，必须整包收

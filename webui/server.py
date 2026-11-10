@@ -64,6 +64,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paths as apppaths  # noqa: E402  （见 webui/paths.py：源码/打包后的资源与数据目录）
 from track import Tracker  # noqa: E402  （见 webui/track.py：卡尔曼 + 匈牙利 + ByteTrack）
 import bot as botmod  # noqa: E402  （见 webui/bot.py：挂机按键与决策）
+import netinfo  # noqa: E402  （见 webui/netinfo.py：局域网地址，滤掉虚拟网卡）
 
 
 SCREENSHOT = getattr(mss, "MSS", None) or getattr(mss, "mss")
@@ -3799,24 +3800,13 @@ def port_busy(host, port):
 
 
 def lan_ipv4():
-    """本机在局域网里的地址（手机连同一个 WiFi 时该用这个，而不是穿透域名）。"""
-    ips = []
-    try:
-        for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
-            if not ip.startswith("127.") and ip not in ips:
-                ips.append(ip)
-    except OSError:
-        pass
-    try:                                  # 兜底：拿默认出口网卡的地址
-        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        probe.connect(("223.5.5.5", 80))
-        ip = probe.getsockname()[0]
-        probe.close()
-        if not ip.startswith("127.") and ip not in ips:
-            ips.insert(0, ip)
-    except OSError:
-        pass
-    return ips
+    """本机在局域网里的地址（手机连同一个 WiFi 时该用这个，而不是穿透域名）。
+
+    实现在 netinfo.py：默认出口网卡排最前，其余把虚拟网卡（Hyper-V 的
+    vEthernet / WSL、VMware、VirtualBox、VPN）上的地址滤掉——那些地址手机
+    根本连不上，打出来只会让人多猜一次「这两个哪个是对的」。
+    """
+    return netinfo.lan_ipv4()
 
 
 LOG_FILE = apppaths.DATA_DIR / "service.log"
@@ -3934,9 +3924,13 @@ if __name__ == "__main__":
 
     print(f"preview -> {local}   (Ctrl+C to stop)")
     if HOST in ("0.0.0.0", "::"):
-        for ip in lan_ipv4():
-            tail = f"/?k={PREVIEW_TOKEN}" if PREVIEW_TOKEN else "/"
-            print(f"手机(同 WiFi) -> http://{ip}:{PORT}{tail}   ← 在家就用这个，最流畅")
+        tail = f"/?k={PREVIEW_TOKEN}" if PREVIEW_TOKEN else "/"
+        ips = lan_ipv4()          # 虚拟网卡（Hyper-V/WSL/VMware/VPN）的地址已被滤掉
+        if ips:
+            for ip in ips:
+                print(f"手机(同 WiFi) -> http://{ip}:{PORT}{tail}   ← 在家就用这个，最流畅")
+        else:
+            print("手机(同 WiFi) -> 没找到可用地址（电脑没连 WiFi / 网线？）")
     if want_open:
         threading.Timer(1.2, lambda: webbrowser.open(local)).start()
     try:

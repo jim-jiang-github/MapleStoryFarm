@@ -55,24 +55,24 @@ def copy_to_clipboard(text):
 
 
 def lan_ips():
-    """本机局域网地址：手机连着同一个 WiFi 时走它，延迟从 1 秒降到几毫秒。"""
-    ips = []
+    """本机局域网地址：手机连着同一个 WiFi 时走它，延迟从 1 秒降到几毫秒。
+
+    过滤逻辑放在 webui/netinfo.py 里（服务启动横幅也用它），这里只是把项目
+    根加入 sys.path 后转调——两处各写一份的话，迟早会有一处漏掉虚拟网卡。
+    """
     try:
-        for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
-            if not ip.startswith("127.") and ip not in ips:
-                ips.append(ip)
-    except OSError:
-        pass
-    try:
-        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        probe.connect(("223.5.5.5", 80))
-        ip = probe.getsockname()[0]
-        probe.close()
-        if not ip.startswith("127.") and ip not in ips:
-            ips.insert(0, ip)
-    except OSError:
-        pass
-    return ips
+        sys.path.insert(0, str(ROOT / "webui"))
+        from netinfo import lan_ipv4
+        return lan_ipv4()
+    except Exception:  # noqa: BLE001  极端情况（打包/路径异常）退回朴素做法
+        ips = []
+        try:
+            for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
+                if not ip.startswith("127.") and not ip.startswith("169.254.") and ip not in ips:
+                    ips.append(ip)
+        except OSError:
+            pass
+        return ips
 
 
 def banner(url, tool):

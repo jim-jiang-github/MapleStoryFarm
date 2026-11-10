@@ -111,6 +111,27 @@ srv.find_window = lambda: None
 srv.win32gui.GetForegroundWindow, srv.win32gui.IsIconic = _gw, _ic
 srv.win32gui.IsWindowVisible = _iv
 
+# ---------------- S0b 局域网地址：虚拟网卡不能当成「手机能用」的入口 ----------------
+# 回归：Hyper-V 的 vEthernet（WSL / Default Switch，典型 172.x）、VMware、
+# VirtualBox、VPN 的 tun/tap 也都是「本机 IPv4」，gethostbyname_ex 一视同仁
+# 吐出来，启动横幅照着打两行，用户还得猜哪个才对——而照着虚拟网卡敲的
+# 那个永远连不上。
+print("[S0b] 局域网地址滤掉虚拟网卡")
+_ni = srv.netinfo
+check("虚拟网卡上的地址被判为不可用", not _ni._usable("172.25.16.1", {"172.25.16.1"}))
+check("没在虚拟集合里的地址放行", _ni._usable("192.168.31.176", {"172.25.16.1"}))
+check("回环地址判掉", not _ni._usable("127.0.0.1", set()))
+check("169.254 自立地址判掉（没拿到 DHCP，谁都连不上）",
+      not _ni._usable("169.254.10.2", set()))
+check("空地址判掉", not _ni._usable("", set()))
+check("接口名 vEthernet (Default Switch) 认得出是虚拟的",
+      any(h in "vethernet (default switch)" for h in _ni._VIRTUAL_HINTS))
+check("接口名 Wi-Fi 不会被误判成虚拟",
+      not any(h in "wi-fi" for h in _ni._VIRTUAL_HINTS))
+check("lan_ipv4 里不会混进回环 / 自立地址",
+      all(not ip.startswith(("127.", "169.254.")) for ip in _ni.lan_ipv4()),
+      _ni.lan_ipv4())
+
 # ---------------- S0 替身注入 ----------------
 print("[S0] 替身注入（合成画面 / 假 YOLO / 录音按键）")
 
