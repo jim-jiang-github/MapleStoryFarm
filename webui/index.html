@@ -358,7 +358,14 @@
   /* 标题不许换行（158px 列里塞标题+档位+区间，默认会挤成两行）；区间文字超宽就省略 */
   #expCap { white-space: nowrap; }
   #expRange { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #expChart { display: block; width: 100%; height: 46px; }
+  #expChart { display: block; width: 100%; height: 58px; }
+  /* 图下面那行：左边当前经验，右边按最近涨速估的升级时间 */
+  .expfoot {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 6px;
+    margin-top: 1px; font-size: 10px; color: var(--hint);
+  }
+  .expfoot b { color: #4d7c0f; font-size: 11.5px; font-weight: 600; }
+  .expfoot span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   button:disabled { opacity: .55; cursor: default; }
   button.on { background: #eaf3de; border-color: #b5cf8f; }
   /* 识别冷启动进度：按钮底色按 --p 从左往右填（不用伪元素，避免压住文字）。
@@ -616,6 +623,7 @@
             <div class="trend">
               <div class="cap"><span id="expCap">EXP 变化</span><select id="expWin" title="走势图的时间窗口，选过会记住（保存在本机浏览器）。数据记在服务端（保留 24 小时），页面刷新、服务重启都不会丢，不开页面也在记"><option value="3600000">1时</option><option value="28800000" selected>8时</option><option value="86400000">24时</option></select><span class="sub" id="expRange">—</span></div>
               <canvas id="expChart"></canvas>
+              <div class="expfoot" id="expFoot"><b id="expNow">—</b><span id="expEta">—</span></div>
             </div>
           </div>
           <div class="rows">
@@ -1665,6 +1673,38 @@
     loadExpHistory();
   });
 
+  /* 升级预估：按最近 30 分钟（窗口内不足就全用上）的平均涨速算还剩多久。
+     只累计「涨」的增量、时间按整段算——站着挂机不涨的那段会把速度拉低，
+     这才是「现实中还要多久」。升级瞬间掉档（dv 突降）不算负增长。 */
+  function expEta(cur, now) {
+    const from = Math.max(now - 30 * 60000, expHist.length ? expHist[0][0] : now);
+    const pts = expHist.filter((p) => p[0] >= from);
+    if (pts.length < 3) return null;
+    const span = (pts[pts.length - 1][0] - pts[0][0]) / 1000;
+    if (span < 30) return null;                    // 跨度太短，算出来全是噪声
+    let gain = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const dv = pts[i][1] - pts[i - 1][1];
+      if (dv > 0) gain += dv;
+    }
+    const rate = gain / span;                      // %/秒
+    if (!(rate > 1e-6)) return null;               // 完全没在涨
+    return (100 - cur) / rate;                     // 秒
+  }
+
+  function fmtEta(sec) {
+    if (!isFinite(sec) || sec <= 0) return "";
+    if (sec < 60) return "不到 1 分钟";
+    if (sec < 3600) return `约 ${Math.round(sec / 60)} 分钟`;
+    if (sec < 86400) return `约 ${(sec / 3600).toFixed(1)} 小时`;
+    return `约 ${(sec / 86400).toFixed(1)} 天`;
+  }
+
+  const hhmm = (ms) => {
+    const d = new Date(ms);
+    return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  };
+
   function drawExpChart() {
     const cv = $("expChart");
     if (!cv) return;
@@ -1682,13 +1722,27 @@
     const span = expHist.length ? now - expHist[0][0] : 0;
     const eff = Math.min(EXP_WIN_MS, Math.max(span + 5000, 30000));
     const x = (t) => Math.max(0, Math.min(cw, cw * (1 - (now - t) / eff)));
+    // 底部留一条给时间刻度（左=窗口起点，右=现在），曲线只画在上面那部分
+    const AXIS_H = 12;
+    const bottom = ch - AXIS_H;
     ctx.strokeStyle = "rgba(120,113,108,.18)";
     ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(0, ch - 0.5); ctx.lineTo(cw, ch - 0.5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, bottom - 0.5); ctx.lineTo(cw, bottom - 0.5); ctx.stroke();
+
+    // 时间刻度：不管有没有数据都标出来，不然横轴看不出是几点到几点
+    ctx.font = "9px system-ui, -apple-system, 'Segoe UI', sans-serif";
+    ctx.fillStyle = "rgba(120,113,108,.9)";
+    ctx.textBaseline = "bottom";
+    ctx.textAlign = "left";
+    ctx.fillText(hhmm(now - eff), 0, ch);
+    ctx.textAlign = "right";
+    ctx.fillText("现在 " + hhmm(now), cw, ch);
 
     if (expHist.length < 2) {
       $("expRange").textContent = expHist.length
         ? "采集中（每 5 秒一点，稍等）" : "采集中…";
+      $("expNow").textContent = expHist.length ? expHist[0][1].toFixed(1) + "%" : "—";
+      $("expEta").textContent = expHist.length ? "攒够点才算速度" : "—";
       return;
     }
     let rawLo = Infinity, rawHi = -Infinity;
@@ -1696,13 +1750,13 @@
     let lo = rawLo, hi = rawHi;
     if (hi - lo < 0.5) { lo -= 0.3; hi += 0.3; }      // 几乎没变化时给点纵向余量
     const pad = 4;
-    const y = (v) => ch - pad - ((v - lo) / (hi - lo)) * (ch - pad * 2);
+    const y = (v) => bottom - pad - ((v - lo) / (hi - lo)) * (bottom - pad * 2);
     const line = (close) => {
       ctx.beginPath();
       expHist.forEach((p, i) => (i ? ctx.lineTo(x(p[0]), y(p[1])) : ctx.moveTo(x(p[0]), y(p[1]))));
       if (close) {
-        ctx.lineTo(x(expHist[expHist.length - 1][0]), ch);
-        ctx.lineTo(x(expHist[0][0]), ch);
+        ctx.lineTo(x(expHist[expHist.length - 1][0]), bottom);
+        ctx.lineTo(x(expHist[0][0]), bottom);
         ctx.closePath();
       }
     };
@@ -1723,7 +1777,16 @@
     ctx.fillStyle = "#65a30d";
     ctx.fill();
 
+    // 脚注：当前经验 + 按最近涨速估的升级时间（图里那个 0→100% 是窗口范围，不是进度）
+    const cur = last[1];
+    const eta = expEta(cur, now);
+    $("expNow").textContent = `当前 ${cur.toFixed(1)}%`;
+    $("expEta").textContent = eta ? `${fmtEta(eta)}升级` : "没在涨，估不出";
+    $("expEta").title = eta
+      ? `按最近 30 分钟的平均涨速（站着挂机不涨的时间也算进去）估的，仅供参考`
+      : "最近登记的点里经验没涨过：挂机没开、或者没在打怪";
     $("expRange").textContent = `${rawLo.toFixed(1)}% → ${rawHi.toFixed(1)}%`;
+    $("expRange").title = `窗口内最低/最高：${rawLo.toFixed(2)}% → ${rawHi.toFixed(2)}%`;
   }
 
   let barsFail = 0;
