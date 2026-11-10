@@ -576,26 +576,36 @@ check("复位后从当前位移重新攒（face=0）", b.snapshot()[1]["face"] =
 step(b, now=100.6, m=[], char=[moved_l[0] - 15, CHAR[1], moved_l[2] - 15, CHAR[3]])
 check("复位后继续左移 → 又是 face=-1", b.snapshot()[1]["face"] == -1, b.snapshot()[1])
 
-print("[27] 人物识别不到 → 默认在画面正中心，照常打（不整段停摆）")
-check("center_char_box 的身体中心正好落在画面中心",
-      bot._cx(bot.char_body_box(bot.center_char_box(1280, 720))) == 640.0
-      and bot._cy(bot.char_body_box(bot.center_char_box(1280, 720))) == 360.0,
-      bot.char_body_box(bot.center_char_box(1280, 720)))
+print("[27] 人物识别不到 → 不再拿画面中心当假锚点打，往走丢的反方向走回来")
 b = make()
-c = step(b, m=[{"name": "Stump", "box": [700, 300, 760, 360], "conf": 0.9}],
-         char=None, size=(1280, 720))     # 假锚点身体中心 (640,360)，怪中心 730
-check("第一帧照常先转身", down_keys(c) == ["right"], c)
-settle(b)
-c = step(b, m=[{"name": "Stump", "box": [700, 300, 760, 360], "conf": 0.9}],
-         char=None, size=(1280, 720))
-check("对正后照常出手（不会因为每帧丢人一直转身）", down_keys(c) == [ATK], c)
-c = step(b, m=[{"name": "Stump", "box": [700, 300, 760, 360], "conf": 0.9}],
-         char=None, size=(1280, 720))
-check("冷却中不重复出手", ATK not in down_keys(c), c)
+c = step(b, m=[{"name": "Stump", "box": [1150, 300, 1210, 360], "conf": 0.9}],
+         char=CHAR, size=(1280, 720))     # 怪在右边远处 → 按住 right 追过去
+check("丢失前正在往右走", b._held == 1, b._held)
+c = step(b, now=20.0, m=[{"name": "Stump", "box": [1150, 300, 1210, 360], "conf": 0.9}],
+         char=None, size=(1280, 720))     # 人往右走丢了
+check("反方向（left）走回来", down_keys(c) == ["left"], c)
+check("不拿假锚点出手", ATK not in down_keys(c), c)
+check("状态写明在找回", "丢定位" in b.snapshot()[1]["act"], b.snapshot()[1])
+c = step(b, now=20.5, m=[], char=None, size=(1280, 720))
+check("还没找回就继续往左走", b._held == -1, b._held)
+c = step(b, now=22.2, m=[], char=None, size=(1280, 720))
+check("两秒没找回来 → 掉头往另一边找", b._held == 1, b._held)
+c = step(b, now=22.3, m=[], char=CHAR, size=(1280, 720))
+check("认回人后清掉丢失状态", b._lost_since is None and b._last_cx == 630,
+      (b._lost_since, b._last_cx))
+
+# 站着打时丢的（被击退/手动跑出去）：没按方向键，按最后认到的位置猜方向
+b3 = make()
+step(b3, m=[{"name": "Stump", "box": [700, 300, 760, 360], "conf": 0.9}],
+     char=CHAR, size=(1280, 720))        # 站着打：_held 应为 0
+check("站着打时没按方向键", b3._held == 0, b3._held)
+step(b3, m=[], char=None, size=(1280, 720))
+check("站着丢 → 最后位置在中线左边，往右（中间）走", b3._held == 1, b3._held)
+
 b2 = make()
 b2.cfg["patrol"] = False
 step(b2, now=10.0, m=[], char=CHAR)                    # 真人：观测锚点立在 630
-step(b2, now=10.1, m=[], char=None, size=(1280, 720))  # 掉进假锚点：锚点应作废
+step(b2, now=10.1, m=[], char=None, size=(1280, 720))  # 丢定位：锚点应作废
 step(b2, now=10.2, m=[], char=[CHAR[0] - 500, CHAR[1], CHAR[2] - 500, CHAR[3]])
 check("找回真人后不把中心→真人的跳变当位移翻面（锚点已清）",
       b2.snapshot()[1]["face"] == 0, b2.snapshot()[1])
@@ -607,6 +617,13 @@ c = step(b, m=[{"name": "Stump", "box": [700, 300, 760, 360], "conf": 0.9}],
          char=None, size=None)
 check("不按方向/攻击", not any(k in ("left", "right", ATK) for k in down_keys(c)), c)
 check("状态是找不到人物", b.snapshot()[1]["act"] == "找不到人物", b.snapshot()[1])
+print("[27c] 移动关着时丢定位 → 不盲走，站着等识别恢复")
+b4 = make()
+b4.cfg["move"] = False
+step(b4, m=[], char=CHAR, size=(1280, 720))
+step(b4, m=[], char=None, size=(1280, 720))
+check("不按方向键", b4._held == 0, b4._held)
+check("状态写明站着等", "站着等" in b4.snapshot()[1]["act"], b4.snapshot()[1])
 
 print("\n[28] 换分辨率 / 换系统缩放：技能范围按基准宽度等比换算")
 SK_B = {"key": ATK, "type": "aoe", "dir": "both",
@@ -675,14 +692,17 @@ check("巡逻方向翻过来了", b._patrol_dir == 1, b._patrol_dir)
 step(b, m=[], char=EDGE_L, size=(1366, 768), roi=ROI_N)
 check("下一帧就按住 right 往回巡逻", b._held == 1, b._held)
 
-print("\n[30] 人物没定位时不许盲走（假锚点在画面中间，走了就再也找不回来）")
+print("\n[30] 巡逻途中丢定位：人往巡逻方向出界了，反方向走回来")
 b = make()
 b.cfg["patrol"] = True
-c = step(b, m=[{"name": "Stump", "box": [1150, 300, 1210, 360], "conf": 0.9}],
-         char=None, size=(1366, 768), roi=ROI_N)
-check("不给方向键（不走向目标）",
-      "left" not in down_keys(c) and "right" not in down_keys(c), c)
-check("状态写明原地不动", "没定位" in b.snapshot()[1]["act"], b.snapshot()[1])
+b._patrol_dir = -1
+b._t_patrol = time.time()                 # 刚换过向，别让计时器插一脚
+c = step(b, m=[], char=CHAR, size=(1366, 768), roi=ROI_N)
+check("丢失前正往左巡逻", b._held == -1, b._held)
+c = step(b, m=[], char=None, size=(1366, 768), roi=ROI_N)
+check("往右走回来（巡逻的反方向）", b._held == 1 and "left" not in down_keys(c), c)
+check("往回走不受识别区边界拦（人已经在墙外，得让它走回来）",
+      "right" in down_keys(c), c)
 
 print(f"\n通过 {ok} / {ok + fail}")
 sys.exit(1 if fail else 0)

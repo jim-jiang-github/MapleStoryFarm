@@ -564,17 +564,6 @@ def char_body_box(box):
     return [cx - bw, y1 - gap - body_h, cx + bw, y1 - gap]
 
 
-def center_char_box(w, h):
-    """画面正中心对应的假名字牌框：人物识别不到时的兜底锚点。
-
-    只保证身体中心正好落在画面中心——bot/画图对 char 框真正用到的只有
-    身体中心（skill_rects/_cx 全从中心换算），牌子实际高矮无所谓，就按
-    16px 的 1:1 尺度造一个。决策和画框（server.overlay_char）必须用这
-    同一个函数，所见即所打。
-    """
-    return [w / 2.0 - 8.0, h / 2.0 + 38.0, w / 2.0 + 8.0, h / 2.0 + 54.0]
-
-
 def _intersects(a, b):
     """两个 [x1,y1,x2,y2] 框是否有交集（ touching 不算，得真叠上）。"""
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
@@ -708,6 +697,7 @@ class Bot:
 
     TICK = 0.02          # 主循环节拍
     TAP_MS = 55          # 「点一下」的按住时长：够游戏识别成一次按键，又不至于走出一步
+    LOST_FLIP_SEC = 2.0  # 丢定位后往一边走这么久还没认回来 → 掉头往另一边找
 
     def __init__(self, get_state, sender=None):
         self.get_state = get_state
@@ -723,7 +713,9 @@ class Bot:
         self._down = set()        # 当前真的按住没松的键（别对没按的键发抬起）
         self._face = 0            # 上一次转向的方向（攻击朝这一侧）
         self._face_anchor = None  # 朝向观测锚点：人物身体中心的最近参考位置
-        self._synth = False       # 这一轮是不是在用「画面中心」假锚点撑着
+        self._last_cx = None      # 最后认到人时的身体中心：丢定位后往回走的方向参考
+        self._lost_since = None   # 丢定位的起始时刻（掉头搜索的节拍）
+        self._lost_dir = 1        # 丢定位期间往哪边走
         self._t_turn = 0.0        # 上一次转身的时刻：转完要等一帧再打，否则打的是旧朝向
         self._was_fg = False      # 上一轮游戏是否在前台（重新拿回焦点时朝向不可信）
         self._t_pot = 0.0
@@ -1033,26 +1025,44 @@ class Bot:
         roi = st.get("roi")           # 人物识别区（归一化 x1,y1,x2,y2）：走位的墙
         char = st.get("char")
         if not char:
-            # 识别不到人物：默认人就在画面正中心（相机锁人，角色基本贴着
-            # 画面中间），拿假锚点继续打，别整段停摆。连画面尺寸都没有
-            # （窗口都没了）才像以前那样松手认栽。
+            # 识别不到人：大多数时候是人物自己走出了识别区（名字牌被框切掉
+            # 一半，立刻认不出）。不拿「画面正中心」当假锚点继续打——位置是
+            # 猜的，打出去的判定框全是错的。改成往识别区中间走回去，边走
+            # 边等识别恢复；走一阵还没找回来说明方向猜反了，掉头再找。
             if not size:
+                # 连画面尺寸都没有（窗口没了/最小化）：松手认栽
                 self._set_dir(0)
                 self._reset_face()
-                self._synth = False
+                self._lost_since = None
                 self._set_status(act="找不到人物", target="")
                 return
-            if not self._synth:
-                # 刚从「找得到人」掉进「找不到」：朝向记忆作废一次（假锚点
-                # 观测不到位移，顺便清掉观测锚点，免得找回真人时中心→真人
-                # 的跳变被当成位移翻面）。之后保持记忆——每帧都作废的话
-                # face 永远是 0，会一直转身永远打不出手。
-                self._reset_face()
-                self._synth = True
-            char = center_char_box(float(size[0]), float(size[1]))
-        else:
-            self._synth = False
-            self._watch_face(char)    # 朝向跟实际位移走：手动走两步也能翻框
+            if self._lost_since is None:
+                self._lost_since = now
+                # 走丢的方向其实是知道的：丢失前一刻手上还按着哪个方向，
+                # 人就是往哪边出的界（一直往右走着走着不见了）——反方向
+                # 走回来就行。站着丢的（被击退/手动跑出去）按最后认到的
+                # 位置猜：人在哪半边就往中间走。从来没认到过人就沿用上一
+                # 次的搜索方向。
+                if self._held:
+                    self._lost_dir = -self._held
+                elif self._last_cx is not None:
+                    mid = (roi[0] + roi[2]) / 2.0 * size[0] if roi else size[0] / 2.0
+                    self._lost_dir = 1 if self._last_cx < mid else -1
+            elif now - self._lost_since >= self.LOST_FLIP_SEC:
+                self._lost_dir = -self._lost_dir
+                self._lost_since = now
+            # 朝向记忆作废（丢定位期间每帧作废一次没副作用：没有朝向也不出手）
+            self._reset_face()
+            if cfg["move"]:
+                self._set_dir(self._lost_dir)
+                self._set_status(act="丢定位，往中间走", target="", err="")
+            else:
+                self._set_dir(0)
+                self._set_status(act="丢定位（移动关着，站着等）", target="", err="")
+            return
+        self._lost_since = None
+        self._last_cx = _cx(char)
+        self._watch_face(char)    # 朝向跟实际位移走：手动走两步也能翻框
 
         # 3) 技能选择：逐个技能算判定框（skill_rects），数框里的怪。
         #    列表顺序 = 优先级；某个技能框里怪 ≥2 → 优先群攻，只有 1 只 → 优先
@@ -1081,13 +1091,6 @@ class Bot:
         if not cands:
             # 没有技能罩得住的怪：像以前一样朝最近的目标走 / 巡逻
             self._set_status(target="")
-            if self._synth:
-                # 人物没定位：现在的「人在画面中心」只是个假设，拿它算走位等于
-                # 闭着眼走——越走越远，名字牌也越来越找不回来。站住等识别恢复，
-                # 打击照旧（上面已经用假锚点算过一遍技能框了）。
-                self._set_dir(0)
-                self._set_status(act="人物没定位，站着不动", err="")
-                return
             tgt = _band_target(char, monsters, band, cfg["dy_tol"] * k)
             if tgt:
                 tb = tgt["box"]

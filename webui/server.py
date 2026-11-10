@@ -2395,8 +2395,9 @@ def _bot_state():
         mp = bar_state["values"].get("mp")
     with det_lock:
         mons = list(det_state["vis"])
-    # 画面尺寸：人物识别不到时 bot 拿它在画面正中心造个假锚点继续打
-    # （client_size 在窗口丢/最小化时是 (0,0)，那种时候给 None 走停手逻辑）
+    # 画面尺寸：丢定位时 bot 靠它算识别区中心的像素位置（往中间走的方向），
+    # 技能范围换算也要用（client_size 在窗口丢/最小化时是 (0,0)，那种时候给
+    # None 走停手逻辑）
     cw, chh = grabber.client_size
     size = (int(cw), int(chh)) if cw and chh else None
     # roi 一起给 bot：识别区不只是搜索窗，还是走位的边界——人物身体中心一出
@@ -2508,14 +2509,9 @@ def overlay_char(img):
         score = char_state["score"]
         ts = char_state["ts"]
     if box is None or ts <= 0 or time.time() - ts > CHAR_LOST_AFTER:
-        # 识别不到人物：ME 标记不画（不造假分数），但技能范围照画——锚点
-        # 换成画面正中心，和 bot 此时的判定用的是同一个兜底（bot.py 的
-        # center_char_box），所见即所打，丢了人也能看出够不够得着。
-        h, w = img.shape[:2]
-        try:
-            draw_skill_ranges(img, botmod.center_char_box(w, h))
-        except Exception:  # noqa: BLE001
-            pass                 # 画不画得出来都不该影响推流
+        # 识别不到人物：ME 标记和技能范围都不画。锚点造假的活（画面中心
+        # 假锚点）已经不干了——bot 此时在往识别区中间走等人回来，不出手，
+        # 画个框只会让人误以为还在按那个位置打。
         return img
     h, w = img.shape[:2]
     # 名字牌细框（1px）：模板实际命中的位置，标定/换图时用来肉眼核对

@@ -691,9 +691,10 @@ srv.game_bot.cfg["base_w"] = _cfg0.get("base_w", 0)
 srv.game_bot.cfg["on"] = _cfg0["on"]
 srv.game_bot.cfg["skills"] = _cfg0["skills"]
 
-# 丢人兜底：识别不到人物时技能框锚到画面正中心（bot 此刻打的就是这个位置，
-# 所见即所打）；ME 标记不画（不造假分数）
-print("  -- 画框回归：丢人时技能框锚到画面正中心")
+# 丢人兜底已改：识别不到人物时 bot 不再拿「画面中心」假锚点继续打（改成
+# 往识别区中间走回来），所以 ME 标记和技能框都不画——画了只会让人误以为
+# 还在按那个位置打
+print("  -- 画框回归：丢人时 ME 和技能框都不画（假锚点已废除）")
 with srv.char_lock:
     _cb, _ct = srv.char_state["box"], srv.char_state["ts"]
     srv.char_state["box"], srv.char_state["ts"] = None, 0.0
@@ -703,12 +704,7 @@ srv.game_bot.cfg["skills"] = [{"key": "KeyS", "type": "single", "dir": "both",
 im = _flat.copy()
 srv.overlay_char(im)
 ys, xs = np.nonzero(np.any(im != 150, axis=2))
-check("丢人时技能框还在（不随 ME 消失）", len(xs) > 0, len(xs))
-if len(xs):
-    check("锚在画面正中心（水平 ±15px 内）",
-          abs((xs.min() + xs.max()) / 2 - 640) <= 15, (int(xs.min()), int(xs.max())))
-    check("垂直也居中（±15px 内）",
-          abs((ys.min() + ys.max()) / 2 - 360) <= 15, (int(ys.min()), int(ys.max())))
+check("丢人时什么都不画（整帧保持原样）", len(xs) == 0, len(xs))
 srv.game_bot.cfg["skills"] = _cfg0["skills"]
 with srv.char_lock:
     srv.char_state["box"], srv.char_state["ts"] = _cb, _ct
