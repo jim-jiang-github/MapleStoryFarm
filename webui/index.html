@@ -210,15 +210,19 @@
   .skcard.fold { gap: 3px; }
   .skcard.fold .skbody { display: none; }
   .skcard.fold .sksum { display: block; }
-  .skfold {
-    flex: 0 0 auto; width: 13px; padding: 0; border: 0; background: none;
-    color: var(--hint); cursor: pointer; font-size: 10px; line-height: 1;
+  /* 折叠 / 选中这两个小按钮做成真正的按钮：有边框有点击面，别再是一颗
+     一眨眼就找不到的小符号（之前 13px 的裸符号用户根本看不见） */
+  .skfold, .skpick {
+    flex: 0 0 auto; width: 21px; height: 21px; padding: 0;
+    border: 1px solid var(--border); border-radius: 6px; background: #fff;
+    color: var(--muted); cursor: pointer; font-size: 12px; line-height: 1;
     font-family: inherit;
+    display: flex; align-items: center; justify-content: center;
   }
-  .skfold:hover { color: var(--text); }
+  .skfold:hover { background: #f5f5f4; border-color: #d6d3d1; color: var(--text); }
   .sksum {
     display: none; font-size: 10.5px; color: var(--hint);
-    font-variant-numeric: tabular-nums; padding-left: 21px;
+    font-variant-numeric: tabular-nums; padding-left: 2px;
   }
   .skbody { display: flex; flex-direction: column; gap: 6px; }
   /* 范围：只填 宽 / 上 / 下 三个量（单位画面像素，以人物身体中心为基准）。
@@ -249,13 +253,10 @@
   }
   .sktag { font-size: 10px; color: var(--hint); font-variant-numeric: tabular-nums; }
   /* 选中这单个技能：画面上的技能框只画这一张（调范围时不被别的框糊住） */
-  .skpick {
-    flex: 0 0 auto; padding: 0 1px; border: 0; background: none;
-    color: var(--hint); cursor: pointer; font-size: 12px; line-height: 1;
-    font-family: inherit;
+  .skpick:hover { background: #f0fdf4; border-color: #86efac; color: #16a34a; }
+  .skcard.on .skpick {
+    color: #16a34a; border-color: #16a34a; background: #f0fdf4; font-weight: 700;
   }
-  .skpick:hover { color: #16a34a; }
-  .skcard.on .skpick { color: #16a34a; }
   .skdel { margin-left: auto; border: 0; background: none; color: var(--hint);
            cursor: pointer; font-size: 12px; padding: 2px 4px; font-family: inherit; }
   .skdel:hover { color: #dc2626; }
