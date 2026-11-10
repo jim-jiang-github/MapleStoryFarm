@@ -532,12 +532,12 @@
   .paste-hint { margin-top: 9px; font-size: 11px; color: var(--hint); line-height: 1.6; }
   .paste-btns { margin-top: 12px; display: flex; justify-content: flex-end; }
   .paste-btns button { flex: none; padding: 6px 14px; }
-  /* 小地图限位弹窗：截图上拖矩形（虚线绿框跟手） */
-  .mmwrap { position: relative; margin-top: 10px; cursor: crosshair; user-select: none; }
-  .mmwrap img { display: block; width: 100%; border: 1px solid var(--border); border-radius: 8px; }
-  #mmRect {
+  /* 小地图限位：直接在预览画面上拖矩形（虚线绿框跟手），
+     编辑期间 drawMasks 见 mmCal 早退 → 屏蔽区/标定条全隐藏，画面保持干净 */
+  #mmLayer { position: absolute; inset: 0; display: none; cursor: crosshair; }
+  #mmSel {
     position: absolute; display: none; pointer-events: none;
-    border: 2px dashed #16a34a; background: rgba(22, 163, 74, .14);
+    border: 2px dashed #16a34a; background: rgba(22, 163, 74, .16);
   }
   /* ---- 人物模板：有图显示缩略图（右上角红叉删），没图给一块显眼的虚线提示 ---- */
   /* 投放位放回文档流：血条列的第一行，血条组跟着往下排。
@@ -638,6 +638,8 @@
           <div class="r"><span class="k">检测耗时</span><span class="v" id="dms">—</span></div>
           <div class="r"><span class="k">检出目标</span><span class="v" id="targets">—</span></div>
         </div>
+        <!-- 小地图限位编辑层：盖在预览上直接拖矩形（编辑时屏蔽区隐藏） -->
+        <div id="mmLayer"><div id="mmSel"></div></div>
       </div>
       <!-- 遮罩层放在 tile 外面：tile 有 overflow:hidden 会把贴边的把手裁掉 -->
       <canvas id="maskLayer" class="masklay"></canvas>
@@ -733,8 +735,9 @@
             <div class="row conf">
               <span class="k">小地图限位</span>
               <span class="v">
-                <button id="mmBtn" class="mini" title="在小地图截图上拖一个矩形 = 允许人物活动的范围。人物黄点贴到范围边，出界方向就走不动——这是世界坐标的绝对墙，追怪、巡逻都不会越出去；黄点丢了会自动放开（不会把人钉死在原地）。">圈范围</button>
-                <button id="mmBoxBtn" class="mini" title="小地图不在画面左上角默认位置（0~17% 宽 × 0~26% 高）时，先在这里把它的位置框出来，黄点才找得到。">小地图框</button>
+                <button id="mmBtn" class="mini" title="在预览画面上直接拖一个矩形 = 允许人物活动的范围（圈小地图上那块）。人物黄点贴到范围边，出界方向就走不动——这是世界坐标的绝对墙，追怪、巡逻都不会越出去；黄点丢了会自动放开（不会把人钉死在原地）。再点一次「完成」保存，Esc 取消。">圈范围</button>
+                <button id="mmBoxBtn" class="mini" title="小地图不在画面左上角默认位置（0~17% 宽 × 0~26% 高）时，先在预览画面上把它的位置框出来，黄点才找得到。再点一次「完成」保存，Esc 取消。">小地图框</button>
+                <button id="mmClearBtn" class="mini" style="display:none" title="清掉范围，关掉小地图限位">清除</button>
                 <b class="sub" id="mmStat">未启用</b>
               </span>
             </div>
@@ -813,23 +816,6 @@
   </div>
 </div>
 
-<!-- 小地图限位：在小地图截图上拖矩形圈活动范围；「小地图框」模式换成整帧截图 -->
-<div class="pastebox" id="mmModal">
-  <div class="paste-card" style="width:396px">
-    <div class="paste-t" id="mmTitle"></div>
-    <div class="mmwrap" id="mmWrap" title="按住拖一个矩形">
-      <img id="mmImg" alt="截图" draggable="false">
-      <div id="mmRect"></div>
-    </div>
-    <div class="paste-hint" id="mmHint"></div>
-    <div class="paste-btns">
-      <button id="mmClear" style="display:none">清除范围（关掉限位）</button>
-      <button id="mmCancel">取消</button>
-      <button id="mmSave">保存</button>
-    </div>
-  </div>
-</div>
-
 <div class="dropz" id="dropz"><div class="dropz-card"><b>松手就用这张图当人物模板</b>只截名字牌那一小块最准；整张截图会被拒</div></div>
 <div class="toast" id="toast"></div>
 
@@ -895,6 +881,7 @@
   let masks = [];                 // [{id,x1,y1,x2,y2}] 归一化
   let maskOn = true;              // 与后端 det_state["mask"] 同步
   let editMode = false;           // 编辑模式：可拖动 / 缩放 / 删除选区
+  let mmCal = null;               // 小地图限位编辑中："zone" / "box" / null
   let selId = null;               // 当前选中的区域
   let drag = null;                // {mode:"new"|"move"|"resize", ...}
   let addArmed = false;           // 右键"添加"后置位：下一次拖拽强制画新框
@@ -1079,6 +1066,7 @@
   function drawMasks() {
     if (!L.w || !L.h) return;
     mctx.clearRect(0, 0, maskLayer.clientWidth, maskLayer.clientHeight);
+    if (mmCal) return;                       // 框小地图时屏蔽区/标定条全隐藏，画面保持干净
     if (roiCal) { drawRoiBand(); return; }   // 调范围时只看这条带，别叠选区
     drawBarRects();
     if (!maskOn) return;
@@ -2149,6 +2137,7 @@
       return;
     }
     if (e.key === "Escape") {
+      if (mmCal) { stopMmCal(false); return; }
       if (roiCal) { stopRoiCal(true); return; }
       if (barCal) { cancelBarCal(); return; }
       if (ctxMenu.classList.contains("open")) { closeCtx(); return; }
@@ -3292,131 +3281,137 @@
     }
   }
   /* ================= 小地图限位 =================
-     「圈范围」= 在小地图截图上拖矩形（mm_zone，在小地图里归一化）；
-     「小地图框」= 在整帧截图上框出小地图的位置（mm_box，整帧归一化）。
-     底图是服务端现拍的（/api/mm/crop、/api/snapshot），黄点跟踪在后端跑。 */
-  const mmModal = $("mmModal"), mmImg = $("mmImg"), mmRectEl = $("mmRect"),
-        mmWrap = $("mmWrap");
-  let mmMode = "zone";
-  let mmRectNorm = null;          // 本次拖的矩形（归一化 [x1,y1,x2,y2]）
-  let mmDrag = null;
+     编辑直接在预览画面上拖（不弹截图窗）：编辑期间 drawMasks 见 mmCal 早退，
+     屏蔽区/标定条等叠加全隐藏，画面保持原样最好对位。
+     「圈范围」矩形按整帧拖，保存时换算成 mm_box 里的归一化坐标；
+     「小地图框」矩形就是 mm_box 本身。再点一次按钮 = 完成，Esc 取消。 */
+  const mmLayer = $("mmLayer"), mmSelEl = $("mmSel");
+  let mmRectNorm = null;          // 编辑中的矩形（整帧归一化 [x1,y1,x2,y2]）
+  let mmDragFrom = null;
   let mmCfgNow = null;            // 最近一次 /api/stats 的 mm 段
 
   function paintMm(m) {
     if (m) mmCfgNow = m;
     const el = $("mmStat");
     if (!el) return;
-    if (!m || !m.zone || !m.zone.length) {
+    const z = mmCfgNow && mmCfgNow.zone;
+    $("mmClearBtn").style.display = (z && z.length) ? "" : "none";
+    if (!z || !z.length) {
       el.textContent = "未启用";
       el.className = "sub";
       return;
     }
-    const lo = Math.round(m.zone[0] * 100), hi = Math.round(m.zone[2] * 100);
-    if (m.u == null) {
+    const lo = Math.round(z[0] * 100), hi = Math.round(z[2] * 100);
+    if (mmCfgNow.u == null) {
       el.textContent = `限 ${lo}~${hi}% · 黄点没读到`;
       el.className = "sub warn";
     } else {
-      el.textContent = `人在 ${Math.round(m.u * 100)}% · 限 ${lo}~${hi}%`;
+      el.textContent = `人在 ${Math.round(mmCfgNow.u * 100)}% · 限 ${lo}~${hi}%`;
       el.className = "sub";
     }
   }
 
-  function paintMmRect() {
-    if (!mmRectNorm) { mmRectEl.style.display = "none"; return; }
-    const w = mmImg.clientWidth, h = mmImg.clientHeight;
-    if (!w || !h) return;
+  // zone（mm_box 里归一化）↔ 整帧归一化矩形
+  function mmFrameOfZone(z) {
+    const b = mmCfgNow && mmCfgNow.box;
+    if (!b || b.length !== 4) return null;
+    return [b[0] + z[0] * (b[2] - b[0]), b[1] + z[1] * (b[3] - b[1]),
+            b[0] + z[2] * (b[2] - b[0]), b[1] + z[3] * (b[3] - b[1])];
+  }
+  function mmZoneOfFrame(r) {
+    const b = mmCfgNow && mmCfgNow.box;
+    if (!b || b.length !== 4) return null;
+    const bw = b[2] - b[0], bh = b[3] - b[1];
+    return [(r[0] - b[0]) / bw, (r[1] - b[1]) / bh,
+            (r[2] - b[0]) / bw, (r[3] - b[1]) / bh];
+  }
+
+  function paintMmSel() {
+    if (!mmRectNorm) { mmSelEl.style.display = "none"; return; }
     const r = mmRectNorm;
-    mmRectEl.style.display = "block";
-    mmRectEl.style.left = (r[0] * w) + "px";
-    mmRectEl.style.top = (r[1] * h) + "px";
-    mmRectEl.style.width = ((r[2] - r[0]) * w) + "px";
-    mmRectEl.style.height = ((r[3] - r[1]) * h) + "px";
+    mmSelEl.style.display = "block";
+    mmSelEl.style.left = (r[0] * 100) + "%";
+    mmSelEl.style.top = (r[1] * 100) + "%";
+    mmSelEl.style.width = ((r[2] - r[0]) * 100) + "%";
+    mmSelEl.style.height = ((r[3] - r[1]) * 100) + "%";
   }
 
-  function mmPos(e) {              // 鼠标事件 → 图片内的归一化坐标
-    const b = mmImg.getBoundingClientRect();
-    return [
-      Math.max(0, Math.min(1, (e.clientX - b.left) / b.width)),
-      Math.max(0, Math.min(1, (e.clientY - b.top) / b.height)),
-    ];
+  function mmBtnPaint() {
+    $("mmBtn").textContent = mmCal === "zone" ? "完成" : "圈范围";
+    $("mmBtn").classList.toggle("on", mmCal === "zone");
+    $("mmBoxBtn").textContent = mmCal === "box" ? "完成" : "小地图框";
+    $("mmBoxBtn").classList.toggle("on", mmCal === "box");
   }
 
-  mmWrap.addEventListener("mousedown", (e) => {
-    if (e.button !== 0 || !mmImg.clientWidth) return;
-    e.preventDefault();
-    const p = mmPos(e);
-    mmDrag = [p, p];
-    mmRectNorm = [p[0], p[1], p[0], p[1]];
-    paintMmRect();
-  });
-  window.addEventListener("mousemove", (e) => {
-    if (!mmDrag) return;
-    const p = mmPos(e);
-    mmRectNorm = [
-      Math.min(mmDrag[0][0], p[0]), Math.min(mmDrag[0][1], p[1]),
-      Math.max(mmDrag[0][0], p[0]), Math.max(mmDrag[0][1], p[1])];
-    paintMmRect();
-  });
-  window.addEventListener("mouseup", () => { mmDrag = null; });
-  mmImg.addEventListener("load", paintMmRect);
-  window.addEventListener("resize", paintMmRect);
+  function startMmCal(mode) {
+    if (mmCal) stopMmCal(false);
+    mmCal = mode;
+    mmRectNorm = mode === "box"
+      ? ((mmCfgNow && mmCfgNow.box && mmCfgNow.box.length === 4) ? mmCfgNow.box.slice() : null)
+      : ((mmCfgNow && mmCfgNow.zone && mmCfgNow.zone.length === 4) ? mmFrameOfZone(mmCfgNow.zone) : null);
+    maskLayer.style.pointerEvents = "none";    // 屏蔽区不接收事件也不再显示
+    drawMasks();                               // mmCal 早退 → 叠加全清掉
+    mmLayer.style.display = "block";
+    mmBtnPaint();
+    paintMmSel();
+    toast(mode === "box"
+      ? "在预览上拖一个框把小地图圈进去；再点「完成」保存，Esc 取消"
+      : "在预览上拖一个框（圈小地图上允许活动的那块）；再点「完成」保存，Esc 取消");
+  }
 
-  async function openMm(mode) {
-    mmMode = mode;
-    $("mmTitle").textContent = mode === "zone" ? "圈活动范围" : "框小地图位置";
-    $("mmHint").textContent = mode === "zone"
-      ? "在小地图截图上拖一个矩形 = 允许人物活动的范围（左右方向生效）。黄点贴到边就掉头。"
-      : "把画面左上角「小地图」那一块框出来（小地图不在默认位置时才需要动它）。";
-    $("mmClear").style.display = mode === "zone" ? "" : "none";
-    const url = mode === "zone" ? "/api/mm/crop" : "/api/snapshot?focus=0&fresh=0&w=360";
-    try {
-      const r = await fetch(url, { cache: "no-store" });
-      if (!r.ok) {
-        const j = await r.json().catch(() => ({}));
-        toast(j.detail || "拿不到画面（游戏窗口没开？）", true);
-        return;
-      }
-      const blob = await r.blob();
-      if (mmImg._url) URL.revokeObjectURL(mmImg._url);
-      mmImg._url = URL.createObjectURL(blob);
-      mmImg.src = mmImg._url;
-    } catch (err) {
-      toast("拿不到画面", true);
+  function stopMmCal(save) {
+    const mode = mmCal;
+    mmCal = null;
+    mmDragFrom = null;
+    mmLayer.style.display = "none";
+    maskLayer.style.pointerEvents = "";
+    mmBtnPaint();
+    drawMasks();                               // 恢复屏蔽区显示
+    if (!save) { mmRectNorm = null; return; }
+    if (!mmRectNorm || mmRectNorm[2] - mmRectNorm[0] < 0.02) {
+      toast("先在预览上拖一个框", true);
       return;
     }
-    mmRectNorm = (mode === "zone" && mmCfgNow && mmCfgNow.zone
-                  && mmCfgNow.zone.length === 4) ? mmCfgNow.zone.slice() : null;
-    paintMmRect();
-    mmModal.classList.add("open");
+    const r = mmRectNorm.slice();
+    mmRectNorm = null;
+    const body = mode === "box" ? { box: r } : { zone: mmZoneOfFrame(r) || r };
+    postJSON(mode === "box" ? "/api/mm/box" : "/api/mm/zone", body)
+      .then((res) => {
+        if (!res || !res.ok) throw new Error();
+        toast(mode === "box" ? "小地图位置已保存" : "范围已保存，黄点跟踪开始生效");
+      })
+      .catch(() => toast("保存失败", true));
   }
-  function closeMm() {
-    mmModal.classList.remove("open");
-    mmDrag = null;
+
+  function mmEvtPos(e) {
+    const b = mmLayer.getBoundingClientRect();
+    return [Math.max(0, Math.min(1, (e.clientX - b.left) / b.width)),
+            Math.max(0, Math.min(1, (e.clientY - b.top) / b.height))];
   }
-  $("mmBtn").addEventListener("click", () => openMm("zone"));
-  $("mmBoxBtn").addEventListener("click", () => openMm("box"));
-  $("mmCancel").addEventListener("click", closeMm);
-  mmModal.addEventListener("mousedown", (e) => { if (e.target === mmModal) closeMm(); });
-  $("mmClear").addEventListener("click", async () => {
+  mmLayer.addEventListener("mousedown", (e) => {
+    if (e.button !== 0 || !mmCal) return;
+    e.preventDefault();
+    mmDragFrom = mmEvtPos(e);
+    mmRectNorm = [mmDragFrom[0], mmDragFrom[1], mmDragFrom[0], mmDragFrom[1]];
+    paintMmSel();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!mmDragFrom || !mmCal) return;
+    const p = mmEvtPos(e);
+    mmRectNorm = [Math.min(mmDragFrom[0], p[0]), Math.min(mmDragFrom[1], p[1]),
+                  Math.max(mmDragFrom[0], p[0]), Math.max(mmDragFrom[1], p[1])];
+    paintMmSel();
+  });
+  window.addEventListener("mouseup", () => { mmDragFrom = null; });
+
+  $("mmBtn").addEventListener("click", () => mmCal === "zone" ? stopMmCal(true) : startMmCal("zone"));
+  $("mmBoxBtn").addEventListener("click", () => mmCal === "box" ? stopMmCal(true) : startMmCal("box"));
+  $("mmClearBtn").addEventListener("click", async () => {
     try {
       const r = await postJSON("/api/mm/zone", { zone: [] });
       if (r && r.ok) toast("已清掉小地图限位");
-      closeMm();
+      if (mmCal === "zone") stopMmCal(false);
     } catch (e) { toast("清除失败", true); }
-  });
-  $("mmSave").addEventListener("click", async () => {
-    if (!mmRectNorm || mmRectNorm[2] - mmRectNorm[0] < 0.03) {
-      toast("先在图上拖一个范围出来", true);
-      return;
-    }
-    const ep = mmMode === "zone" ? "/api/mm/zone" : "/api/mm/box";
-    const body = mmMode === "zone" ? { zone: mmRectNorm } : { box: mmRectNorm };
-    try {
-      const r = await postJSON(ep, body);
-      if (!r || !r.ok) throw new Error();
-      toast(mmMode === "zone" ? "范围已保存，黄点跟踪开始生效" : "小地图位置已保存");
-      closeMm();
-    } catch (e) { toast("保存失败", true); }
   });
 
   tick();
