@@ -2146,6 +2146,7 @@ def draw_skill_ranges(img, box):
     color = BOT_RANGE_ON if on else BOT_RANGE_OFF
     h, w = img.shape[:2]
     face = int(st.get("face") or 0)
+    k = botmod.skill_scale(cfg, (w, h))   # 和 bot 决策用同一个系数，所见即所打
     for i, sk in enumerate(skills[:6]):
         dir_ = sk.get("dir") or "both"
         arrow = ""
@@ -2154,7 +2155,7 @@ def draw_skill_ranges(img, box):
         tag = f"SK{i + 1}"
         # 判定框和 bot 用同一份（朝向镜像/对称展开都在这一个函数里，
         # 画的和打的永远不会对不上）
-        g, j = botmod.skill_rects(sk, box, face)
+        g, j = botmod.skill_rects(sk, box, face, k)
         rects = [(False, g)] + ([(True, j)] if j else [])
         for is_jump, rc in rects:
             x1, y1 = max(2, int(rc[0])), max(2, int(rc[1]))
@@ -2795,6 +2796,13 @@ async def detect_fps(v: int = -1):
 async def bot_get():
     """当前挂机参数 + 这一轮在干什么（面板上「状态」那一行就是这里来的）。"""
     cfg, st = game_bot.snapshot()
+    # 老配置没有 base_w（技能范围是按哪个画面宽度量的）。开面板时用当前画面
+    # 宽度补上：这一刻的尺寸基本就是当初拖框时的尺寸，补完以后换分辨率 / 换
+    # 系统缩放才能等比换算；不补的话只能一直按 1:1 用（换尺寸就缩水/超伸）。
+    if not cfg.get("base_w"):
+        cw = grabber.client_size[0]
+        if cw:
+            cfg = game_bot.update_cfg({"base_w": int(cw)})
     with char_lock:
         has_char = char_state["tpl"] is not None
     with bar_lock:
@@ -2814,6 +2822,13 @@ async def bot_set(payload: dict = Body(...)):
     """改挂机参数（可只传一部分）。传了 on 就走开关那条路，保证线程起停一致。"""
     data = dict(payload or {})
     on = data.pop("on", None)
+    # 技能范围是像素、按「量的时候画面多宽」才有意义：前端拖框用的就是当前
+    # 画面的像素，所以保存技能的同时把基准宽度记下来。以后换分辨率 / 换系统
+    # 缩放（游戏 DPI-unaware，窗口会被位图拉伸）/ RDP 重连，都能按比例复原。
+    if "skills" in data and "base_w" not in data:
+        cw = grabber.client_size[0]
+        if cw:
+            data["base_w"] = int(cw)
     cfg = game_bot.update_cfg(data)
     if on is not None:
         cfg["on"] = game_bot.set_on(on)

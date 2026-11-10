@@ -363,6 +363,11 @@ DEFAULTS = {
     "patrol_sec": 2.5,   # 巡逻换向间隔（秒）
     "move": True,        # 怪在技能范围外时走过去
     "dy_tol": 150,       # 纵向容差：目标候选带在技能范围并集之下再扩这么多（像素）
+    "base_w": 0,
+    # ↑ 技能范围是按「画面宽度 = base_w」量的基准（0 = 未知，1:1 用）。
+    #   技能够得着的距离在游戏世界里是固定的，像素尺寸却 ∝ 渲染分辨率：换窗口
+    #   大小、换系统缩放（游戏是 DPI-unaware，会被 Windows 位图拉伸）、RDP 重连
+    #   都会改这个宽度。运行时长按 base_w 等比换算，打怪范围才不会缩水或超伸。
     "input": "auto",     # 按键出口：auto 优先硬件 / hid 只认硬件 / soft 只用软件注入
     "hid_port": "",      # 硬件串口，留空自动扫描（CH9329 通常挂在 CH343 那个口上）
 }
@@ -383,6 +388,7 @@ CLAMP = {
     "pick_ms": (60, 2000),
     "patrol_sec": (0.5, 20.0),
     "dy_tol": (40, 400),
+    "base_w": (0, 8192),
 }
 
 
@@ -473,7 +479,7 @@ def clamp_cfg(raw):
                 continue
             lo, hi = CLAMP.get(k, (dv, dv))
             out[k] = round(min(hi, max(lo, v)), 2)
-    for k in ("atk_ms", "pick_ms", "dy_tol"):   # 毫秒/像素：整数更好读
+    for k in ("atk_ms", "pick_ms", "dy_tol", "base_w"):   # 毫秒/像素：整数更好读
         out[k] = int(out[k])
     return out
 
@@ -539,11 +545,14 @@ def _intersects(a, b):
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
-def skill_rects(skill, char_box, face=0):
+def skill_rects(skill, char_box, face=0, k=1.0):
     """一个技能的两个判定框（全画面坐标 [x1,y1,x2,y2]）。
 
     ground/jrect 存的是相对人物身体中心的偏移 [左, 右, 上, 下]，
-    是「人物朝右时」量出来的形态（面板上拖框时就是按这个存的）。
+    是「人物朝右时、画面宽度 = cfg["base_w"] 时」量出来的形态（面板上拖框时
+    就是按这个存的）。k = 当前画面宽度 / base_w：换分辨率、换系统缩放（游戏是
+    DPI-unaware，窗口会被 Windows 位图拉伸）后等比放大/缩小，技能在世界里够得着
+    的距离不变，画面上的框和实际判定也始终是同一个东西。
 
     dir=front（身前单向）：框随朝向整体**镜像**——朝右是 [左,右]，朝左
     就翻成 [右,左]（形状不变，够得着的区域跟着人一起翻）。以前按“只留
@@ -565,13 +574,25 @@ def skill_rects(skill, char_box, face=0):
                 l = r = max(l, r)     # 不知道朝哪：对称展开
         return [cx - l, cy - u, cx + r, cy + d]
 
-    l, r, u, d = (float(v) for v in skill["ground"])
+    l, r, u, d = (float(v) * k for v in skill["ground"])
     ground = mk(l, r, u, d)
     jump = None
     if skill.get("jump"):
-        jl, jr, ju, jd = (float(v) for v in skill["jrect"])
+        jl, jr, ju, jd = (float(v) * k for v in skill["jrect"])
         jump = mk(jl, jr, ju, jd)
     return ground, jump
+
+
+def skill_scale(cfg, size):
+    """当前画面相对技能基准宽度的比例（base_w 未知就 1:1）。
+
+    钳在 0.3~3.0：再离谱的值只可能是尺寸读错（窗口最小化时 client_size 是 0），
+    与其把范围放大成整屏，不如按 1:1 打。
+    """
+    bw = float((cfg or {}).get("base_w") or 0)
+    if bw <= 0 or not size or not size[0]:
+        return 1.0
+    return min(3.0, max(0.3, float(size[0]) / bw))
 
 
 def _nearest_box(monsters, cx):
@@ -927,12 +948,12 @@ class Bot:
             self._t_pick = now
             self._count("pick")
 
+        size = st.get("size")
         char = st.get("char")
         if not char:
             # 识别不到人物：默认人就在画面正中心（相机锁人，角色基本贴着
             # 画面中间），拿假锚点继续打，别整段停摆。连画面尺寸都没有
             # （窗口都没了）才像以前那样松手认栽。
-            size = st.get("size")
             if not size:
                 self._set_dir(0)
                 self._reset_face()
@@ -956,12 +977,13 @@ class Bot:
         #    单体；同类型里排前面的先用。地面框罩到 = 直接放；只在跳放框里 =
         #    跳 → 100ms → 技能键。全部技能都罩不到 → 走路 / 巡逻。
         monsters = st.get("monsters") or []
+        k = skill_scale(cfg, size)   # 换分辨率/换 DPI 后技能范围等比换算
         cands = []          # (skill, 地面框, 跳放框, 地面怪, 跳放怪)
         band = None         # 所有判定框的并集：走路目标的候选带
         for sk in cfg.get("skills") or []:
             if not sk.get("key"):
                 continue                     # 还没录按键的技能不参与
-            g, j = skill_rects(sk, char)
+            g, j = skill_rects(sk, char, k=k)
             gm = [m for m in monsters if m.get("box") and _intersects(g, m["box"])]
             jm = [m for m in monsters if j and m.get("box") and _intersects(j, m["box"])]
             if gm or jm:
@@ -974,7 +996,7 @@ class Bot:
         if not cands:
             # 没有技能罩得住的怪：像以前一样朝最近的目标走 / 巡逻
             self._set_status(target="")
-            tgt = _band_target(char, monsters, band, cfg["dy_tol"])
+            tgt = _band_target(char, monsters, band, cfg["dy_tol"] * k)
             if tgt:
                 tb = tgt["box"]
                 dx = _cx(tb) - _cx(char)

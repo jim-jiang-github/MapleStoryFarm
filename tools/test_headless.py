@@ -554,6 +554,42 @@ srv.game_bot.cfg["on"] = _cfg0["on"]
 srv.game_bot.cfg["skills"] = _cfg0["skills"]
 srv.game_bot._status["face"] = 0
 
+# 换分辨率 / 换系统缩放：技能范围按 base_w 等比，画框和判定用同一个系数
+print("  -- 画框回归：换画面尺寸后技能框等比（base_w）")
+
+
+def _sk_span_at(w, h, base_w):
+    srv.game_bot.cfg["on"] = True
+    srv.game_bot.cfg["base_w"] = base_w
+    srv.game_bot.cfg["skills"] = [{"key": "KeyS", "type": "single", "dir": "both",
+                                   "ground": [100, 100, 60, 60], "jump": False,
+                                   "jrect": [100, 100, 100, 60]}]
+    im = np.full((h, w, 3), 150, np.uint8)
+    bx = [w / 2 - 20, h / 2 - 6, w / 2 + 20, h / 2 + 6]
+    srv.draw_skill_ranges(im, bx)
+    xs = np.nonzero(np.any(im != 150, axis=2))[1]
+    return None if len(xs) == 0 else int(xs.max() - xs.min())
+
+
+_s1 = _sk_span_at(1280, 720, 1280)
+_s2 = _sk_span_at(1920, 1080, 1280)
+_s3 = _sk_span_at(1920, 1080, 0)
+check("基准宽度下框宽 ≈200（±100）", _s1 and 190 <= _s1 <= 240, _s1)
+check("画面放大 1.5 倍后框宽 ≈300（按 base_w 等比）",
+      _s1 and _s2 and abs(_s2 - _s1 * 1.5) <= 25, (_s1, _s2))
+check("base_w 未知（老配置）时 1:1，框还是 ≈200",
+      _s3 and 190 <= _s3 <= 240, _s3)
+# 保存那一刻的画面宽度就是基准：前端拖框用的也是当前画面像素，两边天然对齐
+_cw = srv.grabber.client_size[0]
+_r = post("/api/bot/set", {"skills": [{"key": "KeyS", "type": "aoe", "dir": "both",
+                                       "ground": [100, 100, 60, 60], "jump": False}]})
+check("保存技能时把当时的画面宽度记成 base_w",
+      _cw > 0 and _r[1]["cfg"]["base_w"] == _cw,
+      (_cw, _r[1]["cfg"].get("base_w")))
+srv.game_bot.cfg["base_w"] = _cfg0.get("base_w", 0)
+srv.game_bot.cfg["on"] = _cfg0["on"]
+srv.game_bot.cfg["skills"] = _cfg0["skills"]
+
 # 丢人兜底：识别不到人物时技能框锚到画面正中心（bot 此刻打的就是这个位置，
 # 所见即所打）；ME 标记不画（不造假分数）
 print("  -- 画框回归：丢人时技能框锚到画面正中心")

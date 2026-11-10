@@ -2543,13 +2543,19 @@
     if (skillDragEl || skillSel >= 0) return;   // 正在排序 / 编辑范围：别动
     if (rec && rec.skSkill) return;             // 正在录快捷键
     if (Date.now() < skillLockUntil) return;    // 本地刚改过，等回包
-    const snap = JSON.stringify(cfg.skills);
+    // 后端存的是「基准画面宽度 base_w」下的像素。换算到当前画面再显示/拖拽，
+    // 否则换分辨率或换系统缩放后，编辑框会比后端实际判定大/小一圈（判定已经
+    // 按同一比例缩放了，前端不跟就会「看到的不等于打到的」）。
+    const bw = Number(cfg.base_w) || 0;
+    const k = (bw > 0 && lastFrameW) ? lastFrameW / bw : 1;
+    const sc = (r) => r.map((v) => Math.round(Number(v) * k * 10) / 10);
+    const snap = JSON.stringify([cfg.skills, bw, Math.round(k * 1000)]);
     if (snap === skillSnap) return;             // 没变别重画（重画会闪）
     skillSnap = snap;
     skillsNow = cfg.skills.map((s) => ({
       key: s.key || "", type: s.type || "aoe", dir: s.dir || "both",
-      ground: [...(s.ground || SK_DFLT.ground)],
-      jump: !!s.jump, jrect: [...(s.jrect || SK_DFLT.jrect)],
+      ground: sc(s.ground || SK_DFLT.ground),
+      jump: !!s.jump, jrect: sc(s.jrect || SK_DFLT.jrect),
     }));
     renderSkills();
   }

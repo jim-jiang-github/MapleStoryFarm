@@ -508,5 +508,35 @@ c = step(b, m=[{"name": "Stump", "box": [700, 300, 760, 360], "conf": 0.9}],
 check("不按方向/攻击", not any(k in ("left", "right", ATK) for k in down_keys(c)), c)
 check("状态是找不到人物", b.snapshot()[1]["act"] == "找不到人物", b.snapshot()[1])
 
+print("\n[28] 换分辨率 / 换系统缩放：技能范围按基准宽度等比换算")
+SK_B = {"key": ATK, "type": "aoe", "dir": "both",
+        "ground": [100, 100, 60, 60], "jump": False}
+b = make()
+b.cfg = bot.clamp_cfg({**bot.DEFAULTS, "base_w": 1366, "skills": [SK_B]})
+check("clamp_cfg 保留 base_w", b.cfg["base_w"] == 1366, b.cfg.get("base_w"))
+check("base_w 非法值归 0（当未知处理）",
+      bot.clamp_cfg({"base_w": -5})["base_w"] == 0)
+g1, _ = bot.skill_rects(b.cfg["skills"][0], CHAR)
+check("画面宽度 = base_w 时范围原样（±100 → 200 宽）",
+      round(g1[2] - g1[0]) == 200, g1)
+g2, _ = bot.skill_rects(b.cfg["skills"][0], CHAR, k=1.5)
+check("画面宽了 1.5 倍后范围等比放大（±150 → 300 宽）",
+      round(g2[2] - g2[0]) == 300 and abs(bot._cx(g2) - bot._cx(g1)) < 1e-9, g2)
+check("skill_scale 按当前画面宽度算系数",
+      abs(bot.skill_scale(b.cfg, (2049, 1152)) - 1.5) < 1e-6,
+      bot.skill_scale(b.cfg, (2049, 1152)))
+check("没有画面尺寸（窗口没了）时退回 1:1",
+      bot.skill_scale(b.cfg, None) == 1.0 and bot.skill_scale(b.cfg, (0, 0)) == 1.0)
+check("base_w 未知（老配置）时也是 1:1，行为不变",
+      bot.skill_scale({"base_w": 0}, (2049, 1152)) == 1.0)
+
+# 同一只怪：1366 基准下框只到 ±100（够不着），2049 画面下 ±150（够得着）
+M_FAR = [{"name": "Stump", "box": [740, 290, 780, 320], "conf": 0.9}]
+c = step(b, m=M_FAR, size=(1366, 768))
+check("1366 画面下 250px 外的怪在框外 → 不出手", ATK not in down_keys(c), down_keys(c))
+c = step(b, m=M_FAR, size=(2049, 1152))
+check("2049 画面下同一只怪进框 → 出手（范围跟着放大）",
+      ATK in down_keys(c), down_keys(c))
+
 print(f"\n通过 {ok} / {ok + fail}")
 sys.exit(1 if fail else 0)
