@@ -72,7 +72,8 @@ check("默认技能 1 个、键 ControlLeft", sk0["key"] == "ControlLeft", sk0)
 check("默认地面范围 左右100 上下60", sk0["ground"] == [100, 100, 60, 60], sk0["ground"])
 check("默认可跳放、跳放上扩 200", sk0["jump"] and sk0["jrect"][2] == 200, sk0["jrect"])
 check("喝药间隔默认 3.0s", bot.DEFAULTS["pot_sec"] == 3.0, bot.DEFAULTS["pot_sec"])
-check("放技能间隔默认 420ms", bot.DEFAULTS["atk_ms"] == 420, bot.DEFAULTS["atk_ms"])
+check("放技能间隔已移除（节奏由各技能 CD 管）", "atk_ms" not in bot.DEFAULTS,
+      bot.DEFAULTS.get("atk_ms"))
 check("喝药键默认 8", bot.DEFAULTS["pot_key"] == "pot8", bot.DEFAULTS["pot_key"])
 
 print("[1] 怪在攻击距离内 → 先转身，同一帧不出手")
@@ -211,11 +212,10 @@ c = step(b)
 check("换向", b._held == -first, (first, b._held))
 
 print("[14] 配置钳位")
-cfg = bot.clamp_cfg({"hp_pct": 300, "pot_sec": 0, "atk_ms": 99999,
+cfg = bot.clamp_cfg({"hp_pct": 300, "pot_sec": 0,
                      "pot_key": "zzz", "pick": 0})
 check("hp_pct 钳到 95", cfg["hp_pct"] == 95.0, cfg)
 check("pot_sec 钳到 0.5", cfg["pot_sec"] == 0.5, cfg)
-check("atk_ms 钳到 3000", cfg["atk_ms"] == 3000, cfg)
 check("非法药键退回默认", cfg["pot_key"] == "pot8", cfg)
 check("pick 转布尔", cfg["pick"] is False, cfg)
 
@@ -379,11 +379,11 @@ b.cfg["skills"] = [FWD_SK]
 t = 5000.0
 c = step(b, now=t, m=left_mon)
 check("先出技能", down_keys(c) == ["KeyA"], c)
-c = step(b, now=t + 0.3, m=left_mon)          # 冷却中
+c = step(b, now=t + 0.1, m=left_mon)          # 150ms 防抖底线内 = 冷却中
 check("冷却中不重复转身", down_keys(c) == [], c)
-c = step(b, now=t + 0.7, m=left_mon)          # 420ms 冷却到
+c = step(b, now=t + 0.4, m=left_mon)          # 底线过了
 check("冷却好了先重新对正", down_keys(c) == ["left"], c)
-c = step(b, now=t + 0.85, m=left_mon)
+c = step(b, now=t + 0.55, m=left_mon)
 check("对正之后才出技能", down_keys(c) == ["KeyA"], c)
 
 print("[20] 正前方 + 头顶的怪：没对正先转身，对正了才跳放")

@@ -715,12 +715,7 @@
               <span class="k">血线</span>
               <span class="v"><input id="hpRange" class="rng" type="range" min="10" max="95" step="5" value="40" title="血量低于这个百分比就喝药；读不到血量（血条没标定）时不会瞎按。HP 血条下面那个三角箭头就是这条线"><b id="hpVal">40%</b></span>
             </div>
-            <!-- 攻击距离/方向/高度三行不要了：技能系统里每个技能有自己的范围（卡片里填数字） -->
-            <div class="row conf">
-              <span class="k">放技能间隔</span>
-              <span class="v"><input id="atkRange" class="rng" type="range" min="150" max="1200" step="10" value="420" title="两次放技能的最小间隔（毫秒）。太小会一直按着打不出伤害，太大浪费输出"><b id="atkVal">420ms</b></span>
-            </div>
-            <div class="row conf">
+            <!-- 攻击距离/方向/高度/放技能间隔都不要了：节奏由各技能自己的 CD 管 -->            <div class="row conf">
               <span class="k">拾取</span>
               <span class="v"><button id="pickBtn" class="mini on" title="全程无脑按拾取键捡东西，跟打怪互不影响">开</button><button id="pickKey" class="slot" data-hint="Z" title="捡东西按的键，跟游戏里的「拾取」对应。点格子 → 按一个键即设置" data-cfg="pick_key" data-def="KeyZ"></button><b class="sub">130ms</b></span>
             </div>
@@ -2310,7 +2305,6 @@
   const botUI = {
     hp: [$("hpRange"), $("hpVal"), "hp_pct", (v) => `${Math.round(v)}%`],
     mp: [$("mpRange"), $("mpVal"), "mp_pct", (v) => `${Math.round(v)}%`],
-    atk: [$("atkRange"), $("atkVal"), "atk_ms", (v) => `${Math.round(v)}ms`],
   };
   let botLockUntil = 0;
 
@@ -2602,7 +2596,6 @@
     if (Date.now() > botLockUntil) {        // 正在拖滑块的这一下不覆盖
       $("hpRange").value = cfg.hp_pct;
       $("mpRange").value = cfg.mp_pct;
-      $("atkRange").value = cfg.atk_ms;
       $("inputSel").value = cfg.input;
       paintBotVals();
       paintChains(cfg);                   // 红/蓝备用药水键显示成键名
@@ -2892,7 +2885,7 @@
           <div class="skrow"><span>范围</span>${numRow("g")}</div>
           <span class="skhint"></span>
           <label class="skjump"><input type="checkbox" class="skjp"> 可跳放（空中施放：跳 → 100ms → 技能键）</label>
-          <label class="skcd" title="这个技能自己的冷却（毫秒），照游戏里的 CD 填。没转好就不出它；首选技能全在 CD 时会用别的转好了的技能补位。0 = 不单独限，只吃「攻击间隔」">
+          <label class="skcd" title="这个技能自己的冷却（毫秒），照游戏里的 CD 填。没转好就不出它；首选技能全在 CD 时会用别的转好了的技能补位。0 = 不单独限（只有 150ms 的按键防抖底线）">
             技能CD <input type="number" class="skcdv" min="0" max="30000" step="50"> ms
           </label>
           <div class="skjbox">

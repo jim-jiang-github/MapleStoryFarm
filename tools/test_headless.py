@@ -536,7 +536,7 @@ code, r = post("/api/bot/set", {
     "skills": SKILLS, "pot_key": "Digit1",
     "pot_chain": ["Digit2", "Digit3", "Digit4", "Digit5"],
     "mp_key": "Digit9", "mp_chain": [], "pot_sec": 0.5, "hp_pct": 40, "mp_pct": 30,
-    "atk_ms": 200, "pick": False, "patrol": False, "move": True})
+    "pick": False, "patrol": False, "move": True})
 check("挂机参数下发 ok（技能表原样保存）",
       code == 200 and [s["key"] for s in r["cfg"]["skills"]] == ["KeyS", "KeyD"], r)
 

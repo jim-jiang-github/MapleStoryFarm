@@ -12,7 +12,7 @@
   3) 技能选择：按列表顺序（= 优先级）逐个算判定框（skill_rects，画面上画的
      就是它们，与怪物框有交集才算罩到）。怪 ≥2 优先群攻、只有 1 只优先单体；
      技能自己的 CD 没转好不出它，首选类型的全在 CD 里就用别的转好了的补位。
-     地面框罩到 → 转向 + 按技能键（默认 420ms 全局间隔）；只在跳放框里 →
+     地面框罩到 → 转向 + 按技能键（150ms 防抖底线，节奏由各技能 CD 管）；只在跳放框里 →
      跳（Alt）→ 100ms → 技能键。范围只盖一边的技能每刀前重新点一次方向键
      对正——朝向读不到，宁可按一下也不空放
   4) 有目标但所有技能都罩不到 → 朝它走（只按左右，这个场景没有纵向移动）
@@ -107,6 +107,8 @@ JUMP_COOLDOWN_MS = 900    # 两次跳的最小间隔：起跳+落地+站稳要�
 MOVE_FACE_PX = 10         # 朝向观测阈值：身体中心往一边累计挪过这么多像素 = 朝那边
                          # （模板匹配的抖动就 ±几像素，凑不够这个数，不会误翻）
 JUMP_CAST_MS = 100        # 跳放连招：按下跳键后隔这么久再按技能键（起跳到能出手的手感值）
+ATK_GAP_MS = 150          # 两次出手之间的防抖底线（毫秒）：技能 CD 都填 0 也不能按着
+                          # 20ms 的决策循环狂按；真正的出手节奏由各技能自己的 CD 管
 
 KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
@@ -355,14 +357,13 @@ DEFAULTS = {
     #   jump   可跳放（空中施放）；jrect 跳放范围：怪在 jrect 内、ground 外
     #          就按「跳 → 100ms → 技能键」的连招打
     #   cd_ms  这个技能自己的冷却（毫秒），照游戏里的技能 CD 填。0 = 不单独
-    #          限（只吃全局攻击间隔 atk_ms）。没转好的技能不出；首选类型的
+    #          限（只吃 150ms 的按键防抖底线）。没转好的技能不出；首选类型的
     #          技能全在 CD 里时，用别的转好了的技能补位，不干站着挨打。
     "skills": [
         {"key": "ControlLeft", "type": "aoe", "dir": "center",
          "ground": [100, 100, 60, 60],
          "jump": True, "jrect": [100, 100, 200, 60], "cd_ms": 0},
     ],
-    "atk_ms": 420,       # 两次放技能的最小间隔（毫秒）
     "pick": True,        # 全程按 Z 拾取
     "pick_ms": 130,      # 拾取按键间隔（毫秒）
     "patrol": True,      # 视野里没怪时左右来回走
@@ -390,7 +391,6 @@ CLAMP = {
     "hp_pct": (10.0, 95.0),
     "mp_pct": (10.0, 95.0),
     "pot_sec": (0.5, 30.0),
-    "atk_ms": (120, 3000),
     "pick_ms": (60, 2000),
     "patrol_sec": (0.5, 20.0),
     "dy_tol": (40, 400),
@@ -523,7 +523,7 @@ def clamp_cfg(raw):
                 continue
             lo, hi = CLAMP.get(k, (dv, dv))
             out[k] = round(min(hi, max(lo, v)), 2)
-    for k in ("atk_ms", "pick_ms", "dy_tol", "base_w"):   # 毫秒/像素：整数更好读
+    for k in ("pick_ms", "dy_tol", "base_w"):   # 毫秒/像素：整数更好读
         out[k] = int(out[k])
     return out
 
@@ -1214,7 +1214,7 @@ class Bot:
         side = 1 if dx >= 0 else -1
         self._set_status(target=f"{_key_label(sk['key'])} 技能 · {int(abs(dx))}px")
 
-        atk_ready = (now - self._t_atk) * 1000.0 >= cfg["atk_ms"]
+        atk_ready = (now - self._t_atk) * 1000.0 >= ATK_GAP_MS
         settling = (now - self._t_turn) * 1000.0 < TURN_SETTLE_MS
         # 上一次转身之后还没出过手 = 朝向只是「记得对」，不是「刚确认过」。
         # 被击退、复活、手动走两步都会让记忆失准；范围只盖一边的技能失准就是
