@@ -10,8 +10,9 @@
   1) 血低于门限 → 喝药（有独立冷却，默认 3 秒）
   2) 全程按拾取键（默认 130ms 一次，无脑一直按）
   3) 技能选择：按列表顺序（= 优先级）逐个算判定框（skill_rects，画面上画的
-     就是它们，与怪物框有交集才算罩到）。怪 ≥2 优先群攻、只有 1 只优先单体。
-     地面框罩到 → 转向 + 按技能键（默认 420ms 冷却）；只在跳放框里 →
+     就是它们，与怪物框有交集才算罩到）。怪 ≥2 优先群攻、只有 1 只优先单体；
+     技能自己的 CD 没转好不出它，首选类型的全在 CD 里就用别的转好了的补位。
+     地面框罩到 → 转向 + 按技能键（默认 420ms 全局间隔）；只在跳放框里 →
      跳（Alt）→ 100ms → 技能键。范围只盖一边的技能每刀前重新点一次方向键
      对正——朝向读不到，宁可按一下也不空放
   4) 有目标但所有技能都罩不到 → 朝它走（只按左右，这个场景没有纵向移动）
@@ -353,10 +354,13 @@ DEFAULTS = {
     #          形态，面板只是换了个更不容易填反的说法。
     #   jump   可跳放（空中施放）；jrect 跳放范围：怪在 jrect 内、ground 外
     #          就按「跳 → 100ms → 技能键」的连招打
+    #   cd_ms  这个技能自己的冷却（毫秒），照游戏里的技能 CD 填。0 = 不单独
+    #          限（只吃全局攻击间隔 atk_ms）。没转好的技能不出；首选类型的
+    #          技能全在 CD 里时，用别的转好了的技能补位，不干站着挨打。
     "skills": [
         {"key": "ControlLeft", "type": "aoe", "dir": "center",
          "ground": [100, 100, 60, 60],
-         "jump": True, "jrect": [100, 100, 200, 60]},
+         "jump": True, "jrect": [100, 100, 200, 60], "cd_ms": 0},
     ],
     "atk_ms": 420,       # 两次放技能的最小间隔（毫秒）
     "pick": True,        # 全程按 Z 拾取
@@ -456,6 +460,10 @@ def _clamp_skills(v, dflt):
             key = s.get("key")
             g = _clamp_rect4(s.get("ground"), base["ground"])
             d = _skill_dir(s.get("dir"), g)
+            try:                              # CD 是毫秒数：0~30000，非法退 0
+                cd = int(min(30000, max(0, float(s.get("cd_ms") or 0))))
+            except (TypeError, ValueError):
+                cd = 0
             out.append({
                 "key": key if key in CODE_VK else "",
                 "type": s.get("type") if s.get("type") in ("aoe", "single") else "aoe",
@@ -463,6 +471,7 @@ def _clamp_skills(v, dflt):
                 "ground": norm_skill_rect(g, d),
                 "jump": bool(s.get("jump")),
                 "jrect": norm_skill_rect(_clamp_rect4(s.get("jrect"), base["jrect"]), d),
+                "cd_ms": cd,
             })
     return out
 
@@ -758,6 +767,7 @@ class Bot:
         self._mp_mp0 = 0.0
         self._t_atk = 0.0
         self._t_jump = 0.0
+        self._t_sk = {}         # 每个技能上次出手的时刻（键 = 技能键名）
         self._t_pick = 0.0
         self._t_patrol = 0.0
         self._patrol_dir = 1
@@ -1185,7 +1195,19 @@ class Bot:
         # 想要的类型里没有能用的，就退回这一池里任意可用技能
         want = "aoe" if any(_n(gm, jm) >= 2 for _, _, _, gm, jm in pool0) else "single"
         pool = [c for c in pool0 if c[0]["type"] == want] or pool0
-        sk, g, j, gm, jm = pool[0]
+        # 技能自己的 CD（游戏里的技能冷却）：没转好的不选；首选类型的技能全在
+        # CD 里 → 用池子里其它转好了的技能补位。冷却里干站着挨打，不如先把
+        # 够得着的技能甩出去。全都没转好就仍按类型选，状态栏报「等CD」。
+        def _sk_ready(s):
+            return (now - self._t_sk.get(s["key"], 0.0)) * 1000.0 >= (s.get("cd_ms") or 0)
+
+        def _cd_left(s):
+            return ((s.get("cd_ms") or 0)
+                    - (now - self._t_sk.get(s["key"], 0.0)) * 1000.0) / 1000.0
+
+        ready = [c for c in pool if _sk_ready(c[0])] \
+            or [c for c in pool0 if _sk_ready(c[0])]
+        sk, g, j, gm, jm = (ready or pool)[0]
 
         mb = _nearest_box(gm or jm, _cx(char))
         dx = _cx(mb) - _cx(char)
@@ -1217,13 +1239,16 @@ class Bot:
                 # 刚转完身，等游戏把朝向渲染出来再出手
                 self._set_status(act="等朝向生效")
                 return
-            if atk_ready:
+            if atk_ready and _sk_ready(sk):
                 self._tap(sk["key"])
                 self._t_atk = now
+                self._t_sk[sk["key"]] = now
                 self._count("atk")
                 self._set_status(act=f"放技能 {_key_label(sk['key'])}", err="")
-            else:
+            elif not atk_ready:
                 self._set_status(act="等冷却")
+            else:
+                self._set_status(act=f"等CD {max(0.0, _cd_left(sk)):.1f}s")
         else:
             # 怪只在跳放框里（头顶 / 更远）：起跳 → 空中按技能键。
             # 以人物为中心的框两边都够，直接跳；正前方先对正再起跳，
@@ -1235,14 +1260,18 @@ class Bot:
                 self._t_turn = now
                 self._set_status(act="转身朝目标", err="")
                 return
-            if not jump_ready or not atk_ready:
-                self._set_status(act="等跳跃冷却" if not jump_ready else "等冷却")
+            if not jump_ready or not atk_ready or not _sk_ready(sk):
+                act = ("等跳跃冷却" if not jump_ready else
+                       "等冷却" if not atk_ready else
+                       f"等CD {max(0.0, _cd_left(sk)):.1f}s")
+                self._set_status(act=act)
                 return
             self._tap(cfg["jump_key"])
             time.sleep(JUMP_CAST_MS / 1000.0)
             self._tap(sk["key"])
             self._t_jump = now
             self._t_atk = now
+            self._t_sk[sk["key"]] = now
             self._count("jmp")
             self._count("atk")
             self._set_status(act=f"跳放 {_key_label(sk['key'])}", err="")

@@ -234,7 +234,7 @@ check("旧配置（atk_key+距离/高度）自动换成第一个技能",
       bot.clamp_cfg({"atk_key": "KeyX", "range_px": 80, "range_h": 100,
                      "jump_reach": 120})["skills"] ==
       [{"key": "KeyX", "type": "aoe", "dir": "center", "ground": [80.0, 80.0, 50.0, 50.0],
-        "jump": True, "jrect": [80.0, 80.0, 170.0, 50.0]}])
+        "jump": True, "jrect": [80.0, 80.0, 170.0, 50.0], "cd_ms": 0}])
 check("旧配置 range_side=front 带进 dir",
       bot.clamp_cfg({"atk_key": "KeyX", "range_side": "front"})["skills"][0]["dir"] == "front")
 check("乱写的 dir 退回 center",
@@ -244,10 +244,10 @@ check("旧值 left/right 迁移成 front（没有固定单边的技能）",
                                 {"key": "KeyB", "dir": "right"}]})["skills"]
       == [{"key": "KeyA", "type": "aoe", "dir": "front",
            "ground": [0.0, 100.0, 60.0, 60.0], "jump": False,
-           "jrect": [0.0, 100.0, 200.0, 60.0]},
+           "jrect": [0.0, 100.0, 200.0, 60.0], "cd_ms": 0},
           {"key": "KeyB", "type": "aoe", "dir": "front",
            "ground": [0.0, 100.0, 60.0, 60.0], "jump": False,
-           "jrect": [0.0, 100.0, 200.0, 60.0]}])
+           "jrect": [0.0, 100.0, 200.0, 60.0], "cd_ms": 0}])
 
 
 def _dir_of(ground, d):
@@ -259,7 +259,7 @@ check("旧 both + 左右相等 → 归类成 center（就是「以人物为中�
 check("旧 both + 左右不等（左0 右140）→ 归类成 front（只打身前那半边）",
       _dir_of([0, 140, 55, 31], "both") ==
       {"key": "KeyA", "type": "aoe", "dir": "front", "ground": [0.0, 140.0, 55.0, 31.0],
-       "jump": False, "jrect": [0.0, 100.0, 200.0, 60.0]})
+       "jump": False, "jrect": [0.0, 100.0, 200.0, 60.0], "cd_ms": 0})
 check("center 存成规范形态：左右相等（取大的一边）",
       _dir_of([20, 200, 55, 31], "center")["ground"] == [200.0, 200.0, 55.0, 31.0])
 check("front 存成规范形态：左恒为 0",
@@ -490,6 +490,53 @@ c = step(b, m=one)
 settle(b)
 c = step(b, m=one)
 check("没键的技能被跳过，用 KeyD", down_keys(c) == ["KeyD"], c)
+
+print("[21f] 技能自己的 CD：单体没转好 → 群攻补位；全在 CD → 等CD 不空转")
+b = make()
+b.cfg["skills"] = [
+    {"key": "KeyS", "type": "single", "ground": [200, 200, 60, 60],
+     "jump": False, "jrect": [200, 200, 120, 60], "cd_ms": 2000},
+    {"key": "KeyD", "type": "aoe", "ground": [200, 200, 60, 60],
+     "jump": False, "jrect": [200, 200, 120, 60], "cd_ms": 1000},
+]
+step(b, now=100.0, m=one)                 # 第一帧转身
+c = step(b, now=100.2, m=one)             # 转完 → 单体先出手
+check("单体转好 → 先用 KeyS", down_keys(c) == ["KeyS"], c)
+c = step(b, now=100.8, m=one)             # KeyS 在 CD（到 102.2）→ KeyD 补位
+check("单体在 CD → 群攻 KeyD 补位", down_keys(c) == ["KeyD"], c)
+check("状态是放技能 KeyD",
+      b.snapshot()[1]["act"] == f"放技能 {bot._key_label('KeyD')}", b.snapshot()[1])
+c = step(b, now=101.5, m=one)             # KeyS 到 102.2 / KeyD 到 101.8，全在 CD
+check("全在 CD → 不出技能", down_keys(c) == [], c)
+check("状态报等CD", b.snapshot()[1]["act"].startswith("等CD"), b.snapshot()[1]["act"])
+c = step(b, now=102.3, m=one)             # KeyS 转好 → 回到单体
+check("CD 转好 → 回到 KeyS", down_keys(c) == ["KeyS"], c)
+
+print("[21g] 跳放也吃技能 CD：CD 里不重复起跳")
+b = make()
+b.cfg["skills"] = [
+    {"key": "KeyS", "type": "single", "ground": [0, 0, 40, 40],
+     "jump": False, "jrect": [0, 0, 0, 0], "cd_ms": 0},
+    {"key": "KeyD", "type": "aoe", "ground": [0, 0, 40, 40],
+     "jump": True, "jrect": [400, 400, 320, 60], "cd_ms": 5000},
+]
+c = step(b, now=100.0, m=top)
+check("第一次正常跳放", down_keys(c) == [JUMP, "KeyD"], c)
+c = step(b, now=101.2, m=top)             # 跳跃冷却过了，但 KeyD 的 CD 没到
+check("技能 CD 里不起跳", down_keys(c) == [], c)
+check("状态报等CD", b.snapshot()[1]["act"].startswith("等CD"), b.snapshot()[1]["act"])
+
+print("[21h] cd_ms 落库钳位：非法退 0、越界压 30000")
+cdcfg = bot.clamp_cfg({"skills": [
+    {"key": "KeyA", "cd_ms": "abc"},
+    {"key": "KeyB", "cd_ms": 99999},
+]})
+check("非法字符串 → 0", cdcfg["skills"][0]["cd_ms"] == 0, cdcfg["skills"][0])
+check("超过 30000 压到 30000", cdcfg["skills"][1]["cd_ms"] == 30000,
+      cdcfg["skills"][1])
+oldcfg = bot.clamp_cfg({"skills": [{"key": "KeyA"}]})
+check("老配置没写 cd_ms → 补 0（行为不变）", oldcfg["skills"][0]["cd_ms"] == 0,
+      oldcfg["skills"][0])
 
 print("[22] 喝药链：主键按了血量没涨 → 按备用 1→4 换着喝")
 pot_presses = lambda c: [n for n, d in c if d and (n.startswith("pot") or n in ("KeyA", "KeyS"))]

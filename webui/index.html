@@ -264,6 +264,18 @@
   .skjump { display: flex; align-items: center; gap: 5px; font-size: 11px;
             color: var(--muted); cursor: pointer; user-select: none; }
   .skjump input { margin: 0; }
+  /* 技能自己的 CD：数字输入 + 单位，跟「可跳放」同一行风格 */
+  .skcd {
+    display: flex; align-items: center; gap: 5px; font-size: 11px;
+    color: var(--muted); user-select: none;
+  }
+  .skcd input {
+    width: 64px; margin: 0; padding: 2px 5px;
+    font: inherit; font-size: 11.5px; color: var(--text);
+    background: #fff; border: 1px solid var(--border); border-radius: 6px;
+    outline: none;
+  }
+  .skcd input:focus { border-color: #a8a29e; }
   .skjbox { border: 1px dashed var(--border); border-radius: 6px; padding: 6px 8px;
             display: flex; flex-direction: column; gap: 6px; }
   .btrack i {
@@ -2879,6 +2891,9 @@
           <div class="skrow"><span>范围</span>${numRow("g")}</div>
           <span class="skhint"></span>
           <label class="skjump"><input type="checkbox" class="skjp"> 可跳放（空中施放：跳 → 100ms → 技能键）</label>
+          <label class="skcd" title="这个技能自己的冷却（毫秒），照游戏里的 CD 填。没转好就不出它；首选技能全在 CD 时会用别的转好了的技能补位。0 = 不单独限，只吃「攻击间隔」">
+            技能CD <input type="number" class="skcdv" min="0" max="30000" step="50"> ms
+          </label>
           <div class="skjbox">
             <div class="skrow"><span>跳放</span>${numRow("j")}</div>
             <span class="skjnote">这套只管「跳起来那一下」，和上面的地面范围完全独立。两套都实时画在左边的画面上：实线橙 = 地面，虚线青 = 跳放。</span>
@@ -2923,6 +2938,8 @@
       card.querySelector(".skdir").value = s.dir === "front" ? "front" : "center";
       card.querySelector(".skjp").checked = !!s.jump;
       card.querySelector(".skjbox").style.display = s.jump ? "" : "none";
+      const cdEl = card.querySelector(".skcdv");
+      cdEl.value = s.cd_ms || 0;
 
       // 三条滑块：把当前值填回去（用户正在拖的那条不覆盖，免得跟手打架）。
       // 配置里存的是 [左,右,上,下]（按朝右量的规范形态），面板只露 宽/上/下，
@@ -2975,7 +2992,9 @@
         const wd = Math.round(isFront() ? (Number(g[1]) || 0)
                                        : (Number(g[0]) || 0) + (Number(g[1]) || 0));
         sumEl.textContent = `宽 ${wd} · 上 ${Math.round(Number(g[2]) || 0)}`
-          + ` · 下 ${Math.round(Number(g[3]) || 0)}` + (t.jump ? " · 可跳放" : "");
+          + ` · 下 ${Math.round(Number(g[3]) || 0)}`
+          + (t.jump ? " · 可跳放" : "")
+          + (t.cd_ms ? ` · CD ${t.cd_ms}ms` : "");
       };
       paintBars(); paintHint(); paintSum();
       bars.forEach((el) => {
@@ -3023,6 +3042,15 @@
         paintSum();
         commitSkills(); drawMasks();
       });
+      cdEl.addEventListener("change", () => {
+        if (!at()) return;
+        const n = Math.max(0, Math.min(30000, Math.round(Number(cdEl.value) || 0)));
+        at().cd_ms = n;
+        cdEl.value = n;
+        paintSum();
+        commitSkills();
+      });
+      cdEl.addEventListener("keydown", (e) => e.stopPropagation());
       card.querySelector(".skdel").addEventListener("click", () => {
         skillsNow.splice(i, 1);
         // 折叠状态和选中项都按下标存，删掉一张后面整体前移，得跟着挪

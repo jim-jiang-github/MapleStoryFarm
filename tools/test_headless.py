@@ -327,9 +327,9 @@ check("GET /api/stats 200 且含 bot_on/window_found",
       code == 200 and "bot_on" in stats and "window_found" in stats)
 check("人物识别状态行存在（识别出错/多久没认到都直接写在面板上）",
       b'id="charStat"' in html and b'paintCharStat' in html)
-check("技能范围是滑块（宽/上/下），不再是数字输入框",
+check("技能范围是滑块（宽/上/下），数字输入框只允许技能 CD 那一个",
       b'skgrid' in html and b'class="skr"' in html and b'data-a="w"' in html
-      and b'type="number"' not in html)
+      and html.count(b'type="number"') == html.count(b'class="skcdv"'))
 check("方向改成两种：以人物为中心 / 正前方",
       "以人物为中心".encode() in html and "正前方".encode() in html)
 check("卡片里不再画示意图（范围只画在实时画面上，不重复占一块画布）",
