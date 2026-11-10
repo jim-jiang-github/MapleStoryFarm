@@ -238,3 +238,5 @@ webui/charconf.json
 # EXP 走势历史（运行时数据，自动增长与裁剪，不进版本库）
 webui/explog.jsonl
 webui/explog.tmp
+# 面板 UI 状态（选中哪张技能卡之类，纯本机偏好，换台机器无意义）
+webui/ui.json

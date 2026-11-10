@@ -202,6 +202,25 @@
   }
   .skcard + .skcard { margin-top: 6px; }
   .skcard.dragging { opacity: .4; }
+  /* 选中的那张：画面上的技能框只画它（其余先不画，调范围时不被糊住）。
+     左边一条绿竖条 + 头部编号变绿，一眼看出画面上那条框是谁的。 */
+  .skcard.on { border-color: #16a34a; box-shadow: inset 3px 0 0 #16a34a; }
+  .skcard.on .sktag { color: #16a34a; font-weight: 700; }
+  /* 折叠：头部留着（键位/类型/方向照旧能改），范围那几行收起来，换一行摘要 */
+  .skcard.fold { gap: 3px; }
+  .skcard.fold .skbody { display: none; }
+  .skcard.fold .sksum { display: block; }
+  .skfold {
+    flex: 0 0 auto; width: 13px; padding: 0; border: 0; background: none;
+    color: var(--hint); cursor: pointer; font-size: 10px; line-height: 1;
+    font-family: inherit;
+  }
+  .skfold:hover { color: var(--text); }
+  .sksum {
+    display: none; font-size: 10.5px; color: var(--hint);
+    font-variant-numeric: tabular-nums; padding-left: 21px;
+  }
+  .skbody { display: flex; flex-direction: column; gap: 6px; }
   /* 范围：只填 宽 / 上 / 下 三个量（单位画面像素，以人物身体中心为基准）。
      左/右不给填——「以人物为中心」两边必然一样，「正前方」左边恒为 0，多问
      一个数只会让人怀疑自己填反了。范围本身实时画在游戏画面上，拖滑块就能
@@ -229,6 +248,14 @@
     border: 1px solid var(--border); border-radius: 6px; padding: 1px 4px; cursor: pointer;
   }
   .sktag { font-size: 10px; color: var(--hint); font-variant-numeric: tabular-nums; }
+  /* 选中这单个技能：画面上的技能框只画这一张（调范围时不被别的框糊住） */
+  .skpick {
+    flex: 0 0 auto; padding: 0 1px; border: 0; background: none;
+    color: var(--hint); cursor: pointer; font-size: 12px; line-height: 1;
+    font-family: inherit;
+  }
+  .skpick:hover { color: #16a34a; }
+  .skcard.on .skpick { color: #16a34a; }
   .skdel { margin-left: auto; border: 0; background: none; color: var(--hint);
            cursor: pointer; font-size: 12px; padding: 2px 4px; font-family: inherit; }
   .skdel:hover { color: #dc2626; }
@@ -709,7 +736,7 @@
             <div id="skillList"></div>
             <div class="row conf">
               <span class="k"></span>
-              <span class="v" style="justify-content:flex-start"><button id="addSkillBtn" class="mini" title="加一个技能：录快捷键 → 选群攻/单体 → 在卡片里填左/右/上/下（相对人物身体中心的像素）">+ 添加技能</button><b class="sub">⠿ 拖动卡片换释放顺序</b></span>
+              <span class="v" style="justify-content:flex-start"><button id="addSkillBtn" class="mini" title="加一个技能：录快捷键 → 选群攻/单体 → 在卡片里填左/右/上/下（相对人物身体中心的像素）">+ 添加技能</button><b class="sub">⠿ 拖动换顺序 · ▾ 折叠 · ◎ 只看这张的范围</b></span>
             </div>
               </div>
             </details>
@@ -2726,6 +2753,54 @@
   const SK_DFLT = { key: "", type: "aoe", dir: "center", ground: [150, 150, 50, 40],
                     jump: false, jrect: [210, 210, 120, 40] };
 
+  /* 折叠 / 选中：都是**面板状态**，不进 botconf（那不是挂机参数）。
+     - 折叠只收起「范围」那几行，键位/类型/方向留在头部照旧能改；
+     - 选中 = 画面上的技能框只画这一张（其余先不画）。多张卡的范围框叠在一起
+       时根本分不清哪条是自己正在拖的那条，这是用户要这个的直接原因。
+     折叠按卡片下标存 localStorage，拖动排序/删除时会跟着重映射。 */
+  let folded = new Set();
+  try {
+    const rawFold = JSON.parse(localStorage.getItem("skFold") || "[]");
+    if (Array.isArray(rawFold)) {
+      folded = new Set(rawFold.filter((x) => Number.isInteger(x) && x >= 0));
+    }
+  } catch (_) {}
+  const saveFold = () => {
+    try { localStorage.setItem("skFold", JSON.stringify([...folded])); } catch (_) {}
+  };
+
+  let skFocus = -1;                 // -1 = 没选中（画面上全画），>=0 = 只画这一张
+  function paintFocus() {
+    if (!skillList) return;
+    [...skillList.querySelectorAll(".skcard")].forEach((c) => {
+      const on = +c.dataset.i === skFocus;
+      c.classList.toggle("on", on);
+      const b = c.querySelector(".skpick");
+      if (b) {
+        b.textContent = on ? "◉" : "◎";
+        b.title = on ? "已选中：画面只画这一张的范围（再点一下取消，恢复全画）"
+                     : "只看这个技能的范围：点一下，画面上的框就只画这一张";
+      }
+    });
+  }
+  function setFocus(v) {
+    skFocus = (Number.isInteger(v) && v >= 0) ? v : -1;
+    paintFocus();
+    // 后端拿这个值决定画哪个框；只动 UI 状态，cfg 一个字都不碰
+    fetch("/api/ui/set", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ skill_focus: skFocus }),
+    }).catch(() => {});
+  }
+  // 刷新页面 / 重启服务后把上次选中的那张恢复回来（存在 data/ui.json）
+  fetch("/api/ui", { cache: "no-store" })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => {
+      const f = d ? Number(d.skill_focus) : -1;
+      if (Number.isInteger(f) && f >= 0) { skFocus = f; paintFocus(); }
+    })
+    .catch(() => {});
+
   // 把 [左,右,上,下] 收成这个方向的规范形态（和后端 bot.norm_skill_rect 一致）
   const normSkillRect = (r, dir) => {
     const h = Math.max(Number(r[0]) || 0, Number(r[1]) || 0);
@@ -2821,20 +2896,50 @@
       card.innerHTML = `
         <div class="skhead">
           <span class="skhnd" title="按住拖动，调整释放顺序（排前面的先匹配）">⠿</span>
+          <button class="skfold" type="button" title="折叠 / 展开这张卡：只收起「范围」那几行，键位、类型、方向留在头部照旧能改">▾</button>
           <button class="slot skkey" type="button" data-hint="按键" title="这个技能的快捷键，跟游戏里的技能键位对应。点格子 → 按一个键即设置；Del 清空、Esc 取消"></button>
           <select class="sktype" title="群攻：范围内怪 ≥2 时优先用；单体：只有 1 只时优先用。同类型里排前面的先用"><option value="aoe">群攻</option><option value="single">单体</option></select>
           <select class="skdir" title="以人物为中心：框左右对称，人物两侧都打，出手前不用转身；正前方：框从人物身体中心往前伸，只打面前那半边，出手前会先转身对正。两种都跟着人物朝向翻（画面上那条框 = 这一下真正能够着的区域）。"><option value="center">以人物为中心</option><option value="front">正前方</option></select>
-          <span class="sktag">SK${i + 1}</span>
+          <button class="skpick" type="button" title="只看这个技能的范围">◎</button><span class="sktag">SK${i + 1}</span>
           <button class="skdel" type="button" title="删除这个技能">✕</button>
         </div>
-        <div class="skrow"><span>范围</span>${numRow("g")}</div>
-        <span class="skhint"></span>
-        <label class="skjump"><input type="checkbox" class="skjp"> 可跳放（空中施放：跳 → 100ms → 技能键）</label>
-        <div class="skjbox">
-          <div class="skrow"><span>跳放</span>${numRow("j")}</div>
-          <span class="skjnote">这套只管「跳起来那一下」，和上面的地面范围完全独立。两套都实时画在左边的画面上：实线橙 = 地面，虚线青 = 跳放。</span>
+        <div class="sksum"></div>
+        <div class="skbody">
+          <div class="skrow"><span>范围</span>${numRow("g")}</div>
+          <span class="skhint"></span>
+          <label class="skjump"><input type="checkbox" class="skjp"> 可跳放（空中施放：跳 → 100ms → 技能键）</label>
+          <div class="skjbox">
+            <div class="skrow"><span>跳放</span>${numRow("j")}</div>
+            <span class="skjnote">这套只管「跳起来那一下」，和上面的地面范围完全独立。两套都实时画在左边的画面上：实线橙 = 地面，虚线青 = 跳放。</span>
+          </div>
         </div>`;
       const at = () => skillsNow[i];
+      // 折叠态（头部留着：键位/类型/方向都还能改）
+      const foldBtn = card.querySelector(".skfold");
+      const paintFold = () => {
+        const f = folded.has(i);
+        card.classList.toggle("fold", f);
+        foldBtn.textContent = f ? "▸" : "▾";
+      };
+      paintFold();
+      foldBtn.addEventListener("click", (e) => {
+        e.stopPropagation();                 // 别把这一下当成「选中这张卡」
+        if (folded.has(i)) folded.delete(i); else folded.add(i);
+        saveFold();
+        paintFold();
+        if (!folded.has(i)) paintBars();      // 展开时把数字/摘要再对齐一次
+        paintSum();
+      });
+      card.querySelector(".skpick").addEventListener("click", (e) => {
+        e.stopPropagation();
+        setFocus(skFocus === i ? -1 : i);
+      });
+      // 点卡片的空白处 = 选中它（画面上的框只画这一张）；再点一次取消
+      card.addEventListener("click", (e) => {
+        // 拖滑块、点下拉、录键、按删除 —— 都是控件自己的事，不当成选中
+        if (e.target.closest("input, select, button, label, .skhnd")) return;
+        setFocus(skFocus === i ? -1 : i);
+      });
       // 快捷键格子：接进统一的键位录制（makeSlot）
       const keyEl = card.querySelector(".skkey");
       const slot = makeSlot(keyEl,
@@ -2890,7 +2995,18 @@
           ? "正前方：宽从人物中心往前量，身后打不到"
           : "以人物为中心：宽的一半在左、一半在右";
       };
-      paintBars(); paintHint();
+      // 折叠时的摘要行：和滑块上的数字同口径（地面那套；跳放有没有开单独标）
+      const sumEl = card.querySelector(".sksum");
+      const paintSum = () => {
+        const t = at();
+        if (!t || !sumEl) return;
+        const g = t.ground || [0, 0, 0, 0];
+        const wd = Math.round(isFront() ? (Number(g[1]) || 0)
+                                       : (Number(g[0]) || 0) + (Number(g[1]) || 0));
+        sumEl.textContent = `宽 ${wd} · 上 ${Math.round(Number(g[2]) || 0)}`
+          + ` · 下 ${Math.round(Number(g[3]) || 0)}` + (t.jump ? " · 可跳放" : "");
+      };
+      paintBars(); paintHint(); paintSum();
       bars.forEach((el) => {
         el.addEventListener("input", () => {
           const t = at();
@@ -2926,17 +3042,25 @@
           const h = Math.round(Math.max(Number(r[0]) || 0, Number(r[1]) || 0));
           if (front) { r[0] = 0; r[1] = h; } else { r[0] = h; r[1] = h; }
         });
-        paintBars(); paintHint();
+        paintBars(); paintHint(); paintSum();
         commitSkills(); drawMasks();
       });
       card.querySelector(".skjp").addEventListener("change", (e) => {
         if (!at()) return;
         at().jump = e.target.checked;
         card.querySelector(".skjbox").style.display = e.target.checked ? "" : "none";
+        paintSum();
         commitSkills(); drawMasks();
       });
       card.querySelector(".skdel").addEventListener("click", () => {
         skillsNow.splice(i, 1);
+        // 折叠状态和选中项都按下标存，删掉一张后面整体前移，得跟着挪
+        const nf = new Set();
+        folded.forEach((x) => { if (x < i) nf.add(x); else if (x > i) nf.add(x - 1); });
+        folded = nf; saveFold();
+        if (skFocus !== -1) {
+          setFocus(skFocus === i ? -1 : (skFocus > i ? skFocus - 1 : skFocus));
+        }
         commitSkills(); renderSkills();
       });
 
@@ -2956,11 +3080,18 @@
         if (rec && rec.skSkill) return;         // 录键期间排序作废（下次渲染会摆回去）
         const old = skillsNow.slice();
         const cards = [...skillList.querySelectorAll(".skcard")];
-        skillsNow = cards.map((c) => old[+c.dataset.i]);
+        const order = cards.map((c) => +c.dataset.i);   // 新位置 j 的内容来自旧下标 order[j]
+        skillsNow = order.map((o) => old[o]);
+        // 折叠状态、选中项都是按下标记的：跟着技能一起挪，别拖一下就换了张卡
+        const nf = new Set();
+        order.forEach((o, j) => { if (folded.has(o)) nf.add(j); });
+        folded = nf; saveFold();
+        if (skFocus >= 0) setFocus(order.indexOf(skFocus));
         commitSkills(); renderSkills();
       });
       skillList.appendChild(card);
     });
+    paintFocus();               // 重建完把「选中的那张」标回去（卡片是新建的）
   }
 
   // 面板是折叠的：展开时画布才有宽度，那时候再画一次示意图

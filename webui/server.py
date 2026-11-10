@@ -2433,6 +2433,41 @@ def _dash(img, p1, p2, color, thick=1, seg=9):
 char_body_box = botmod.char_body_box
 
 
+# ---------------- 面板 UI 状态（哪个技能「选中」了） ----------------
+# 纯显示状态，**不参与决策**：选中只是让画面只画那一个技能的范围框（调范围的
+# 时候不被其它技能的框糊在一起），打不打、先打谁完全由 cfg["skills"] 的顺序决定。
+# 和 botconf.json 分开放：那是 bot 的参数，混进这种「哪张卡被点了」的状态会让
+# clamp_cfg 过滤得莫名其妙。
+UI_FILE = apppaths.DATA_DIR / "ui.json"
+ui_lock = threading.Lock()
+ui_state = {"skill_focus": -1}       # -1 = 没选中，照旧全画
+
+
+def _load_ui_state():
+    if not UI_FILE.exists():
+        return
+    try:
+        raw = json.loads(UI_FILE.read_text(encoding="utf-8"))
+        f = int(raw.get("skill_focus", -1))
+    except Exception as e:  # noqa: BLE001
+        print(f"[ui] 读取 {UI_FILE.name} 失败，用默认值: {e}")
+        return
+    with ui_lock:
+        ui_state["skill_focus"] = f if f >= 0 else -1
+
+
+def _save_ui_state():
+    try:
+        with ui_lock:
+            data = dict(ui_state)
+        UI_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        print(f"[ui] 写 {UI_FILE.name} 失败: {e}")
+
+
+_load_ui_state()
+
+
 def draw_skill_ranges(img, box):
     """把每个技能的攻击范围画在人物旁边：地面框实线、跳放框虚线。
 
@@ -2440,6 +2475,10 @@ def draw_skill_ranges(img, box):
     就是按这些矩形与怪物框求交判断的——所见即所打。标签 SK1/SK2… 对应面板
     技能列表的顺序（= 释放优先级），带 J 的是跳放框（怪在里面但不在实线框里
     时会跳起来放）。最多画 6 个，再多糊成一团。
+
+    面板上点选了某张卡（UI 状态 skill_focus）就**只画那一张**：调范围的时候
+    几层框叠在一起根本分不清哪条是自己拖的那条。选中只是显示过滤，bot 打击
+    照旧看全部技能——别把这两件事混了。
 
     方向（dir）只有两种：以人物为中心（左右对称）、正前方（从人物身体中心
     往前）。框本身**永远跟着朝向翻**：框是「朝右时」的形态，人物朝左就整体
@@ -2450,6 +2489,15 @@ def draw_skill_ranges(img, box):
     skills = [s for s in (cfg.get("skills") or []) if s.get("key")]
     if not skills:
         return img
+    # 面板上点选的那个技能：画面上只画它这一个（地面实线 + 跳放虚线），调范围
+    # 时不会被别的技能的框盖住。没选中（-1）或者那个技能已经删了 → 照旧全画。
+    raw = cfg.get("skills") or []
+    with ui_lock:
+        focus = int(ui_state.get("skill_focus", -1))
+    focus = focus if 0 <= focus < len(raw) else -1
+    # 面板上的编号是「配置里的第几张卡」（没设键位的那张也算一张），所以按原始
+    # 下标遍历、只跳过没键位的——不然面板写着 SK2、画面上却标 SK1。
+    order = [focus] if focus >= 0 else [i for i in range(len(raw)) if raw[i].get("key")]
     on = cfg["on"]
     color = BOT_RANGE_ON if on else BOT_RANGE_OFF
     h, w = img.shape[:2]
@@ -2460,7 +2508,10 @@ def draw_skill_ranges(img, box):
         with char_lock:
             face = int(char_state["face"] or 0)
     k = botmod.skill_scale(cfg, (w, h))   # 和 bot 决策用同一个系数，所见即所打
-    for i, sk in enumerate(skills[:6]):
+    for i in order[:6]:
+        sk = raw[i]
+        if not sk.get("key"):
+            continue                       # 没录键位的卡画不出东西，跳过但保留编号
         # 箭头只给「不对称的框」看：正前方的框朝左朝右是两个位置，标个方向
         # 才知道现在画的是哪一边。以人物为中心的框翻不翻一模一样，标了反而吵。
         g0 = sk.get("ground") or (0, 0, 0, 0)
@@ -3307,6 +3358,34 @@ async def bot_toggle():
         game_bot.release_all()      # 关掉时把按住的键全部松开，别让角色一直跑
     cfg, st = game_bot.snapshot()
     return JSONResponse({"on": on, "cfg": cfg, "status": st})
+
+
+# ---------------- 面板 UI 状态（哪张技能卡被选中） ----------------
+@app.get("/api/ui")
+async def ui_get():
+    """面板的纯显示状态。目前只有 skill_focus：画面上只画哪一张技能的范围。"""
+    with ui_lock:
+        return JSONResponse(dict(ui_state))
+
+
+@app.post("/api/ui/set")
+async def ui_set(payload: dict = Body(...)):
+    """设置选中的技能卡：skill_focus = 第几张（-1 / 越界 = 不选，全画）。
+
+    只影响画面上的框画哪几个，不影响 bot 的打击顺序——不传 skills，
+    cfg 一个字都不动。
+    """
+    data = dict(payload or {})
+    if "skill_focus" in data:
+        try:
+            f = int(data["skill_focus"])
+        except (TypeError, ValueError):
+            f = -1
+        with ui_lock:
+            ui_state["skill_focus"] = f if f >= 0 else -1
+        _save_ui_state()
+    with ui_lock:
+        return JSONResponse(dict(ui_state))
 
 
 # ---------- 排除区配置（WebUI 框选 / 选择 / 删除 / 持久化） ----------

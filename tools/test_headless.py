@@ -691,6 +691,50 @@ srv.game_bot.cfg["base_w"] = _cfg0.get("base_w", 0)
 srv.game_bot.cfg["on"] = _cfg0["on"]
 srv.game_bot.cfg["skills"] = _cfg0["skills"]
 
+# 面板上点选某个技能 → 画面上只画它的框（其余先不画，调范围时不被糊住）。
+# 选中的是「配置里的第几张卡」，和面板 SK 编号同一个口径——中间夹一张没设
+# 键位的卡也占一个编号，不能把后面的顶上来。
+print("  -- 画框回归：只画选中的那个技能")
+
+
+def _sk_focus_span(focus):
+    srv.game_bot.cfg["on"] = True
+    srv.game_bot.cfg["base_w"] = 1280
+    srv.game_bot.cfg["skills"] = [
+        {"key": "KeyA", "type": "aoe", "dir": "center", "ground": [100, 100, 60, 60],
+         "jump": False, "jrect": [100, 100, 100, 60]},
+        {"key": "", "type": "aoe", "dir": "center", "ground": [200, 200, 60, 60],
+         "jump": False, "jrect": [200, 200, 100, 60]},     # 没录键位：只占编号，不画
+        {"key": "KeyC", "type": "aoe", "dir": "center", "ground": [300, 300, 60, 60],
+         "jump": False, "jrect": [300, 300, 100, 60]},
+    ]
+    with srv.ui_lock:
+        srv.ui_state["skill_focus"] = focus
+    im = np.full((720, 1280, 3), 150, np.uint8)
+    srv.draw_skill_ranges(im, [600, 380, 640, 392])
+    xs = np.nonzero(np.any(im != 150, axis=2))[1]
+    return None if len(xs) == 0 else (int(xs.min()), int(xs.max()))
+
+
+_fa_all, _fa_1, _fa_mid, _fa_3 = (_sk_focus_span(-1), _sk_focus_span(0),
+                                 _sk_focus_span(1), _sk_focus_span(2))
+check("没选中 → 两个有键位的框都画（一直画到 300px 那个）",
+      _fa_all and _fa_all[1] - _fa_all[0] > 400, _fa_all)
+check("选中第 1 张 → 只剩窄框（跨度 < 250）",
+      _fa_1 and _fa_1[1] - _fa_1[0] < 250, _fa_1)
+check("选中第 3 张 → 画的是那个宽框（中间那张没键位没串位）",
+      _fa_3 and _fa_3[1] - _fa_3[0] > 500 and _fa_3[1] > _fa_1[1] + 100,
+      (_fa_1, _fa_3))
+check("选中的是没设键位的那张 → 什么都不画（不瞎画别人的）",
+      _fa_mid is None, _fa_mid)
+check("选中值越界（技能被删了）→ 退回全画",
+      _sk_focus_span(9) == _fa_all, _sk_focus_span(9))
+with srv.ui_lock:
+    srv.ui_state["skill_focus"] = -1
+srv.game_bot.cfg["base_w"] = _cfg0.get("base_w", 0)
+srv.game_bot.cfg["on"] = _cfg0["on"]
+srv.game_bot.cfg["skills"] = _cfg0["skills"]
+
 # 丢人兜底已改：识别不到人物时 bot 不再拿「画面中心」假锚点继续打（改成
 # 往识别区中间走回来），所以 ME 标记和技能框都不画——画了只会让人误以为
 # 还在按那个位置打
