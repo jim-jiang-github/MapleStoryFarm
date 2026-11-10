@@ -683,6 +683,10 @@
                 <span class="k">检测频率</span>
                 <span class="v"><select id="fpsSel" title="每秒最多推理几次。YOLO 的单帧耗时是固定的（速度模式约 66ms），调低只省 CPU 占用，不会让单帧变快——画面上的框本来就只在每次推理后刷新一次"><option value="0">不限（跑满）</option><option value="20">20 帧/秒</option><option value="15">15 帧/秒</option><option value="12">12 帧/秒</option><option value="10">10 帧/秒</option><option value="8">8 帧/秒</option></select></span>
               </div>
+              <div class="row conf">
+                <span class="k">识别模式</span>
+                <span class="v"><button id="modeBtn" title="速度：小模型（384×672），单帧约 44ms，日常挂机够用；精度：大模型（544×960），单帧约 96ms，小怪、被特效挡住时更稳。切换要现场编译模型，几秒内按钮上会显示进度">速度</button></span>
+              </div>
               </div>
             </details>
             <details class="group" data-cap="挂机">
@@ -739,7 +743,6 @@
       <div class="side">
         <div class="actions">
           <button id="toggle">暂停</button>
-          <button id="modeBtn">模式: 速度</button>
           <button id="botBtn" title="自动打怪：血低喝药、打范围内的怪、全程按 Z 拾取。只有游戏窗口在前台时才会发按键">挂机: 关</button>
           <button id="focusBtn" title="把游戏窗口抬到最前并给焦点（截图前必做）">前置游戏</button>
           <button id="wanBtn" title="一键内网穿透：生成一个带口令的 https 公网地址，手机在外面（4G/别处 WiFi）也能看画面。再点一下关掉">外网: 关</button>
@@ -2262,7 +2265,7 @@
     try {
       const cur = $("modeBtn").textContent.includes("速度") ? "accurate" : "fast";
       const r = await (await fetch("/api/detect/mode?m=" + cur, { cache: "no-store" })).json();
-      $("modeBtn").textContent = "模式: " + r.label;
+      $("modeBtn").textContent = r.label;
       startDetProg();     // 切到没加载过的模式要现编译模型，进度条得跟着出现
       $("modeBtn").className = r.mode === "accurate" ? "on" : "";
     } finally {
@@ -3206,7 +3209,7 @@
         lastFrameW = s.client_size[0];
         lastFrameH = s.client_size[1];
       }
-      $("modeBtn").textContent = "模式: " + s.mode_label;
+      $("modeBtn").textContent = s.mode_label;
       $("modeBtn").className = s.mode === "accurate" ? "on" : "";
       if (maskOn !== s.mask) { maskOn = s.mask; updateMaskUI(); }   // 与后端保持一致
       if (typeof s.max_fps === "number" && Number(fpsSel.value) !== s.max_fps) {
