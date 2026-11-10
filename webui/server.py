@@ -2060,6 +2060,10 @@ def draw_skill_ranges(img, box):
     就是按这些矩形与怪物框求交判断的——所见即所打。标签 SK1/SK2… 对应面板
     技能列表的顺序（= 释放优先级），带 J 的是跳放框（怪在里面但不在实线框里
     时会跳起来放）。最多画 6 个，再多糊成一团。
+
+    方向（dir）：both 双向画整框 / left·right 只画那半边 / front 身前单向——
+    只画人物当前朝向那半边并带箭头；朝向读不到（0）就画两侧带 "?"，不知道
+    朝哪就别假装知道。
     """
     cfg, st = game_bot.snapshot()
     skills = [s for s in (cfg.get("skills") or []) if s.get("key")]
@@ -2068,15 +2072,23 @@ def draw_skill_ranges(img, box):
     on = cfg["on"]
     color = BOT_RANGE_ON if on else BOT_RANGE_OFF
     h, w = img.shape[:2]
+    face = int(st.get("face") or 0)
     b = char_body_box(box)
     cx = int((b[0] + b[2]) / 2)
     cy = int((b[1] + b[3]) / 2)
     for i, sk in enumerate(skills[:6]):
+        dir_ = sk.get("dir") or "both"
+        arrow = ""
+        if dir_ == "front":
+            arrow = " ->" if face > 0 else (" <-" if face < 0 else " ?")
         tag = f"SK{i + 1}"
         rects = [(False, sk["ground"])]
         if sk.get("jump"):
             rects.append((True, sk["jrect"]))
         for is_jump, (l, r, u, d) in rects:
+            l, r = botmod._dir_extents(dir_, l, r)
+            if dir_ == "front" and face:
+                l, r = (0.0, r) if face > 0 else (l, 0.0)
             x1, y1 = max(2, int(cx - l)), max(2, int(cy - u))
             x2, y2 = min(w - 3, int(cx + r)), min(h - 3, int(cy + d))
             if x2 - x1 < 6 or y2 - y1 < 6:
@@ -2089,7 +2101,7 @@ def draw_skill_ranges(img, box):
                 _dash(img, (x2, y1), (x2, y2), color, thick)
             else:
                 cv2.rectangle(img, (x1, y1), (x2, y2), color, thick, cv2.LINE_AA)
-            label = tag + ("J" if is_jump else "")
+            label = tag + ("J" if is_jump else "") + arrow
             (tw_, th_), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
             tx = max(4, min(x1 + 4, w - tw_ - 6))
             ty = y1 - 4 if y1 - 4 > th_ else y2 + th_ + 4

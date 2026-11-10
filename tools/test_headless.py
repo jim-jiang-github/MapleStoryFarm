@@ -473,6 +473,29 @@ check("范围外的怪 → 按住 right 走过去", wait_until(
     lambda: "right" in press_keys(new_events()), timeout=8),
     detail=str(new_events()[-12:]))
 
+# 方向：仅右技能 → 左边的怪不进判定框，走过去而不是出手
+post("/api/bot/set", {"skills": [
+    {"key": "KeyS", "type": "single", "dir": "right",
+     "ground": [150, 150, 60, 60], "jump": False, "jrect": [150, 150, 220, 140]}]})
+set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30,
+                     mobs=[mob("mob_Blue_Snail", -80, 0)]))
+mark_events()
+check("仅右技能：左边的怪不进判定（不出手，朝左走）", wait_until(
+    lambda: "left" in press_keys(new_events())
+            and not any(k in ("KeyS", "KeyD") for k in press_keys(new_events())),
+    timeout=8), detail=str(new_events()[-12:]))
+
+# 方向：身前单向 → 左右两半边都是感知范围，出手前先转身朝怪
+post("/api/bot/set", {"skills": [
+    {"key": "KeyS", "type": "single", "dir": "front",
+     "ground": [150, 150, 60, 60], "jump": False, "jrect": [150, 150, 220, 140]}]})
+mark_events()
+check("身前技能：左边的怪照打（先点左对正再出 KeyS）", wait_until(
+    lambda: "left" in press_keys(new_events())
+            and "KeyS" in press_keys(new_events()), timeout=8),
+    detail=str(new_events()[-14:]))
+post("/api/bot/set", {"skills": SKILLS})
+
 # 拾取
 set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30, mobs=[]))
 mark_events()

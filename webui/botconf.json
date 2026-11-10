@@ -17,13 +17,44 @@
     "",
     ""
   ],
-  "atk_key": "ControlLeft",
   "jump_key": "AltLeft",
   "pick_key": "KeyZ",
-  "range_px": 100.0,
-  "range_h": 130,
-  "range_side": "both",
-  "jump_reach": 140,
+  "skills": [
+    {
+      "key": "ControlLeft",
+      "type": "single",
+      "ground": [
+        37.0,
+        163.0,
+        88.0,
+        42.0
+      ],
+      "jump": true,
+      "jrect": [
+        38.0,
+        232.0,
+        130.0,
+        76.0
+      ]
+    },
+    {
+      "key": "",
+      "type": "aoe",
+      "ground": [
+        150.0,
+        150.0,
+        50.0,
+        40.0
+      ],
+      "jump": false,
+      "jrect": [
+        210.0,
+        210.0,
+        120.0,
+        40.0
+      ]
+    }
+  ],
   "atk_ms": 420,
   "pick": true,
   "pick_ms": 130,

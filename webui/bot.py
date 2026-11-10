@@ -342,12 +342,15 @@ DEFAULTS = {
     #   key    快捷键（KeyboardEvent.code 名，空 = 还没录，决策时跳过）
     #   type   aoe 群攻 / single 单体：范围内怪 ≥2 优先群攻，只有 1 只优先单体，
     #          同类型里排前面的先用
+    #   dir    方向：both 左右双向（框两边都算）/ front 身前单向（框是感知范围，
+    #          出手前先转身朝目标，实际只打身前那半边）/ left 仅左 / right 仅右
+    #          （固定只打那半边，另一边的怪压根不进判定）
     #   ground 地面攻击范围 [左, 右, 上, 下]：相对人物身体中心的像素偏移，
     #          怪物框和这个矩形有交集就站原地直接放
     #   jump   可跳放（空中施放）；jrect 跳放范围：怪在 jrect 内、ground 外
     #          就按「跳 → 100ms → 技能键」的连招打
     "skills": [
-        {"key": "ControlLeft", "type": "aoe",
+        {"key": "ControlLeft", "type": "aoe", "dir": "both",
          "ground": [100, 100, 60, 60],
          "jump": True, "jrect": [100, 100, 200, 60]},
     ],
@@ -395,6 +398,9 @@ def _clamp_rect4(v, dflt):
     return out
 
 
+SK_DIRS = ("both", "front", "left", "right")
+
+
 def _clamp_skills(v, dflt):
     """技能列表：逐项校验，最多 8 个（再多人也按不过来，画面也画不下）。"""
     base = dflt[0]
@@ -407,6 +413,7 @@ def _clamp_skills(v, dflt):
             out.append({
                 "key": key if key in CODE_VK else "",
                 "type": s.get("type") if s.get("type") in ("aoe", "single") else "aoe",
+                "dir": s.get("dir") if s.get("dir") in SK_DIRS else "both",
                 "ground": _clamp_rect4(s.get("ground"), base["ground"]),
                 "jump": bool(s.get("jump")),
                 "jrect": _clamp_rect4(s.get("jrect"), base["jrect"]),
@@ -425,6 +432,7 @@ def clamp_cfg(raw):
         raw["skills"] = [{
             "key": raw.get("atk_key") or "ControlLeft",
             "type": "aoe",
+            "dir": raw.get("range_side") if raw.get("range_side") in SK_DIRS else "both",
             "ground": [rp, rp, rh / 2.0, rh / 2.0],
             "jump": True,
             "jrect": [rp, rp, rh / 2.0 + jr, rh / 2.0],
@@ -515,20 +523,34 @@ def _intersects(a, b):
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
+def _dir_extents(dir_, l, r):
+    """按技能方向裁剪左右范围：front/both 两侧都算（front 出手前会转身），
+    left/right 固定只留那半边。"""
+    if dir_ == "left":
+        return l, 0.0
+    if dir_ == "right":
+        return 0.0, r
+    return float(l), float(r)
+
+
 def skill_rects(skill, char_box):
     """一个技能的两个判定框（全画面坐标 [x1,y1,x2,y2]）。
 
     ground/jrect 存的是相对人物身体中心的偏移 [左, 右, 上, 下]，
-    这里换算成画面上的绝对矩形。跳放没开就没有第二个框。
-    server 的 draw_skill_ranges 画在画面上的就是它——所见即所打。
+    这里换算成画面上的绝对矩形，再按 dir 裁掉不打的半边。跳放没开
+    就没有第二个框。server 的 draw_skill_ranges 画在画面上的就是它
+    ——所见即所打。
     """
     b = char_body_box(char_box)
     cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+    dir_ = skill.get("dir") or "both"
     l, r, u, d = (float(v) for v in skill["ground"])
+    l, r = _dir_extents(dir_, l, r)
     ground = [cx - l, cy - u, cx + r, cy + d]
     jump = None
     if skill.get("jump"):
         jl, jr, ju, jd = (float(v) for v in skill["jrect"])
+        jl, jr = _dir_extents(dir_, jl, jr)
         jump = [cx - jl, cy - ju, cx + jr, cy + jd]
     return ground, jump
 
@@ -936,7 +958,7 @@ class Bot:
         # 空放，所以单侧技能每刀前都重新点一次方向键对正（转身 50ms + 等 130ms
         # 塞得进攻击冷却里，几乎不损攻速）。
         calibrated = self._t_turn > self._t_atk
-        one_sided = (sk["ground"][0] <= 0) != (sk["ground"][1] <= 0)  # 只盖一边
+        one_sided = (sk.get("dir") or "both") != "both"   # 非双向：出手前先对正
 
         # 进范围了：先站住，再转向目标，然后出手
         self._set_dir(0)

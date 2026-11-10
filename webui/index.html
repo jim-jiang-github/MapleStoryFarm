@@ -1814,7 +1814,8 @@
       const hit = rects && skillHitRect(rects, p);
       if (hit) {
         drag = { mode: "skill", which: hit.rect, handle: hit.handle,
-                 start: p, orig: { ...rects[hit.rect] } };
+                 start: p, orig: { ...rects[hit.rect] },
+                 anchor: skillAnchorLive() };   // 拖动期间锚点冻结，防框漂移
       }
       drawMasks();
       return;
@@ -2210,8 +2211,6 @@
   let skillLockUntil = 0;        // 本地刚改过技能：这段时间别让轮询覆盖
   let skillDragEl = null;        // 正在拖动排序的卡片
   let skillSel = -1;             // 正在画面上编辑范围的技能下标（-1 = 没在编辑）
-  let skillAnchor = null;        // 编辑期间冻结的人物身体中心（全分辨率像素）
-  let skillFrame = [0, 0];       // 画面尺寸（像素偏移 ↔ 归一化坐标换算用）
   let skillSnap = "";            // 上次同步的 skills JSON（没变不重画）
   let lastBodyC = null;          // 最近一次轮询到的人物身体中心
   let lastFrameW = 0, lastFrameH = 0;
@@ -2508,7 +2507,7 @@
      卡片顺序 = 释放优先级（⠿ 拖动换位）；范围框在画面上拖（点「画面调整」），
      以人物身体中心为锚点，绿色实线 = 地面范围、橙色虚线 = 跳放范围。 */
   const skillList = $("skillList");
-  const SK_DFLT = { key: "", type: "aoe", ground: [150, 150, 50, 40],
+  const SK_DFLT = { key: "", type: "aoe", dir: "both", ground: [150, 150, 50, 40],
                     jump: false, jrect: [210, 210, 120, 40] };
 
   const skillRectStr = (r) =>
@@ -2529,7 +2528,7 @@
     if (snap === skillSnap) return;             // 没变别重画（重画会闪）
     skillSnap = snap;
     skillsNow = cfg.skills.map((s) => ({
-      key: s.key || "", type: s.type || "aoe",
+      key: s.key || "", type: s.type || "aoe", dir: s.dir || "both",
       ground: [...(s.ground || SK_DFLT.ground)],
       jump: !!s.jump, jrect: [...(s.jrect || SK_DFLT.jrect)],
     }));
@@ -2549,12 +2548,13 @@
           <span class="skhnd" title="按住拖动，调整释放顺序（排前面的先匹配）">⠿</span>
           <button class="slot skkey" type="button" data-hint="按键" title="这个技能的快捷键，跟游戏里的技能键位对应。点格子 → 按一个键即设置；Del 清空、Esc 取消"></button>
           <select class="sktype" title="群攻：范围内怪 ≥2 时优先用；单体：只有 1 只时优先用。同类型里排前面的先用"><option value="aoe">群攻</option><option value="single">单体</option></select>
+          <select class="skdir" title="技能朝哪边打：左右 = 框内两边都算；身前 = 只打人物朝向那半边（出手前会先转身对正，左右两半边分别是朝左/朝右时打的区域）；仅左/仅右 = 固定只打那半边，另一边的怪不进判定"><option value="both">左右</option><option value="front">身前</option><option value="left">仅左</option><option value="right">仅右</option></select>
           <span class="sktag">SK${i + 1}</span>
           <button class="skdel" type="button" title="删除这个技能">✕</button>
         </div>
         <div class="skrow">
           <span>范围</span><span class="skv gstr"></span>
-          <button class="mini skedit" type="button" title="在画面上拖框调整：框内拖动 = 移动，拉边角 = 缩放，以人物身体中心为锚点（蓝十字）">画面调整</button>
+          <button class="mini skedit" type="button" title="在画面上拖框调整：框内拖动 = 移动，拉边角 = 缩放，以人物身体中心为锚点（蓝十字），框会实时跟着人物走">画面调整</button>
         </div>
         <label class="skjump"><input type="checkbox" class="skjp"> 可跳放（空中施放：跳 → 100ms → 技能键）</label>
         <div class="skjbox">
@@ -2573,15 +2573,24 @@
       slot.skSkill = true;
       slot.paint();
       card.querySelector(".sktype").value = s.type;
+      card.querySelector(".skdir").value = s.dir || "both";
       card.querySelector(".skjp").checked = !!s.jump;
       card.querySelector(".skjbox").style.display = s.jump ? "" : "none";
       card.querySelector(".gstr").textContent = skillRectStr(s.ground);
       card.querySelector(".jstr").textContent = skillRectStr(s.jrect);
+      const editBtn = card.querySelector(".skedit");
+      editBtn.textContent = skillSel === i ? "✓ 完成" : "画面调整";
+      editBtn.classList.toggle("on", skillSel === i);
 
       card.querySelector(".sktype").addEventListener("change", (e) => {
         if (!at()) return;
         at().type = e.target.value;
         commitSkills();
+      });
+      card.querySelector(".skdir").addEventListener("change", (e) => {
+        if (!at()) return;
+        at().dir = e.target.value;
+        commitSkills(); drawMasks();
       });
       card.querySelector(".skjp").addEventListener("change", (e) => {
         if (!at()) return;
@@ -2602,15 +2611,9 @@
                       Math.round(g[2] * 1.5 + 20), Math.round(g[3] * 1.35)];
         commitSkills(); renderSkills(); drawMasks();
       });
-      card.querySelector(".skedit").addEventListener("click", () => {
-        skillSel = (skillSel === i) ? -1 : i;
-        if (skillSel >= 0) {
-          // 冻结当前人物身体中心当锚点：编辑期间角色动了也不让框漂移
-          skillAnchor = lastBodyC ? [...lastBodyC] : null;
-          skillFrame = [lastFrameW || 0, lastFrameH || 0];
-          if (!skillAnchor) toast("还没定位到人物：先上传名字牌模板，等画面上出现 ME 框", true);
-        }
-        renderSkills(); drawMasks();
+      editBtn.addEventListener("click", () => {
+        if (skillSel === i) stopSkillEdit();   // 再点一次 = 确认收起
+        else startSkillEdit(i);
       });
 
       // ⠿ 拖动排序：按住把手才允许拖整卡（下拉/格子不受影响）
@@ -2669,10 +2672,49 @@
   const SK_G_LINE = "#16a34a", SK_G_FILL = "rgba(22,163,74,.14)";
   const SK_J_LINE = "#d97706", SK_J_FILL = "rgba(217,119,6,.10)";
 
+  // 编辑期间用 rAF 持续重绘：人物在画面里走动时，范围框实时跟着走
+  let skillRaf = 0;
+  function skillLoop() {
+    if (skillSel < 0) { skillRaf = 0; return; }
+    drawMasks();
+    skillRaf = requestAnimationFrame(skillLoop);
+  }
+
+  function startSkillEdit(i) {
+    skillSel = i;
+    renderSkills();
+    if (!skillRaf) skillRaf = requestAnimationFrame(skillLoop);
+    toast("拖绿色框调整范围（框会跟着人物走），调完点「✓ 完成」或按 Esc");
+  }
+
+  function stopSkillEdit() {
+    if (skillSel < 0) return;
+    const i = skillSel, s = skillsNow[i];
+    skillSel = -1;
+    renderSkills(); drawMasks();
+    if (s) toast(`SK${i + 1} 范围已保存：${skillRectStr(s.ground)}`
+                 + (s.jump ? ` · 跳放 ${skillRectStr(s.jrect)}` : ""));
+  }
+
+  function skillAnchorLive() {
+    // 人物身体中心实时锚点。没定位到人物时退回画面中心偏下（人站的常见高度），
+    // 照样能编辑——等定位回来（画面出现 ME 框）就自动接上真锚点。
+    if (lastBodyC) return { c: lastBodyC, live: true };
+    if (!lastFrameW || !lastFrameH) return null;
+    return { c: [lastFrameW / 2, lastFrameH * 0.62], live: false };
+  }
+
+  function skillAnchorNow() {
+    // 拖动那一会儿锚点冻结在按下那一刻：不然人物一动框跟着漂，鼠标和框对不上
+    if (drag && drag.mode === "skill" && drag.anchor) return drag.anchor;
+    return skillAnchorLive();
+  }
+
   function skillRectsNorm() {
     const s = skillsNow[skillSel];
-    if (skillSel < 0 || !s || !skillAnchor || !skillFrame[0]) return null;
-    const [cx, cy] = skillAnchor, [W, H] = skillFrame;
+    const a = skillAnchorNow();
+    if (skillSel < 0 || !s || !a || !lastFrameW || !lastFrameH) return null;
+    const [cx, cy] = a.c, W = lastFrameW, H = lastFrameH;
     const mk = (r) => ({ x1: (cx - r[0]) / W, y1: (cy - r[2]) / H,
                          x2: (cx + r[1]) / W, y2: (cy + r[3]) / H });
     return { g: mk(s.ground), j: s.jump ? mk(s.jrect) : null };
@@ -2694,8 +2736,9 @@
 
   function applySkillRect(which, r) {
     const s = skillsNow[skillSel];
-    if (!s || !skillAnchor || !skillFrame[0]) return;
-    const [cx, cy] = skillAnchor, [W, H] = skillFrame;
+    const a = skillAnchorNow();
+    if (!s || !a || !lastFrameW || !lastFrameH) return;
+    const [cx, cy] = a.c, W = lastFrameW, H = lastFrameH;
     const c0 = (v) => Math.max(0, Math.round(v));
     const four = [c0(cx - r.x1 * W), c0(r.x2 * W - cx),
                   c0(cy - r.y1 * H), c0(r.y2 * H - cy)];
@@ -2707,6 +2750,9 @@
     if (skillSel < 0 || !skillsNow[skillSel]) return;
     const rects = skillRectsNorm();
     if (!rects) return;
+    const s = skillsNow[skillSel];
+    const dir_ = s.dir || "both";
+    const a = skillAnchorNow();
     // 先画跳放（虚线橙），地面框叠在上面
     for (const [r, line, fill, dash, tag] of [
       [rects.j, SK_J_LINE, SK_J_FILL, [6, 4], "跳放"],
@@ -2743,23 +2789,64 @@
       });
     }
     // 锚点：人物身体中心（蓝十字），框都以它为基准
-    const ax = X(skillAnchor[0] / skillFrame[0]);
-    const ay = Y(skillAnchor[1] / skillFrame[1]);
+    const ax = X(a.c[0] / lastFrameW);
+    const ay = Y(a.c[1] / lastFrameH);
     mctx.strokeStyle = "#185fa5";
     mctx.lineWidth = 1.5;
     mctx.beginPath();
     mctx.moveTo(ax - 7, ay); mctx.lineTo(ax + 7, ay);
     mctx.moveTo(ax, ay - 7); mctx.lineTo(ax, ay + 7);
     mctx.stroke();
+    // 方向指示：以锚点竖虚线为界，不参与判定的半边压暗 + 活动侧箭头
+    if (dir_ !== "both") {
+      const gr = rects.g;
+      mctx.setLineDash([4, 4]);
+      mctx.strokeStyle = "#64748b";
+      mctx.lineWidth = 1;
+      mctx.beginPath();
+      mctx.moveTo(ax, Y(0)); mctx.lineTo(ax, Y(1));
+      mctx.stroke();
+      mctx.setLineDash([]);
+      if (dir_ === "left" && gr) {           // 仅左：右半边压暗
+        mctx.fillStyle = "rgba(100,116,139,.30)";
+        mctx.fillRect(ax, Y(gr.y1), (gr.x2 - a.c[0] / lastFrameW) * L.w,
+                      (gr.y2 - gr.y1) * L.h);
+      } else if (dir_ === "right" && gr) {   // 仅右：左半边压暗
+        mctx.fillStyle = "rgba(100,116,139,.30)";
+        mctx.fillRect(X(gr.x1), Y(gr.y1),
+                      (a.c[0] / lastFrameW - gr.x1) * L.w, (gr.y2 - gr.y1) * L.h);
+      }
+      // 箭头画在框顶上方：front 两侧各一个（朝哪边打哪边），left/right 只画活动侧
+      const arrow = (x, txt) => {
+        mctx.font = "600 11px system-ui, sans-serif";
+        mctx.fillStyle = dir_ === "front" ? "#475569" : SK_G_LINE;
+        mctx.textAlign = "center";
+        mctx.fillText(txt, x, Y(rects.g.y1) - 6);
+        mctx.textAlign = "left";
+      };
+      if (dir_ === "front") {
+        arrow((ax + X(rects.g.x1)) / 2, "← 朝左时打这边");
+        arrow((ax + X(rects.g.x2)) / 2, "朝右时打这边 →");
+      } else if (dir_ === "left") {
+        arrow((ax + X(rects.g.x1)) / 2, "← 只打左边");
+      } else {
+        arrow((ax + X(rects.g.x2)) / 2, "只打右边 →");
+      }
+    }
+    // 顶部提示条：怎么操作、怎么收尾；锚点是兜底值时一并说明
+    mctx.font = "600 12px system-ui, sans-serif";
+    const hint = `SK${skillSel + 1} 范围编辑 · 拖框移动 / 拉角缩放 · 完成点「✓ 完成」或按 Esc`
+      + (a.live ? "" : " ·（还没定位到人物：暂以画面中心为锚，定位后自动跟随）");
+    const tw = mctx.measureText(hint).width;
+    mctx.fillStyle = "rgba(15,23,42,.82)";
+    mctx.fillRect(8, 8, tw + 16, 24);
+    mctx.fillStyle = "#e2e8f0";
+    mctx.fillText(hint, 16, 24);
   }
 
   // Esc 退出范围编辑（录键的 Esc 由录制逻辑自己处理，这里让开）
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && skillSel >= 0 && !rec) {
-      skillSel = -1;
-      renderSkills();
-      drawMasks();
-    }
+    if (e.key === "Escape" && skillSel >= 0 && !rec) stopSkillEdit();
   });
 
   async function pollBot() {
