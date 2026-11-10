@@ -655,7 +655,7 @@ c = step(b, m=M_FAR, size=(2049, 1152))
 check("2049 画面下同一只怪进框 → 出手（范围跟着放大）",
       ATK in down_keys(c), down_keys(c))
 
-print("\n[29] 走位不许走出人物识别区（名字牌一被框切掉半边就认不出人）")
+print("\n[29] 走位以人物识别区为墙，但识别区外面有怪要追出去打")
 ROI_N = (0.30, 0.08, 0.60, 0.90)          # 1366 宽下：x 410~820，左右各留 3% 余量
 lim = bot.walk_x_limits((1366, 768), ROI_N)
 check("活动范围 = 识别区左右各收 3% 画面宽",
@@ -666,14 +666,40 @@ _narrow = bot.walk_x_limits((1366, 768), (0.5, 0.1, 0.51, 0.9))
 check("识别区窄到没余地 → 围着中心给一条缝，不会两边反着判",
       _narrow is not None and _narrow[1] - _narrow[0] == 16.0
       and abs(sum(_narrow) / 2 - 1366 * 0.505) < 0.5, _narrow)
+_chase = bot.walk_x_limits((1366, 768), ROI_N, bot.WALK_CHASE_MARGIN)
+check("追击余量：墙往外放，左右各多出 15% 画面宽",
+      _chase is not None and abs(_chase[1] - (lim[1] + 1366 * 0.15)) < 0.01
+      and abs(_chase[0] - (lim[0] - 1366 * 0.15)) < 0.01, (lim, _chase))
+_wide = bot.walk_x_limits((1366, 768), (0.12, 0.08, 0.88, 0.90), 0.15)
+check("追击也不进左右 HUD 条（小地图/任务栏里印着同名文字）",
+      _wide is not None and abs(_wide[0] - 1366 * bot.WALK_HUD_SIDE) < 0.01
+      and abs(_wide[1] - 1366 * (1 - bot.WALK_HUD_SIDE)) < 0.01, _wide)
 
-# 站在右边界上，怪在更右边 → 不许再往右走
+# 站在识别区右边界上，怪就在框外一点点（走两步够得着）→ 追出去打，别杵着
 EDGE_R = [760, 300, 820, 320]             # 名字牌中心 790 > hi - 1
 b = make()
+c = step(b, m=[{"name": "Stump", "box": [900, 300, 960, 360], "conf": 0.9}],
+         char=EDGE_R, size=(1366, 768), roi=ROI_N)
+check("识别区外的怪够得着 → 按住 right 追出去", "right" in down_keys(c), c)
+check("状态写明是追出识别区", "追出识别区" in b.snapshot()[1]["act"], b.snapshot()[1])
+
+# 怪在屏幕那一头，走到底（含追击余量）也够不着 → 不追，转成巡逻，不会傻站着
+b = make()
+b._patrol_dir = -1
+b._t_patrol = time.time()                 # 刚换过向，别让计时器插一脚
 c = step(b, m=[{"name": "Stump", "box": [1150, 300, 1210, 360], "conf": 0.9}],
          char=EDGE_R, size=(1366, 768), roi=ROI_N)
-check("已经贴到右边界 → 不按 right", "right" not in down_keys(c), c)
-check("状态说明是识别区边缘", "识别区" in b.snapshot()[1]["act"], b.snapshot()[1])
+check("够不着的怪 → 不往右追", "right" not in down_keys(c), c)
+check("够不着的那只不当目标", b.snapshot()[1]["target"] == "", b.snapshot()[1])
+check("改成巡逻往回走（不是干站着）", "left" in down_keys(c), c)
+# 关掉巡逻也不许「到边界顶墙」：状态要说明够不着
+b = make()
+b.cfg["patrol"] = False
+c = step(b, m=[{"name": "Stump", "box": [1150, 300, 1210, 360], "conf": 0.9}],
+         char=EDGE_R, size=(1366, 768), roi=ROI_N)
+check("巡逻关着 → 站住但状态说清楚（够不着）",
+      "right" not in down_keys(c) and "够不着" in b.snapshot()[1]["act"],
+      (c, b.snapshot()[1]))
 # 同一位置，怪在左边（往里走）→ 照走，它得能自己走回来
 b = make()
 c = step(b, m=[{"name": "Stump", "box": [500, 300, 560, 360], "conf": 0.9}],

@@ -624,15 +624,22 @@ def skill_scale(cfg, size):
 
 
 WALK_EDGE_MARGIN = 0.03   # 走位时人物身体中心离识别区左右边界至少留这么多（占画面宽）
+WALK_CHASE_MARGIN = 0.15  # 识别区外有怪时允许再往外追这么多（占画面宽）
+WALK_HUD_SIDE = 0.11      # 追怪也不越过 x < 11%W / x > 89%W：HUD 条里印着同名文字，认不准
 
 
-def walk_x_limits(size, roi):
+def walk_x_limits(size, roi, chase=0.0):
     """挂机走位允许的人物身体中心 x 范围 (lo, hi)；没配识别区就返回 None（不限）。
 
     「人物识别区」（面板上那个框）不只是找人的搜索窗，它同时是挂机的**活动
     边界**：身体中心一走出一左右边界，名字牌就有一半落在框外，模板匹配分数
     立刻掉下来——这就是用户说的「太靠左太靠右就脱离识别区」。所以走位以它
     当墙，左右各留一点余量（名字牌本身有半个牌宽，贴边也会被切掉半边）。
+
+    chase > 0 时（识别区外面有怪要够）：墙往外放 chase 个画面宽。放出去的
+    那一小段靠 find_char 的「搜索块并上上一帧的框」照样跟得住人；追太远
+    名字牌会撞进左右 HUD 条（小地图/任务栏里印着同一个名字，分数一样高，
+    会把框引走），所以再怎么放也不越过 WALK_HUD_SIDE。
     """
     if not size or not roi:
         return None
@@ -645,6 +652,11 @@ def walk_x_limits(size, roi):
         return None
     m = max(24.0, w * WALK_EDGE_MARGIN)
     lo, hi = x1 * w + m, x2 * w - m
+    if chase and chase > 0:
+        d = w * float(chase)
+        hl, hr = w * WALK_HUD_SIDE, w * (1.0 - WALK_HUD_SIDE)
+        lo = max(lo - d, min(hl, lo))
+        hi = min(hi + d, max(hr, hi))
     if hi - lo < 8.0:                 # 识别区窄到没有活动余地：围绕中心给一条缝
         mid = (x1 + x2) * w / 2.0
         lo, hi = mid - 8.0, mid + 8.0
@@ -681,6 +693,24 @@ def _band_target(char_box, monsters, band, dy_tol):
         if best_d is None or d < best_d:
             best, best_d = m, d
     return best
+
+
+def _reachable_x(char_box, tb, band, size, roi):
+    """朝 tb 走过去（最多走到走位边界，含追击余量）之后，技能带横向还压得住它吗。
+
+    走位是活的：人往前挪多少，技能带就跟着挪多少，所以「够不够得着」不能只按现在
+    的位置判——怪在识别区外面一点点，走两步就够了；怪在屏幕那一头，走到底也够不
+    着，追出去只是白丢一次定位（追到墙角傻站着，回来还得重新找人）。band 是当前
+    朝向下的判定框并集，取它的横向跨度做判据。
+    """
+    if band is None or not tb:
+        return False
+    cx = _cx(char_box)
+    dx = _cx(tb) - cx
+    lim = walk_x_limits(size, roi, WALK_CHASE_MARGIN)
+    if lim is not None:
+        dx = max(lim[0] - cx, min(lim[1] - cx, dx))
+    return band[0] + dx < tb[2] and tb[0] < band[2] + dx
 
 
 class Bot:
@@ -819,13 +849,13 @@ class Bot:
         self._held = 0
 
     # ---- 状态 ----
-    def _can_walk(self, side, char, size, roi):
-        """往 side 再走一步会不会把人物身体中心带出识别区。
+    def _can_walk(self, side, char, size, roi, chase=0.0):
+        """往 side 再走一步会不会把人物身体中心带出识别区（chase>0 时边界外放）。
 
         已经站在墙外（比如被击退出去）时反过来判：往里走一律放行，这样它会
         自己走回来，而不是在墙外继续顶着。
         """
-        lim = walk_x_limits(size, roi)
+        lim = walk_x_limits(size, roi, chase)
         if lim is None:
             return True
         cx = _cx(char)
@@ -1089,9 +1119,10 @@ class Bot:
                     max(band[2], rect[2]), max(band[3], rect[3])]
 
         if not cands:
-            # 没有技能罩得住的怪：像以前一样朝最近的目标走 / 巡逻
+            # 没有技能罩得住的怪：朝最近的目标走 / 巡逻
             self._set_status(target="")
             tgt = _band_target(char, monsters, band, cfg["dy_tol"] * k)
+            side, why = 0, ""
             if tgt:
                 tb = tgt["box"]
                 dx = _cx(tb) - _cx(char)
@@ -1100,20 +1131,27 @@ class Bot:
                 if band[0] < tb[2] and tb[0] < band[2]:
                     # 水平上已经挨着技能带了，只是高度差太多（下一层/头顶太高）
                     # → 站住：再走过去也打不着，别白走
-                    self._set_dir(0)
-                    self._set_status(act="高度够不着")
+                    side, why = 0, "高度够不着"
                 elif not cfg["move"]:
-                    self._set_dir(0)
-                    self._set_status(act="目标太远")
-                elif not self._can_walk(side, char, size, roi):
-                    # 再走就出识别区了（名字牌会被框切掉一半，立刻认不出人）
-                    # → 站住打框里能打到的，等人/怪自己回来
-                    self._set_dir(0)
-                    self._set_status(act="到识别区边缘，不再往外走")
+                    side, why = 0, "目标太远"
+                elif not _reachable_x(char, tb, band, size, roi):
+                    # 怪在识别区外面，而且走到底（含追击余量）也够不着：追出去
+                    # 只会一路走到墙外、跟丢人，回来还得重新找——当它不存在，
+                    # 交给巡逻，别杵在原地（用户说的「识别区外有怪就傻站着」）
+                    side, why = 0, "怪在识别区外，够不着"
+                    self._set_status(target="")
                 else:
+                    # 够得着就追——走位边界带追击余量，怪在识别区外面一点点也
+                    # 要走过去打，别在墙边站着等
+                    out = not self._can_walk(side, char, size, roi)
                     self._set_dir(side)
                     self._face = side
-                    self._set_status(act="走向目标")
+                    self._set_status(act="追出识别区" if out else "走向目标", err="")
+            if side:
+                return
+            if why == "高度够不着":
+                self._set_dir(0)
+                self._set_status(act=why)
             elif cfg["patrol"]:
                 if now - self._t_patrol >= cfg["patrol_sec"]:
                     self._patrol_dir = -self._patrol_dir
@@ -1125,13 +1163,13 @@ class Bot:
                 if self._can_walk(self._patrol_dir, char, size, roi):
                     self._set_dir(self._patrol_dir)
                     self._face = self._patrol_dir
-                    self._set_status(act="巡逻找怪")
+                    self._set_status(act="巡逻找怪", err="")
                 else:
                     self._set_dir(0)
                     self._set_status(act="巡逻到头了（识别区边界）")
             else:
                 self._set_dir(0)
-                self._set_status(act="守株待兔")
+                self._set_status(act=why or "守株待兔")
             return
 
         # 站放优先：只要还有任何技能的「地面框」罩到怪，就绝不跳。跳一次要
