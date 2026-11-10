@@ -377,6 +377,14 @@ DEFAULTS = {
     #   都会改这个宽度。运行时长按 base_w 等比换算，打怪范围才不会缩水或超伸。
     "input": "auto",     # 按键出口：auto 优先硬件 / hid 只认硬件 / soft 只用软件注入
     "hid_port": "",      # 硬件串口，留空自动扫描（CH9329 通常挂在 CH343 那个口上）
+    # 小地图限位：mm_zone 圈了范围才启用。mm_box 是小地图在画面上的位置
+    # （归一化 x1,y1,x2,y2，默认就是左上角那块）；mm_zone 是允许人物活动的
+    # 范围（在 mm_box 里的归一化坐标，面板上对着小地图截图圈）。server 每
+    # 100ms 在小地图里找人物黄点喂给 bot（st["dot"]），黄点贴边就把出界方向
+    # 封死——这是世界坐标的绝对墙，追怪/巡逻都不越，和「人物识别区」那道
+    # 画面墙互补（画面墙是相对的，人走它不动，怪引着引着就走出去了）。
+    "mm_box": [0.00, 0.00, 0.17, 0.26],
+    "mm_zone": [],
 }
 
 # 字符串型配置的合法取值，非法就退回默认，免得写进一个谁都不认识的模式
@@ -476,6 +484,21 @@ def _clamp_skills(v, dflt):
     return out
 
 
+def _clamp_rect01(v, dflt):
+    """归一化矩形 [x1,y1,x2,y2]：4 个 0~1、自动排好 x1<x2 / y1<y2，太窄不要。
+    坏值退回 dflt（mm_zone 传 [] = 关掉限位，mm_box 传默认框）。"""
+    if isinstance(v, list) and len(v) == 4:
+        try:
+            xs = sorted((float(v[0]), float(v[2])))
+            ys = sorted((float(v[1]), float(v[3])))
+            r = [xs[0], ys[0], xs[1], ys[1]]       # 存储格式 [x1,y1,x2,y2]
+            if all(0.0 <= t <= 1.0 for t in r) and xs[1] - xs[0] > 0.02:
+                return [round(t, 3) for t in r]
+        except (TypeError, ValueError):
+            pass
+    return list(dflt) if dflt else []
+
+
 def clamp_cfg(raw):
     """整理一份配置：非法值退回默认，数值钳到合理区间。"""
     raw = dict(raw or {})
@@ -499,6 +522,12 @@ def clamp_cfg(raw):
         v = raw[k]
         if k == "skills":
             out[k] = _clamp_skills(v, dv)
+            continue
+        if k == "mm_box":
+            out[k] = _clamp_rect01(v, dv)
+            continue
+        if k == "mm_zone":
+            out[k] = _clamp_rect01(v, [])
             continue
         if isinstance(dv, bool):
             out[k] = bool(v)
@@ -632,9 +661,29 @@ def skill_scale(cfg, size):
     return min(3.0, max(0.3, float(size[0]) / bw))
 
 
+MM_EDGE = 0.02             # 小地图墙的内缩余量（归一化 0~1）：黄点贴到范围边 2% 就算到墙
+MM_DOT_STALE = 1.2         # 黄点这么多秒没读到就当墙失效（闪烁/被挡时别把人钉死在原地）
 WALK_EDGE_MARGIN = 0.03   # 走位时人物身体中心离识别区左右边界至少留这么多（占画面宽）
 WALK_CHASE_MARGIN = 0.15  # 识别区外有怪时允许再往外追这么多（占画面宽）
 WALK_HUD_SIDE = 0.11      # 追怪也不越过 x < 11%W / x > 89%W：HUD 条里印着同名文字，认不准
+
+
+def _mm_block(zone, dot):
+    """小地图墙：黄点已贴到允许范围的哪条边，就封死往那个方向走。
+
+    返回 -1（不能再往左）/ 1（不能再往右）/ None（不拦：没圈范围、没黄点、
+    或人在范围中间）。zone 是 [u1,v1,u2,v2]（在 mm_box 里归一化），dot 是
+    server 喂的黄点 [u, v]——黄点超过 MM_DOT_STALE 秒没读到时 server 直接
+    喂 None，这里自然不拦（失效开放，别让人物在原地被钉死）。
+    """
+    if not zone or len(zone) < 4 or not dot or len(dot) < 2:
+        return None
+    u = float(dot[0])
+    if u <= zone[0] + MM_EDGE:
+        return -1
+    if u >= zone[2] - MM_EDGE:
+        return 1
+    return None
 
 
 def walk_x_limits(size, roi, chase=0.0):
@@ -771,6 +820,7 @@ class Bot:
         self._t_pick = 0.0
         self._t_patrol = 0.0
         self._patrol_dir = 1
+        self._mm_wall = None      # 小地图墙（-1/1/None），每帧按黄点重算
 
     # ---- 对外 ----
     def snapshot(self):
@@ -865,6 +915,8 @@ class Bot:
         已经站在墙外（比如被击退出去）时反过来判：往里走一律放行，这样它会
         自己走回来，而不是在墙外继续顶着。
         """
+        if self._mm_wall == side:
+            return False               # 小地图绝对墙：贴边方向封死，追击余量也放不出去
         lim = walk_x_limits(size, roi, chase)
         if lim is None:
             return True
@@ -1061,6 +1113,10 @@ class Bot:
             self._t_pick = now
             self._count("pick")
 
+        # 小地图限位：黄点贴到允许范围的边，出界方向封死（_can_walk 里查）。
+        # 黄点丢了/没圈范围 = None，只靠识别区那道墙。
+        self._mm_wall = _mm_block(cfg.get("mm_zone"), st.get("dot"))
+
         size = st.get("size")
         roi = st.get("roi")           # 人物识别区（归一化 x1,y1,x2,y2）：走位的墙
         char = st.get("char")
@@ -1144,6 +1200,11 @@ class Bot:
                     side, why = 0, "高度够不着"
                 elif not cfg["move"]:
                     side, why = 0, "目标太远"
+                elif self._mm_wall == side:
+                    # 目标在小地图范围外：这是绝对墙，追出去这一趔回不来，
+                    # 当它不存在，交给巡逻（别顶着黄点边界站桩）
+                    side, why = 0, "怪在小地图范围外"
+                    self._set_status(target="")
                 elif not _reachable_x(char, tb, band, size, roi):
                     # 怪在识别区外面，而且走到底（含追击余量）也够不着：追出去
                     # 只会一路走到墙外、跟丢人，回来还得重新找——当它不存在，
@@ -1176,7 +1237,8 @@ class Bot:
                     self._set_status(act="巡逻找怪", err="")
                 else:
                     self._set_dir(0)
-                    self._set_status(act="巡逻到头了（识别区边界）")
+                    self._set_status(act="巡逻到头了（小地图边界）" if self._mm_wall is not None
+                                    else "巡逻到头了（识别区边界）")
             else:
                 self._set_dir(0)
                 self._set_status(act=why or "守株待兔")

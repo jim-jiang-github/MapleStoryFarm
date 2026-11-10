@@ -922,6 +922,53 @@ check("技能配置已落盘到临时数据目录",
 check("数据目录确实隔离（不在仓库 webui/ 下）",
       DATA.resolve() != (ROOT / "webui").resolve())
 
+# ---------------- S6b 小地图限位 ----------------
+print("[S6b] 小地图限位：黄点检测 / 配置接口 / 10Hz 线程端到端")
+# 纯函数：黄点检测（冷启动认最大、噪点红块滤掉、prev 优先、跳太远认丢）
+crop = np.zeros((80, 100, 3), np.uint8)
+crop[18:23, 28:33] = (0, 255, 255)      # 黄点 ~ (30.5, 20.5)
+crop[10:12, 10:12] = (0, 255, 255)      # 2×2 噪点（面积 < 6px²）
+crop[40:50, 60:70] = (40, 40, 200)      # 红块（不是黄）
+p = srv.find_dot(crop)
+check("find_dot：冷启动拿最大黄点（噪点/红块不算）",
+      p is not None and abs(p[0] - 30.5) <= 2.5 and abs(p[1] - 20.5) <= 2.5, p)
+p = srv.find_dot(crop, prev=(31.0, 20.0))
+check("find_dot：prev 在附近 → 正常跟踪", p is not None, p)
+check("find_dot：prev 离得远 → 认丢（不乱跳）",
+      srv.find_dot(crop, prev=(95.0, 75.0)) is None)
+crop2 = crop.copy()
+crop2[55:58, 80:83] = (0, 255, 255)     # 第二颗黄点（假 NPC）
+p = srv.find_dot(crop2, prev=(81.0, 56.0))
+check("find_dot：两颗黄点，取离 prev 近的（不是大的）",
+      p is not None and abs(p[0] - 81.5) <= 1.5, p)
+
+# 配置接口：归一化、排序、非法关掉
+code, r = post("/api/mm/zone", {"zone": [0.7, 0.1, 0.3, 0.9]})
+check("POST /api/mm/zone 排序归一", code == 200 and r["zone"] == [0.3, 0.1, 0.7, 0.9], r)
+code, r = post("/api/mm/zone", {"zone": "zz"})
+check("非法范围 → 空（限位关）", code == 200 and r["zone"] == [], r)
+code, r = post("/api/mm/box", {"box": [0.0, 0.0, 0.17, 0.26]})
+check("POST /api/mm/box ok", code == 200 and r["box"] == [0.0, 0.0, 0.17, 0.26], r)
+
+# 端到端：合成帧里画一颗黄点，10Hz 跟踪线程应把它读出来（默认框 0~17%×0~26%）
+post("/api/mm/zone", {"zone": [0.1, 0.1, 0.9, 0.9]})
+img = make_scene()
+img[45:50, 55:60] = (0, 255, 255)       # 黄点中心 ≈ (57.5, 47.5)
+set_frame(img)
+mm_seen = wait_until(lambda: (get("/api/mm")[1] or {}).get("u") is not None, timeout=4)
+check("10Hz 黄点线程读到点", mm_seen)
+mmr = get("/api/mm")[1]
+if mmr and mmr.get("u") is not None:
+    check("黄点归一化位置对（57.5 / 232px）", abs(mmr["u"] - 57.5 / 232) < 0.02, mmr["u"])
+else:
+    check("黄点归一化位置对（57.5 / 232px）", False, mmr)
+code, r = get("/api/mm/crop")
+check("GET /api/mm/crop 返回 JPEG", code == 200 and r[:2] == b"\xff\xd8", code)
+code, r = get("/api/stats")
+check("/api/stats 带 mm 段（面板状态行用）",
+      code == 200 and "mm" in r and "zone" in r["mm"] and "u" in r["mm"], r.get("mm"))
+post("/api/mm/zone", {"zone": []})      # 收尾：关掉限位
+
 # ---------------- S7 真实 HTTP 冒烟 ----------------
 print("[S7] 真实 HTTP 冒烟（uvicorn 线程 + MJPEG）")
 import requests  # noqa: E402

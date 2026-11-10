@@ -2409,14 +2409,170 @@ def _bot_state():
     size = (int(cw), int(chh)) if cw and chh else None
     # roi 一起给 bot：识别区不只是搜索窗，还是走位的边界——人物身体中心一出
     # 左右边界，名字牌就被框切掉一半，立刻认不出来（bot.walk_x_limits）
+    # 小地图黄点（fresh 才给，丢了喂 None：bot 的墙自动失效开放）
+    with mm_lock:
+        d = mm_state["dot"]
+        dts = mm_state["ts"]
+    dot = d if (d and dts > 0 and time.time() - dts <= botmod.MM_DOT_STALE) else None
     return {"fg": _game_foreground(), "hp": hp, "mp": mp, "char": cbox,
-            "size": size, "roi": roi, "monsters": mons}
+            "size": size, "roi": roi, "monsters": mons, "dot": dot}
 
 
 game_bot = botmod.Bot(_bot_state)
 # 上次关着/开着都不自动续跑：重启服务器就自己开始按键盘太吓人了。
 # 参数（血线、距离…）照旧从 botconf.json 读，只有开关强制回关。
 game_bot.update_cfg({"on": False}, save=False)
+
+
+# ---------------- 小地图：人物黄点 ----------------
+# 主画面的像素坐标没有绝对意义（背景跟着卷动），小地图才是「世界坐标」：
+# 黄点是人物在整张地图上的位置。挂机的活动范围（mm_zone）圈在小地图上，
+# 黄点贴边 = 人到了范围边——比「人物识别区」那道画面墙准得多。
+MM_FPS = 10                      # 黄点跟踪频率：够用且几乎不占 CPU（裁剪图才百来像素）
+mm_lock = threading.Lock()
+mm_state = {"dot": None, "px": None, "ts": 0.0}
+# dot = [u, v]（在 mm_box 里归一化，bot 的墙用 u）；px = 全画面坐标（叠加层画）
+
+
+def find_dot(crop, prev=None):
+    """在小地图裁剪图里找人物黄点，返回像素坐标 (x, y)；找不到返回 None。
+
+    黄 = HSV 的 H 20~35 且饱和度/亮度都高。小地图里别的黄点（NPC、任务标记）
+    颜色上分不出来，靠两条规则挑出「人物自己那颗」：
+      1) 有上一帧位置 → 取离它最近且没跳太远的一颗（人 100ms 走不了小地图
+         宽度的 35%）；最近的也超了这个距离 = 人物黄点丢了（被挡/暗相），认丢。
+      2) 没有上一帧 → 取面积最大的一颗（人物点通常比杂点大）。
+    太小的噪点（<6px²）和太大的色块（超过小地图一半宽）都不算。
+    """
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    m = cv2.inRange(hsv, (20, 90, 150), (35, 255, 255))
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+    ch, cw = crop.shape[:2]
+    cands = []
+    for c in cnts:
+        x, y, bw, bh = cv2.boundingRect(c)
+        area = bw * bh
+        if area < 6 or bw > cw * 0.5:
+            continue
+        cands.append(((x + bw / 2.0, y + bh / 2.0), area))
+    if not cands:
+        return None
+    if prev is not None:
+        def d2(p):
+            return (p[0][0] - prev[0]) ** 2 + (p[0][1] - prev[1]) ** 2
+        cands.sort(key=d2)
+        if d2(cands[0]) ** 0.5 > 0.35 * cw:
+            return None                  # 离上一帧太远：当这帧没有人物黄点
+        return cands[0][0]
+    cands.sort(key=lambda p: -p[1])      # 冷启动：拿最大那颗当人物
+    return cands[0][0]
+
+
+def _mm_box_px(box, frame):
+    """mm_box（归一化）→ 当前帧上的像素矩形 (x1,y1,x2,y2)；太小了返回 None。"""
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = (int(box[0] * w), int(box[1] * h),
+                      int(box[2] * w), int(box[3] * h))
+    if x2 - x1 < 8 or y2 - y1 < 6:
+        return None
+    return x1, y1, x2, y2
+
+
+def mm_loop():
+    """10Hz 跟踪小地图黄点；没圈范围就歇着。找不到（闪烁暗相/被挡）不清
+    旧位置：bot 侧超过 MM_DOT_STALE 秒没新点自己会失效开放，别在这抖。
+    连续丢 1 秒（换过小地图框/跟丢了）就冷启动重来，免得拿旧 prev 永远认丢。"""
+    prev = None
+    misses = 0
+    while True:
+        try:
+            cfg, _ = game_bot.snapshot()
+            zone = cfg.get("mm_zone") or []
+            box = cfg.get("mm_box") or []
+            if not zone or len(box) != 4 or not grabber.window_found:
+                with mm_lock:
+                    mm_state["dot"] = None
+                    mm_state["px"] = None
+                prev = None
+                misses = 0
+                time.sleep(0.3)
+                continue
+            frame = grabber.snapshot()
+            r = _mm_box_px(box, frame)
+            if r is None:
+                time.sleep(0.2)
+                continue
+            x1, y1, x2, y2 = r
+            crop = frame[y1:y2, x1:x2]
+            px = find_dot(crop, prev)
+            if px is not None:
+                prev = (px[0], px[1])
+                misses = 0
+                ch, cw = crop.shape[:2]
+                with mm_lock:
+                    mm_state["dot"] = [px[0] / cw, px[1] / ch]
+                    mm_state["px"] = [px[0] + x1, px[1] + y1]
+                    mm_state["ts"] = time.time()
+            else:
+                misses += 1
+                if misses >= MM_FPS:      # 连丢 1 秒：丢掉旧 prev，按最大黄点重新认
+                    prev = None
+                    misses = 0
+        except Exception:
+            pass
+        time.sleep(1.0 / MM_FPS)
+
+
+threading.Thread(target=mm_loop, daemon=True, name="mm").start()
+
+
+def mm_info():
+    """小地图限位当前状态（/api/stats、叠加层共用）。zone 空 = 没启用。"""
+    cfg, _ = game_bot.snapshot()
+    zone = list(cfg.get("mm_zone") or [])
+    box = list(cfg.get("mm_box") or [])
+    with mm_lock:
+        dot = list(mm_state["dot"]) if mm_state["dot"] else None
+        px = list(mm_state["px"]) if mm_state["px"] else None
+        ts = mm_state["ts"]
+    fresh = dot is not None and ts > 0 and time.time() - ts <= botmod.MM_DOT_STALE
+    return {"zone": zone, "box": box,
+            "u": dot[0] if fresh else None,
+            "v": dot[1] if fresh else None,
+            "px": px if fresh else None,
+            "age_ms": round((time.time() - ts) * 1000, 0) if ts else -1}
+
+
+MM_BOX_COLOR = (200, 200, 200)    # BGR 灰：小地图框本身
+MM_ZONE_COLOR = (60, 220, 60)     # BGR 绿：活动范围两条边
+MM_DOT_COLOR = (255, 80, 255)     # BGR 品红：黄点当前位置
+
+
+def overlay_minimap(img):
+    """把小地图限位画到画面上：灰框=小地图位置，绿线=范围左右边，品红=黄点。
+    只有圈了范围才画——没启用时一个像素都不动。"""
+    info = mm_info()
+    if not info["zone"] or len(info["box"]) != 4:
+        return img
+    h, w = img.shape[:2]
+    box = info["box"]
+    x1, y1 = int(box[0] * w), int(box[1] * h)
+    x2, y2 = int(box[2] * w), int(box[3] * h)
+    if x2 - x1 < 4 or y2 - y1 < 3:
+        return img
+    cv2.rectangle(img, (x1, y1), (x2, y2), MM_BOX_COLOR, 1)
+    z = info["zone"]
+    zx1 = int(x1 + z[0] * (x2 - x1))
+    zx2 = int(x1 + z[2] * (x2 - x1))
+    cv2.line(img, (zx1, y1), (zx1, y2), MM_ZONE_COLOR, 2)
+    cv2.line(img, (zx2, y1), (zx2, y2), MM_ZONE_COLOR, 2)
+    if info["px"]:
+        cv2.circle(img, (int(info["px"][0]), int(info["px"][1])),
+                   3, MM_DOT_COLOR, -1)
+    return img
 
 
 def _dash(img, p1, p2, color, thick=1, seg=9):
@@ -3114,6 +3270,7 @@ async def stats():
         "show_hits": det_state["show_hits"],
         "max_fps": det_state["max_fps"],
         "bot_on": game_bot.snapshot()[0]["on"],
+        "mm": mm_info(),
         "pending": tracker.pending,
         "top_classes": [f"{k}×{v}" for k, v in top],
         "detect_error": det_state["error"],
@@ -3369,6 +3526,44 @@ async def ui_get():
     """面板的纯显示状态。目前只有 skill_focus：画面上只画哪一张技能的范围。"""
     with ui_lock:
         return JSONResponse(dict(ui_state))
+
+
+@app.get("/api/mm")
+async def mm_get():
+    """小地图限位：范围/小地图框/黄点当前位置（面板状态行用）。"""
+    return JSONResponse(mm_info())
+
+
+@app.post("/api/mm/box")
+async def mm_set_box(body: dict = Body(...)):
+    """设置小地图在画面上的位置（归一化 x1,y1,x2,y2）。换了框黄点跟踪重置。"""
+    box = botmod._clamp_rect01(body.get("box"), list(botmod.DEFAULTS["mm_box"]))
+    cfg = game_bot.update_cfg({"mm_box": box})
+    return JSONResponse({"ok": True, "box": cfg["mm_box"]})
+
+
+@app.post("/api/mm/zone")
+async def mm_set_zone(body: dict = Body(...)):
+    """圈/清活动范围（在 mm_box 里归一化 x1,y1,x2,y2；空数组 = 关掉限位）。"""
+    zone = botmod._clamp_rect01(body.get("zone"), [])
+    cfg = game_bot.update_cfg({"mm_zone": zone})
+    return JSONResponse({"ok": True, "zone": cfg["mm_zone"]})
+
+
+@app.get("/api/mm/crop")
+async def mm_crop():
+    """当前小地图那块的截图（面板圈范围弹窗里当底图画框）。"""
+    cfg, _ = game_bot.snapshot()
+    box = cfg.get("mm_box") or []
+    if not grabber.window_found or len(box) != 4:
+        return JSONResponse({"detail": "没有画面，先开一次游戏窗口"}, status_code=400)
+    frame = grabber.snapshot()
+    r = _mm_box_px(box, frame)
+    if r is None:
+        return JSONResponse({"detail": "小地图框太小，先调一下「小地图框」"}, status_code=400)
+    x1, y1, x2, y2 = r
+    jpg = encode(frame[y1:y2, x1:x2])
+    return Response(content=jpg, media_type="image/jpeg")
 
 
 @app.post("/api/ui/set")
@@ -3740,6 +3935,7 @@ async def snapshot(focus: int = 0, fresh: int = 1, bars: int = 0,
     if bars:
         frame = await asyncio.to_thread(bars_overlay_frame, frame)
     frame = overlay_char(frame)         # 人物标记跟识别开关无关，始终画（有模板才画）
+    frame = overlay_minimap(frame)      # 小地图限位（圈了范围才画）
     jpg = encode(frame, width=(w or None), quality=(q or 92))
     # 响应头只能是 latin-1，所以这里放英文状态；中文说明走 /api/window/focus 的 JSON
     state = "skip" if not focus else ("ok" if focus_ok else "fail")
@@ -3772,6 +3968,7 @@ async def stream(bars: int = 0, w: int = 0, q: int = 0):
             else:
                 src = grabber.snapshot()      # 已经是副本
             src = overlay_char(src)
+            src = overlay_minimap(src)   # 小地图限位（圈了范围才画）
             if bars:
                 src = await asyncio.to_thread(bars_overlay_frame, src)
             # 编解码放线程：cv2 会释放 GIL，别把事件循环堵住（否则血条/统计请求排队）

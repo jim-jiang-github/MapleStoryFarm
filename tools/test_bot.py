@@ -30,7 +30,8 @@ def step(b, now=None, **kw):
     st = {"fg": kw.get("fg", True), "hp": kw.get("hp", 100.0),
           "mp": kw.get("mp"), "char": kw.get("char", CHAR),
           "size": kw.get("size"), "roi": kw.get("roi"),
-          "monsters": kw.get("monsters", list(kw.get("m", [])))}
+          "monsters": kw.get("monsters", list(kw.get("m", []))),
+          "dot": kw.get("dot")}
     b.get_state = lambda: st
     calls.clear()
     b._step(b.cfg, now=now)
@@ -776,6 +777,56 @@ c = step(b, m=[], char=None, size=(1366, 768), roi=ROI_N)
 check("往右走回来（巡逻的反方向）", b._held == 1 and "left" not in down_keys(c), c)
 check("往回走不受识别区边界拦（人已经在墙外，得让它走回来）",
       "right" in down_keys(c), c)
+
+print("\n[31] 小地图限位：黄点贴边 = 出界方向封死（世界坐标的绝对墙）")
+Z = [0.2, 0.0, 0.8, 1.0]                 # 允许活动 20%~80%
+check("_mm_block：中间不拦", bot._mm_block(Z, [0.5, 0.5]) is None,
+      bot._mm_block(Z, [0.5, 0.5]))
+check("_mm_block：贴左墙 → 封左", bot._mm_block(Z, [0.15, 0.5]) == -1,
+      bot._mm_block(Z, [0.15, 0.5]))
+check("_mm_block：贴右墙 → 封右", bot._mm_block(Z, [0.85, 0.5]) == 1,
+      bot._mm_block(Z, [0.85, 0.5]))
+check("_mm_block：没圈范围不拦", bot._mm_block([], [0.99, 0.5]) is None)
+check("_mm_block：黄点丢了不拦", bot._mm_block(Z, None) is None)
+
+# 怪在右边（识别区外但够得着）：黄点已在右墙 → 不追，转巡逻
+b = make()
+b.cfg["patrol"] = True
+b.cfg["mm_zone"] = Z
+b._patrol_dir = 1                        # 巡逻本来要往右
+far_r = [{"name": "Stump", "box": [1100, 300, 1160, 360], "conf": 0.9}]
+c = step(b, m=far_r, size=(1366, 768), dot=[0.79, 0.5])
+check("黄点贴右墙：不往右追", "right" not in down_keys(c), c)
+check("目标被当不存在", b.snapshot()[1].get("target") == "", b.snapshot()[1])
+# 黄点丢了（None）：墙失效，照常追出去（fail-open，别钉死）
+b2 = make()
+b2.cfg["mm_zone"] = Z
+c = step(b2, m=far_r, size=(1366, 768), dot=None)
+check("黄点丢了：照常追", "right" in down_keys(c), c)
+
+# 巡逻撞小地图墙：立刻掉头（识别区那道墙还远着）
+b = make()
+b.cfg["patrol"] = True
+b.cfg["mm_zone"] = Z
+b._patrol_dir = -1                       # 往左巡逻，黄点已贴左墙
+b._t_patrol = time.time()
+c = step(b, m=[], size=(1366, 768), roi=None, dot=[0.15, 0.5])
+check("巡逻撞小地图左墙 → 这一帧不按 left", "left" not in down_keys(c), c)
+check("巡逻方向翻过来了", b._patrol_dir == 1, b._patrol_dir)
+c = step(b, m=[], size=(1366, 768), roi=None, dot=[0.15, 0.5])
+check("下一帧往右巡逻", b._held == 1, b._held)
+
+# 没圈范围的配置：一切如旧
+b = make()
+b.cfg["patrol"] = True
+c = step(b, m=far_r, size=(1366, 768), dot=[0.99, 0.5])
+check("没圈范围：照常往右追", "right" in down_keys(c), c)
+
+# clamp：坏值/顺序自动整理
+check("mm_zone 乱序自动整理", bot.clamp_cfg({"mm_zone": [0.8, 1, 0.2, 0]})["mm_zone"]
+      == [0.2, 0.0, 0.8, 1.0], bot.clamp_cfg({"mm_zone": [0.8, 1, 0.2, 0]})["mm_zone"])
+check("mm_zone 非法 → 空（关）", bot.clamp_cfg({"mm_zone": "x"})["mm_zone"] == [])
+check("mm_zone 太窄 → 空（关）", bot.clamp_cfg({"mm_zone": [0.4, 0, 0.41, 1]})["mm_zone"] == [])
 
 print(f"\n通过 {ok} / {ok + fail}")
 sys.exit(1 if fail else 0)
