@@ -304,8 +304,11 @@ check("GET /api/motion 200", code == 200 and isinstance(motion, dict))
 code, stats = get("/api/stats")
 check("GET /api/stats 200 且含 bot_on/window_found",
       code == 200 and "bot_on" in stats and "window_found" in stats)
-check("技能范围是四条滑块（左/右/上/下），不再是四个数字输入框",
-      b'skgrid' in html and b'class="skr"' in html and b'type="number"' not in html)
+check("技能范围是滑块（宽/上/下），不再是数字输入框",
+      b'skgrid' in html and b'class="skr"' in html and b'data-a="w"' in html
+      and b'type="number"' not in html)
+check("方向改成两种：以人物为中心 / 正前方",
+      "以人物为中心".encode() in html and "正前方".encode() in html)
 check("卡片里不再画示意图（范围只画在实时画面上，不重复占一块画布）",
       b"skmini" not in html)
 check("「以地面范围放大」按钮仍是删掉的状态（两套范围互不派生）",
@@ -508,8 +511,9 @@ check("范围外的怪 → 按住 right 走过去", wait_until(
 post("/api/bot/set", {"skills": [
     {"key": "KeyS", "type": "single", "dir": "left",
      "ground": [150, 150, 60, 60], "jump": False, "jrect": [150, 150, 220, 140]}]})
-check("旧值 left → 迁移成 front（没有固定单边的技能）",
-      srv.game_bot.cfg["skills"][0]["dir"] == "front",
+check("旧值 left → 迁移成 front（没有固定单边的技能），左偏移收成 0",
+      srv.game_bot.cfg["skills"][0]["dir"] == "front"
+      and srv.game_bot.cfg["skills"][0]["ground"][0] == 0,
       srv.game_bot.cfg["skills"][0])
 
 # 方向：身前单向 → 左右两半边都是感知范围，出手前先转身朝怪
@@ -563,8 +567,8 @@ _box = [600.0, 380.0, 640.0, 392.0]
 def _sk_span(face, on):
     srv.game_bot.cfg["on"] = on
     srv.game_bot.cfg["skills"] = [{"key": "KeyS", "type": "single", "dir": "front",
-                                   "ground": [30, 170, 60, 60], "jump": False,
-                                   "jrect": [30, 170, 100, 60]}]
+                                   "ground": [0, 200, 60, 60], "jump": False,
+                                   "jrect": [0, 200, 100, 60]}]
     srv.game_bot._status["face"] = face
     im = _flat.copy()
     srv.draw_skill_ranges(im, _box)
@@ -573,10 +577,10 @@ def _sk_span(face, on):
 
 
 _sp_r, _sp_l = _sk_span(1, True), _sk_span(-1, True)
-check("朝右框宽 ≈200（左30+右170）",
-      _sp_r and 190 <= _sp_r[1] - _sp_r[0] <= 240, _sp_r)
+check("朝右框宽 ≈200（人物中心往右 200）",
+      _sp_r and 190 <= _sp_r[1] - _sp_r[0] <= 250, _sp_r)
 check("朝左框同样宽 ≈200（整体镜像，不是 30px 窄条）",
-      _sp_l and 190 <= _sp_l[1] - _sp_l[0] <= 240, _sp_l)
+      _sp_l and 190 <= _sp_l[1] - _sp_l[0] <= 250, _sp_l)
 check("朝左的框确实翻到了左边（左边界比朝右更靠左）",
       _sp_l and _sp_r and _sp_l[0] < _sp_r[0] - 100, (_sp_l, _sp_r))
 _sp_off = _sk_span(1, False)
@@ -653,8 +657,8 @@ srv.game_bot.cfg["on"] = False
 srv.game_bot.cfg["base_w"] = 0              # 1:1，数字好核对
 srv.game_bot._status["face"] = 0            # bot 那份朝向是停着的旧值，不该被用到
 srv.game_bot.cfg["skills"] = [{"key": "KeyS", "type": "single", "dir": "front",
-                               "ground": [30, 170, 60, 60], "jump": False,
-                               "jrect": [30, 170, 100, 60]}]
+                               "ground": [0, 200, 60, 60], "jump": False,
+                               "jrect": [0, 200, 100, 60]}]
 
 
 def _span_face():
@@ -670,15 +674,16 @@ srv.observe_face([_box[0] + 40, _box[1], _box[2] + 40, _box[3]])   # 往右挪 4
 _fr = _span_face()
 srv.observe_face([_box[0] - 60, _box[1], _box[2] - 60, _box[3]])   # 再往左挪 100px
 _fl = _span_face()
-check("没走过时朝向未知：身前框两边对称展开", _f0 and _f0[1] - _f0[0] >= 300, _f0)
-check("往右走 40px → 朝右：框只往右边伸", _fr and _f0 and _fr[0] > _f0[0] + 80,
-      (_f0, _fr))
+check("朝向还没读到：按朝右画，框只在人物右侧（不再偷偷对称展开）",
+      _f0 and _f0[1] - _f0[0] <= 260 and _f0[0] > 560, _f0)
+check("往右走 40px → 朝右：框还在右边，不翻",
+      _fr and _f0 and abs(_fr[0] - _f0[0]) < 50, (_f0, _fr))
 check("往左走 → 朝左：框整体镜像翻到左边", _fl and _fr and _fl[1] < _fr[1] - 80,
       (_fr, _fl))
 
-# 用户真实的配置：方向=左右 + 左0 右140（只够得着身前那半边）。以前镜像只对
+# 用户真实的配置：方向=正前方 + 宽 140（只够得着身前那半边）。以前镜像只对
 # dir=front 生效，这种框朝左时纹丝不动 —— 就是用户看到的「框不跟着朝向」。
-srv.game_bot.cfg["skills"] = [{"key": "KeyS", "type": "single", "dir": "both",
+srv.game_bot.cfg["skills"] = [{"key": "KeyS", "type": "single", "dir": "front",
                                "ground": [0, 140, 55, 31], "jump": False,
                                "jrect": [0, 153, 103, 42]}]
 with srv.char_lock:
@@ -689,12 +694,12 @@ srv.observe_face([_box[0] + 40, _box[1], _box[2] + 40, _box[3]])
 _br = _span_face()
 srv.observe_face([_box[0] - 60, _box[1], _box[2] - 60, _box[3]])
 _bl = _span_face()
-check("左右 + 左0右140：朝向未知时照原样，只往右边伸（左右技能不当成两边都够）",
+check("正前方 + 宽140：朝向未知时按朝右画，只往右边伸（不当成两边都够）",
       _b0 and _b0[1] - _b0[0] < 200 and _b0[0] > 560, _b0)
-check("左右 + 左0右140：往右走 → 框还在人物右边",
+check("正前方 + 宽140：往右走 → 框还在人物右边",
       _br and _b0 and abs(_br[0] - _b0[0]) < 20 and abs(_br[1] - _b0[1]) < 20,
       (_b0, _br))
-check("左右 + 左0右140：往左走 → 框整体镜像翻到左边",
+check("正前方 + 宽140：往左走 → 框整体镜像翻到左边",
       _bl and _br and _bl[1] < _br[1] - 80, (_br, _bl))
 srv.game_bot.cfg["skills"] = [{"key": "KeyS", "type": "single", "dir": "front",
                                "ground": [30, 170, 60, 60], "jump": False,
@@ -775,9 +780,9 @@ code, r = post("/api/bot/set", {"skills": [
      "jump": True, "jrect": [100, 100, 200, 60]}] * 9})
 sk = r["cfg"]["skills"]
 check("技能列表最多 8 个", len(sk) == 8, len(sk))
-check("非法键清空 / 非法类型退回 aoe / 范围钳到 0~600",
-      sk[0]["key"] == "" and sk[0]["type"] == "aoe"
-      and sk[0]["ground"] == [600, 0, 60, 60], sk[0])
+check("非法键清空 / 非法类型退回 aoe / 范围钳到 0~600 并收成左右相等",
+      sk[0]["key"] == "" and sk[0]["type"] == "aoe" and sk[0]["dir"] == "center"
+      and sk[0]["ground"] == [600, 600, 60, 60], sk[0])
 code, r = post("/api/bot/set", {"hp_pct": 999, "pot_key": "zzz", "pot_sec": 0})
 check("数值钳位 / 非法药键退回默认",
       r["cfg"]["hp_pct"] == 95.0 and r["cfg"]["pot_key"] == "pot8"

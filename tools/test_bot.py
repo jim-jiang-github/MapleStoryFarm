@@ -223,7 +223,8 @@ sc = bot.clamp_cfg({"skills": [{"key": "Nope", "type": "zzz",
                                 "jump": 1, "jrect": [1, 2]}]})["skills"][0]
 check("非法技能键清空", sc["key"] == "", sc)
 check("非法类型退回 aoe", sc["type"] == "aoe", sc)
-check("ground 逐项钳位（坏值退默认）", sc["ground"] == [600.0, 0.0, 60.0, 60.0], sc["ground"])
+check("ground 逐项钳位（坏值退默认，center 再收成左右相等）",
+      sc["ground"] == [600.0, 600.0, 60.0, 60.0], sc["ground"])
 check("jrect 不是 4 个数退回默认",
       sc["jrect"] == bot.DEFAULTS["skills"][0]["jrect"], sc["jrect"])
 check("技能超过 8 个截断",
@@ -231,21 +232,37 @@ check("技能超过 8 个截断",
 check("旧配置（atk_key+距离/高度）自动换成第一个技能",
       bot.clamp_cfg({"atk_key": "KeyX", "range_px": 80, "range_h": 100,
                      "jump_reach": 120})["skills"] ==
-      [{"key": "KeyX", "type": "aoe", "dir": "both", "ground": [80.0, 80.0, 50.0, 50.0],
+      [{"key": "KeyX", "type": "aoe", "dir": "center", "ground": [80.0, 80.0, 50.0, 50.0],
         "jump": True, "jrect": [80.0, 80.0, 170.0, 50.0]}])
 check("旧配置 range_side=front 带进 dir",
       bot.clamp_cfg({"atk_key": "KeyX", "range_side": "front"})["skills"][0]["dir"] == "front")
-check("乱写的 dir 退回 both",
-      bot.clamp_cfg({"skills": [{"key": "KeyA", "dir": "up"}]})["skills"][0]["dir"] == "both")
+check("乱写的 dir 退回 center",
+      bot.clamp_cfg({"skills": [{"key": "KeyA", "dir": "up"}]})["skills"][0]["dir"] == "center")
 check("旧值 left/right 迁移成 front（没有固定单边的技能）",
       bot.clamp_cfg({"skills": [{"key": "KeyA", "dir": "left"},
                                 {"key": "KeyB", "dir": "right"}]})["skills"]
       == [{"key": "KeyA", "type": "aoe", "dir": "front",
-           "ground": [100.0, 100.0, 60.0, 60.0], "jump": False,
-           "jrect": [100.0, 100.0, 200.0, 60.0]},
+           "ground": [0.0, 100.0, 60.0, 60.0], "jump": False,
+           "jrect": [0.0, 100.0, 200.0, 60.0]},
           {"key": "KeyB", "type": "aoe", "dir": "front",
-           "ground": [100.0, 100.0, 60.0, 60.0], "jump": False,
-           "jrect": [100.0, 100.0, 200.0, 60.0]}])
+           "ground": [0.0, 100.0, 60.0, 60.0], "jump": False,
+           "jrect": [0.0, 100.0, 200.0, 60.0]}])
+
+
+def _dir_of(ground, d):
+    return bot.clamp_cfg({"skills": [{"key": "KeyA", "dir": d, "ground": ground}]})["skills"][0]
+
+
+check("旧 both + 左右相等 → 归类成 center（就是「以人物为中心」）",
+      _dir_of([150, 150, 60, 60], "both")["dir"] == "center")
+check("旧 both + 左右不等（左0 右140）→ 归类成 front（只打身前那半边）",
+      _dir_of([0, 140, 55, 31], "both") ==
+      {"key": "KeyA", "type": "aoe", "dir": "front", "ground": [0.0, 140.0, 55.0, 31.0],
+       "jump": False, "jrect": [0.0, 100.0, 200.0, 60.0]})
+check("center 存成规范形态：左右相等（取大的一边）",
+      _dir_of([20, 200, 55, 31], "center")["ground"] == [200.0, 200.0, 55.0, 31.0])
+check("front 存成规范形态：左恒为 0",
+      _dir_of([30, 200, 55, 31], "front")["ground"] == [0.0, 200.0, 55.0, 31.0])
 check("技能列表允许清空（= 不攻击，只喝药拾取）",
       bot.clamp_cfg({"skills": []})["skills"] == [])
 
@@ -269,34 +286,35 @@ check("地面框：中心 ± 左右100 / 上下60（和老 range_px=100 × range
       g == [530.0, 192.5, 730.0, 312.5], g)
 check("跳放框：上边扩到 200（= 老上下60 + jump_reach 140）",
       j == [530.0, 52.5, 730.0, 312.5], j)
-g2, j2 = bot.skill_rects({"key": "KeyA", "type": "single", "dir": "right",
+g2, j2 = bot.skill_rects({"key": "KeyA", "type": "single", "dir": "center",
                           "ground": [180, 180, 60, 60],
                           "jump": False, "jrect": [0, 0, 0, 0]}, CHAR)
-check("全方位技能（旧值 right 迁移）：感知框两侧都在",
+check("以人物为中心：框两侧对称（宽 = 左+右 = 360）",
       g2 == [450.0, 192.5, 810.0, 312.5], g2)
 check("跳放关了就没有第二个框", j2 is None, j2)
 g3, _ = bot.skill_rects({"key": "KeyA", "type": "single", "dir": "front",
                          "ground": [180, 180, 60, 60],
                          "jump": False, "jrect": [0, 0, 0, 0]}, CHAR)
-check("身前技能：感知框两侧都在（出手前转身对正，实际只打身前那半边）",
-      g3 == [450.0, 192.5, 810.0, 312.5], g3)
+check("正前方：只从人物身体中心往前伸 180，身后那块不算",
+      g3 == [630.0, 192.5, 810.0, 312.5], g3)
 
-print("[17b] 身前技能：框随朝向整体镜像（不对称的框不许塌成窄条）")
+print("[17b] 正前方：框随朝向整体镜像（左恒为 0，不许塌成窄条）")
 ASYM = {"key": "KeyA", "type": "single", "dir": "front",
         "ground": [30, 170, 60, 60], "jump": False, "jrect": [0, 0, 0, 0]}
 ga, _ = bot.skill_rects(ASYM, CHAR, 1)
-check("朝右：左30 右170（用存下来的形态）", ga == [600.0, 192.5, 800.0, 312.5], ga)
+check("朝右：从人物中心往右 170（存的左30 被收成左0）",
+      ga == [630.0, 192.5, 800.0, 312.5], ga)
 gb, _ = bot.skill_rects(ASYM, CHAR, -1)
-check("朝左：整体镜像成 左170 右30（不是砍成 30px 窄条）",
-      gb == [460.0, 192.5, 660.0, 312.5], gb)
+check("朝左：整体镜像到左边 170（不是砍成 30px 窄条）",
+      gb == [460.0, 192.5, 630.0, 312.5], gb)
 gc, _ = bot.skill_rects(ASYM, CHAR, 0)
-check("朝向未知：按 max(左,右) 对称展开当感知范围",
-      gc == [460.0, 192.5, 800.0, 312.5], gc)
+check("朝向还没读到 → 按朝右画，不再偷偷对称展开",
+      gc == [630.0, 192.5, 800.0, 312.5], gc)
 _, gj = bot.skill_rects({**ASYM, "jump": True, "jrect": [20, 260, 100, 60]}, CHAR, -1)
-check("跳放框同样镜像", gj == [370.0, 152.5, 650.0, 312.5], gj)
+check("跳放框同样镜像", gj == [370.0, 152.5, 630.0, 312.5], gj)
 
-print("[17c] 方向=左右也不许僵住：框一样跟着朝向翻（用户实测「朝左框不动」）")
-BOTH_ASYM = {"key": "KeyX", "type": "single", "dir": "both",
+print("[17c] 方向=正前方也不许僵住：框一样跟着朝向翻（用户实测「朝左框不动」）")
+BOTH_ASYM = {"key": "KeyX", "type": "single", "dir": "front",
              "ground": [0, 140, 55, 31], "jump": True, "jrect": [0, 153, 103, 42]}
 br_, _ = bot.skill_rects(BOTH_ASYM, CHAR, 1)
 check("朝右：只往右边伸 140（左0 右140，原样）",
@@ -305,10 +323,11 @@ bl_, _ = bot.skill_rects(BOTH_ASYM, CHAR, -1)
 check("朝左：整体镜像，只往左边伸 140（以前这里是死的，框永远在右边）",
       bl_ == [490.0, 197.5, 630.0, 283.5], bl_)
 bu_, bju = bot.skill_rects(BOTH_ASYM, CHAR, 0)
-check("朝向未知：照原样（左右技能不转身，框画在哪就打哪，不当成两边都够）",
+check("朝向未知：照原样（按朝右画，不当成两边都够）",
       bu_ == [630.0, 197.5, 770.0, 283.5], bu_)
-check("跳放框同理", bju == [630.0, 149.5, 783.0, 294.5], bju)
-bs_, _ = bot.skill_rects({**BOTH_ASYM, "ground": [120, 120, 55, 31]}, CHAR, -1)
+check("跳放框同理（这一帧朝向未知，也按朝右）",
+      bju == [630.0, 149.5, 783.0, 294.5], bju)
+bs_, _ = bot.skill_rects({**BOTH_ASYM, "dir": "center", "ground": [120, 120, 55, 31]}, CHAR, -1)
 check("左右对称的框镜像前后完全一样（翻不翻看不出来，也没副作用）",
       bs_ == [510.0, 197.5, 750.0, 283.5], bs_)
 
@@ -316,16 +335,21 @@ print("[17d] 方向=左右 + 单边框：判定框跟着朝向走（画到哪就
 MONR = [{"name": "Snail", "box": [700, 240, 760, 280], "conf": 0.8}]   # 右边
 MONL = [{"name": "Snail", "box": [500, 240, 560, 280], "conf": 0.8}]   # 左边
 def bot_facing(face):
-    """造一个「已经站稳、朝向已知」的 bot（第一轮会重置朝向，得先暖一下）。"""
+    """造一个「已经站稳、朝向已知、刚对正过」的 bot。
+
+    第一轮会重置朝向，先暖一轮；再把 t_turn 摆到 t_atk 之后（calibrated），
+    免掉正前方技能「每刀前重新对正」那一下转身——那个行为 [19] 单独测。
+    """
     b = make()
     b.cfg["skills"] = [BOTH_ASYM]
     step(b, now=4000.0, m=[])          # 暖一轮：吃掉「刚拿回焦点」的朝向复位
     b._face = face
+    b._t_turn, b._t_atk = 4000.0, 3999.0
     return b
 
 
 c = step(bot_facing(1), now=5000.0, m=MONR)
-check("朝右：右边那只在框里 → 直接出手（不用转身，左右技能不转身）",
+check("朝右：右边那只在框里 → 直接出手（正面技能框在右，不用再转身）",
       down_keys(c) == ["KeyX"], c)
 c = step(bot_facing(1), now=5000.0, m=MONL)
 check("朝右：左边那只在框外 → 不打它，先朝它走", "KeyX" not in down_keys(c), c)
@@ -335,21 +359,25 @@ c = step(bot_facing(-1), now=5000.0, m=MONR)
 check("朝左：右边那只反而够不着了（框在哪边就打哪边）",
       "KeyX" not in down_keys(c), c)
 
-print("[18] 身前技能：怪在够得着的那一侧 → 转身后出手，不是走过去")
-b = make()
-b.cfg["skills"] = [{"key": "KeyA", "type": "single", "dir": "front",
-                    "ground": [180, 0, 60, 60],
-                    "jump": False, "jrect": [180, 0, 200, 60]}]
+FWD_SK = {"key": "KeyA", "type": "single", "dir": "front",
+          "ground": [0, 180, 60, 60], "jump": False, "jrect": [0, 180, 200, 60]}
+right_mon = [{"name": "Snail", "box": [690, 300, 750, 360], "conf": 0.8}]
+print("[18] 正前方：框跟着朝向走，面朝哪边打哪边")
+b = bot_facing(-1)                       # 已经站稳、面朝左
+b.cfg["skills"] = [FWD_SK]
+c = step(b, now=5000.0, m=left_mon)
+check("面朝左 + 怪在左边 → 直接出 KeyA", down_keys(c) == ["KeyA"], c)
+c = step(b, now=6000.0, m=right_mon)
+check("面朝左 + 怪在背后 → 框不覆盖，先朝它走（不是原地空放）",
+      "KeyA" not in down_keys(c) and "right" in down_keys(c), c)
+check("状态是走向目标", b.snapshot()[1]["act"] == "走向目标", b.snapshot()[1])
+
+print("[19] 正前方每刀前重新对正（记忆说朝对了也要再点一次）")
+b = bot_facing(-1)
+b.cfg["skills"] = [FWD_SK]
 t = 5000.0
 c = step(b, now=t, m=left_mon)
-check("第一帧点左方向", down_keys(c) == ["left"], c)
-check("状态是转身朝目标（没判成太远）",
-      b.snapshot()[1]["act"] == "转身朝目标", b.snapshot()[1])
-check("状态里带真实朝向", b.snapshot()[1]["face"] == -1, b.snapshot()[1])
-c = step(b, now=t + 0.2, m=left_mon)
-check("对正后出技能 KeyA", down_keys(c) == ["KeyA"], c)
-
-print("[19] 身前技能每刀前重新对正（记忆说朝对了也要再点一次）")
+check("先出技能", down_keys(c) == ["KeyA"], c)
 c = step(b, now=t + 0.3, m=left_mon)          # 冷却中
 check("冷却中不重复转身", down_keys(c) == [], c)
 c = step(b, now=t + 0.7, m=left_mon)          # 420ms 冷却到
@@ -357,16 +385,16 @@ check("冷却好了先重新对正", down_keys(c) == ["left"], c)
 c = step(b, now=t + 0.85, m=left_mon)
 check("对正之后才出技能", down_keys(c) == ["KeyA"], c)
 
-print("[20] 身前技能 + 头顶的怪：先对正再起跳，别跳起来打反方向")
-b = make()
-b.cfg["skills"] = [{"key": "KeyA", "type": "single", "dir": "front",
-                    "ground": [180, 0, 60, 60],
-                    "jump": True, "jrect": [180, 0, 200, 60]}]
+print("[20] 正前方 + 头顶的怪：没对正先转身，对正了才跳放")
+b = bot_facing(-1)
+b.cfg["skills"] = [{**FWD_SK, "jump": True}]
 top_left = [{"name": "Snail", "box": [540, 130, 600, 190], "conf": 0.8}]
-c = step(b, m=top_left)
-check("先转身对正", down_keys(c) == ["left"], c)
+b._t_atk = 5000.0                    # 刚出过手 = 记忆里的朝向没被确认过
+c = step(b, now=5000.0, m=top_left)
+check("先转身对正（别跳起来打反方向）", down_keys(c) == ["left"], c)
 settle(b)
-c = step(b, m=top_left)
+b._t_atk = 0.0                       # 已经对正过
+c = step(b, now=5000.3, m=top_left)
 check("对正后跳放：跳+技能键", down_keys(c) == [JUMP, "KeyA"], c)
 
 print("[21] 怪多优先群攻、单只优先单体、同类型排前面的先用")

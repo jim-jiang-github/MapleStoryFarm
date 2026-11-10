@@ -74,7 +74,8 @@ check("下一层够不着的怪 → 不在区域内",
       not zone_hit([CB[0], CB[3] + 90, CB[2], CB[3] + 150]))
 check("高度恰好搭边 → 在攻击区域内", zone_hit([CB[0], CB[3] - 2, CB[2], CB[3] + 50]))
 # 只盖一边的技能：身后的怪不算
-right_only = {"key": "KeyA", "type": "single", "ground": [0, 100, 60, 60],
+right_only = {"key": "KeyA", "type": "single", "dir": "front",
+              "ground": [0, 100, 60, 60],
               "jump": False, "jrect": [0, 100, 120, 60]}
 check("单侧技能：前方够得着", zone_hit([CB[2] + 40, CB[1], CB[2] + 90, CB[3]], right_only))
 check("单侧技能：身后够不着", not zone_hit([CB[0] - 90, CB[1], CB[0] - 40, CB[3]], right_only))

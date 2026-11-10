@@ -196,11 +196,14 @@
   }
   .skcard + .skcard { margin-top: 6px; }
   .skcard.dragging { opacity: .4; }
-  /* 范围：四个方向各一条滑块（单位画面像素，以人物身体中心为基准）。
-     以前是四个数字输入框——改一次要重新打一遍数，还看不出改了哪儿；范围
-     本来就是实时画面上那条框，拖着滑块直接看画面就行。 */
+  /* 范围：只填 宽 / 上 / 下 三个量（单位画面像素，以人物身体中心为基准）。
+     左/右不给填——「以人物为中心」两边必然一样，「正前方」左边恒为 0，多问
+     一个数只会让人怀疑自己填反了。范围本身实时画在游戏画面上，拖滑块就能
+     看着框变，不用重新打数字。 */
   .skgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 12px;
             flex: 1 1 auto; min-width: 0; }
+  .skwide { grid-column: 1 / -1; }
+  .skhint { font-size: 10px; color: var(--hint); line-height: 1.35; margin-top: -2px; }
   .skaxis { display: flex; align-items: center; gap: 5px; min-width: 0; }
   .skaxis > span:first-child { flex: 0 0 11px; font-size: 10.5px; color: var(--hint); }
   .skaxis output { flex: 0 0 28px; text-align: right; font-size: 10.5px;
@@ -223,8 +226,8 @@
   .skdel { margin-left: auto; border: 0; background: none; color: var(--hint);
            cursor: pointer; font-size: 12px; padding: 2px 4px; font-family: inherit; }
   .skdel:hover { color: #dc2626; }
-  .skrow { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--hint); }
-  .skrow > span:first-child { flex: 0 0 auto; }
+  .skrow { display: flex; align-items: flex-start; gap: 8px; font-size: 11px; color: var(--hint); }
+  .skrow > span:first-child { flex: 0 0 auto; padding-top: 1px; }
   .skjump { display: flex; align-items: center; gap: 5px; font-size: 11px;
             color: var(--muted); cursor: pointer; user-select: none; }
   .skjump input { margin: 0; }
@@ -2498,15 +2501,22 @@
   });
 
   /* ================= 技能列表 =================
-     键位分组整个换成了技能：每个技能一张卡（快捷键 / 群攻单体 / 可跳放），
+     键位分组整个换成了技能：每个技能一张卡（快捷键 / 群攻单体 / 方向 / 可跳放），
      卡片顺序 = 释放优先级（⠿ 拖动换位）。
-     范围直接在卡片上用数字填（左/右/上/下，单位是画面像素，以人物身体中心为
-     基准、按「朝右」量），下面配一张示意图实时显示框的形状。
-     画面上那条橙色框仍然由后端画（按人物实际朝向翻），但它只用来「看」，
-     不能拖——以前在画面上拖框那套已经删掉。 */
+     范围只填 宽 / 上 / 下（单位是画面像素，以人物身体中心为基准、按「朝右」量）。
+     左/右不再单独填：以人物为中心 = 宽两边各一半，正前方 = 从人物中心往前量宽。
+     选项里的 left/right 是旧值，clamp 会归类，这里不用管。
+     画面上那条框由后端画（按人物实际朝向翻），但它只用来「看」，不能拖——
+     以前在画面上拖框那套已经删掉。 */
   const skillList = $("skillList");
-  const SK_DFLT = { key: "", type: "aoe", dir: "both", ground: [150, 150, 50, 40],
+  const SK_DFLT = { key: "", type: "aoe", dir: "center", ground: [150, 150, 50, 40],
                     jump: false, jrect: [210, 210, 120, 40] };
+
+  // 把 [左,右,上,下] 收成这个方向的规范形态（和后端 bot.norm_skill_rect 一致）
+  const normSkillRect = (r, dir) => {
+    const h = Math.max(Number(r[0]) || 0, Number(r[1]) || 0);
+    return dir === "front" ? [0, h, r[2], r[3]] : [h, h, r[2], r[3]];
+  };
 
   function commitSkills() {
     skillLockUntil = Date.now() + 1200;
@@ -2521,7 +2531,7 @@
     const near = (x, y) => Math.abs(Number(x) - Number(y)) <= 1;
     for (let i = 0; i < a.length; i++) {
       const x = a[i], y = b[i];
-      if (x.key !== y.key || x.type !== y.type || (x.dir || "both") !== (y.dir || "both")
+      if (x.key !== y.key || x.type !== y.type || (x.dir || "center") !== (y.dir || "center")
           || !!x.jump !== !!y.jump) return false;
       if (!x.ground.every((v, j) => near(v, y.ground[j]))) return false;
       if (!!x.jump && !x.jrect.every((v, j) => near(v, y.jrect[j]))) return false;
@@ -2540,11 +2550,15 @@
     const k = (bw > 0 && lastFrameW) ? lastFrameW / bw : 1;
     skillK = k;
     const sc = (r) => r.map((v) => Math.round(Number(v) * k));
-    const next = cfg.skills.map((s) => ({
-      key: s.key || "", type: s.type || "aoe", dir: s.dir || "both",
-      ground: sc(s.ground || SK_DFLT.ground),
-      jump: !!s.jump, jrect: sc(s.jrect || SK_DFLT.jrect),
-    }));
+    const next = cfg.skills.map((s) => {
+      // 方向只有 center / front（旧配置的 both、left、right 后端已经归类过）
+      const dir = s.dir === "front" ? "front" : "center";
+      return {
+        key: s.key || "", type: s.type || "aoe", dir,
+        ground: sc(normSkillRect(s.ground || SK_DFLT.ground, dir)),
+        jump: !!s.jump, jrect: sc(normSkillRect(s.jrect || SK_DFLT.jrect, dir)),
+      };
+    });
     if (sameSkills(next, skillsNow)) {          // 只是回显：不重画，别打断输入
       skillSnap = JSON.stringify([cfg.skills, bw, Math.round(k * 1000)]);
       return;
@@ -2569,15 +2583,24 @@
     skillList.textContent = "";
     skillsNow.forEach((s, i) => {
       const card = document.createElement("div");
-      // 四个方向各一条滑块 + 右侧实时数值（拖动时画面上那条框会跟着变）
+      // 三条滑块：宽 / 上 / 下（拖动时画面上那条框会跟着变）
       const numRow = (w) => `
         <div class="skgrid">
-          ${["左", "右", "上", "下"].map((t, n) =>
-            `<label class="skaxis" title="${t}边到人物身体中心有多少像素">
-               <span>${t}</span>
-               <input type="range" class="skr" data-w="${w}" data-i="${n}"
-                      min="0" max="600" step="1"><output>0</output>
-             </label>`).join("")}
+          <label class="skaxis skwide" title="范围总宽（像素）。以人物为中心：左右各占一半；正前方：从人物身体中心往前这么多">
+            <span>宽</span>
+            <input type="range" class="skr" data-w="${w}" data-a="w"
+                   min="0" max="1200" step="1"><output>0</output>
+          </label>
+          <label class="skaxis" title="上边到人物身体中心多少像素">
+            <span>上</span>
+            <input type="range" class="skr" data-w="${w}" data-a="u"
+                   min="0" max="600" step="1"><output>0</output>
+          </label>
+          <label class="skaxis" title="下边到人物身体中心多少像素">
+            <span>下</span>
+            <input type="range" class="skr" data-w="${w}" data-a="d"
+                   min="0" max="600" step="1"><output>0</output>
+          </label>
         </div>`;
       card.className = "skcard";
       card.dataset.i = i;
@@ -2586,11 +2609,12 @@
           <span class="skhnd" title="按住拖动，调整释放顺序（排前面的先匹配）">⠿</span>
           <button class="slot skkey" type="button" data-hint="按键" title="这个技能的快捷键，跟游戏里的技能键位对应。点格子 → 按一个键即设置；Del 清空、Esc 取消"></button>
           <select class="sktype" title="群攻：范围内怪 ≥2 时优先用；单体：只有 1 只时优先用。同类型里排前面的先用"><option value="aoe">群攻</option><option value="single">单体</option></select>
-          <select class="skdir" title="左右 = 以人物为中心，两边都打（出手前不用转身）；身前 = 只打人物面前那半边（出手前会先转身对正）。两种的框都一样：跟着人物朝向翻，画面上那条框 = 现在这一下能够着的区域"><option value="both">左右</option><option value="front">身前</option></select>
+          <select class="skdir" title="以人物为中心：框左右对称，人物两侧都打，出手前不用转身；正前方：框从人物身体中心往前伸，只打面前那半边，出手前会先转身对正。两种都跟着人物朝向翻（画面上那条框 = 这一下真正能够着的区域）。"><option value="center">以人物为中心</option><option value="front">正前方</option></select>
           <span class="sktag">SK${i + 1}</span>
           <button class="skdel" type="button" title="删除这个技能">✕</button>
         </div>
         <div class="skrow"><span>范围</span>${numRow("g")}</div>
+        <span class="skhint"></span>
         <label class="skjump"><input type="checkbox" class="skjp"> 可跳放（空中施放：跳 → 100ms → 技能键）</label>
         <div class="skjbox">
           <div class="skrow"><span>跳放</span>${numRow("j")}</div>
@@ -2606,32 +2630,61 @@
       slot.skSkill = true;
       slot.paint();
       card.querySelector(".sktype").value = s.type;
-      card.querySelector(".skdir").value = s.dir || "both";
+      card.querySelector(".skdir").value = s.dir === "front" ? "front" : "center";
       card.querySelector(".skjp").checked = !!s.jump;
       card.querySelector(".skjbox").style.display = s.jump ? "" : "none";
 
-      // 四条滑块：把当前值填回去（用户正在拖的那条不覆盖，免得跟手打架）
+      // 三条滑块：把当前值填回去（用户正在拖的那条不覆盖，免得跟手打架）。
+      // 配置里存的是 [左,右,上,下]（按朝右量的规范形态），面板只露 宽/上/下，
+      // 换算都收在 barVal / setBar 这一层，存盘的东西不用跟着改。
       const bars = [...card.querySelectorAll(".skr")];
       const arrOf = (el) => (el.dataset.w === "g" ? at().ground : at().jrect);
-      const rangeMax = Math.max(60, Math.round(600 * skillK));
+      const isFront = () => (at().dir || "center") === "front";
+      const barVal = (el) => {
+        const r = arrOf(el), a = el.dataset.a;
+        if (a === "w") return Math.round(isFront() ? r[1] : r[0] + r[1]);
+        return Math.round(a === "u" ? r[2] : r[3]);
+      };
+      const setBar = (el, v, max) => {
+        const r = arrOf(el), a = el.dataset.a;
+        const n = Math.max(0, Math.min(max, Math.round(v) || 0));
+        if (a === "w") {
+          if (isFront()) { r[0] = 0; r[1] = n; }
+          else { const h = Math.round(n / 2); r[0] = h; r[1] = h; }
+        } else if (a === "u") r[2] = n;
+        else r[3] = n;
+      };
+      // 后端每个方向最多存 600px：居中模式的「宽」是两边之和（最多 1200），
+      // 正前方的「宽」就是往前那 600，滑块量程得跟着变，不然拖过头会弹回来
+      const barMax = (el) => {
+        const w = el.dataset.a === "w" ? (isFront() ? 600 : 1200) : 600;
+        return Math.max(60, Math.round(w * skillK));
+      };
       const paintBars = () => {
         bars.forEach((el) => {
-          el.max = rangeMax;
-          const v = Math.round(arrOf(el)[+el.dataset.i]);
+          el.max = barMax(el);
+          const v = barVal(el);
           if (el.value !== String(v)) el.value = v;
           const out = el.parentElement.querySelector("output");
           if (out) out.textContent = v;
         });
       };
-      paintBars();
+      // 方向不同，「宽」的含义也不同（总数 / 往前多少），把说明写清楚
+      const hintEl = card.querySelector(".skhint");
+      const paintHint = () => {
+        hintEl.textContent = isFront()
+          ? "正前方：宽从人物中心往前量，身后打不到"
+          : "以人物为中心：宽的一半在左、一半在右";
+      };
+      paintBars(); paintHint();
       bars.forEach((el) => {
         el.addEventListener("input", () => {
           const t = at();
           if (!t) return;
           // 画面上的框由后端每帧按这份配置重画，拖到这里就等于拖着画面上的框
-          arrOf(el)[+el.dataset.i] = Math.max(0, Math.min(rangeMax, Number(el.value)));
+          setBar(el, Number(el.value), barMax(el));
           const out = el.parentElement.querySelector("output");
-          if (out) out.textContent = Math.round(Number(el.value));
+          if (out) out.textContent = barVal(el);
           queueSkillCommit();
         });
         // 松手立刻落库，不用等防抖那 250ms
@@ -2651,6 +2704,15 @@
       card.querySelector(".skdir").addEventListener("change", (e) => {
         if (!at()) return;
         at().dir = e.target.value;
+        // 换方向后「宽」的含义变了（总数 ↔ 往前多少）：两套范围都收成新形态，
+        // 免得数字看着没变、框却换了个位置
+        const front = isFront();
+        ["ground", "jrect"].forEach((key) => {
+          const r = at()[key];
+          const h = Math.round(Math.max(Number(r[0]) || 0, Number(r[1]) || 0));
+          if (front) { r[0] = 0; r[1] = h; } else { r[0] = h; r[1] = h; }
+        });
+        paintBars(); paintHint();
         commitSkills(); drawMasks();
       });
       card.querySelector(".skjp").addEventListener("change", (e) => {

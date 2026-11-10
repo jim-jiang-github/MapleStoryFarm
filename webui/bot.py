@@ -344,15 +344,17 @@ DEFAULTS = {
     #   key    快捷键（KeyboardEvent.code 名，空 = 还没录，决策时跳过）
     #   type   aoe 群攻 / single 单体：范围内怪 ≥2 优先群攻，只有 1 只优先单体，
     #          同类型里排前面的先用
-    #   dir    方向，只有两种：both 以人物为中心的全方位（框内两边都打）/
-    #          front 身前单向（只能打人物朝向的那半边，出手前先转身对正；
-    #          框的左右两半边分别是朝左/朝右时打的区域，画面上跟着朝向翻）
-    #   ground 地面攻击范围 [左, 右, 上, 下]：相对人物身体中心的像素偏移，
-    #          怪物框和这个矩形有交集就站原地直接放
+    #   dir    方向，只有两种：center 以人物为中心（左右对称，人物两侧都打，
+    #          出手前不用转身）/ front 正前方（从人物身体中心往前伸，只打面前
+    #          那半边，出手前先转身对正）。两种都跟着人物朝向翻。
+    #   ground 地面攻击范围 [左, 右, 上, 下]：相对人物身体中心的像素偏移。
+    #          center 恒有 左=右（面板上只填「宽」，宽/2 就是每一边）；front 恒有
+    #          左=0（面板上填的「宽」就是从人物中心往前多少）。这里存的是规范
+    #          形态，面板只是换了个更不容易填反的说法。
     #   jump   可跳放（空中施放）；jrect 跳放范围：怪在 jrect 内、ground 外
     #          就按「跳 → 100ms → 技能键」的连招打
     "skills": [
-        {"key": "ControlLeft", "type": "aoe", "dir": "both",
+        {"key": "ControlLeft", "type": "aoe", "dir": "center",
          "ground": [100, 100, 60, 60],
          "jump": True, "jrect": [100, 100, 200, 60]},
     ],
@@ -406,7 +408,41 @@ def _clamp_rect4(v, dflt):
     return out
 
 
-SK_DIRS = ("both", "front")
+SK_DIRS = ("center", "front")
+
+
+def norm_skill_rect(rect, d):
+    """把 [左,右,上,下] 收成这个方向的唯一形态（都是「人物朝右」时量的）。
+
+    center（以人物为中心）：左右必须相等，取大的一边对称展开。面板上只让人填
+    「宽」，宽 / 2 就是每一边。
+    front（正前方）：左恒为 0，从人物身体中心往前量，身后那块不吃这个框。
+
+    以前左、右是两个独立数字，面板上填 左15 右191 说是「身前」，画出来却是
+    ±191（身前又按 max 对称展开了），看着就像填反了。
+    """
+    l, r, u, dn = (float(x) for x in rect)
+    if d == "front":
+        return [0.0, max(l, r), u, dn]
+    h = max(l, r)
+    return [h, h, u, dn]
+
+
+def _skill_dir(raw_dir, rect):
+    """方向取值：只认 center / front，旧配置按语义猜一个最接近的。
+
+    旧版有两个值：both（左右）和 front（身前）。旧 both 里左右相等的其实是
+    「以人物为中心」（全方位），左右不等的（比如左0 右140）其实是只打身前那
+    半边 = 正前方。旧 front 一律按正前方。
+    """
+    d = raw_dir
+    if d in ("left", "right"):
+        return "front"          # 更早的版本还有固定单边：语义最接近正前方
+    if d == "both":
+        return "front" if abs(float(rect[0]) - float(rect[1])) > 1.0 else "center"
+    if d in SK_DIRS:
+        return d
+    return "center"
 
 
 def _clamp_skills(v, dflt):
@@ -418,16 +454,15 @@ def _clamp_skills(v, dflt):
             if not isinstance(s, dict):
                 continue
             key = s.get("key")
-            d = s.get("dir")
-            if d in ("left", "right"):
-                d = "front"   # 旧版曾有固定单边：语义最接近的就是身前单向
+            g = _clamp_rect4(s.get("ground"), base["ground"])
+            d = _skill_dir(s.get("dir"), g)
             out.append({
                 "key": key if key in CODE_VK else "",
                 "type": s.get("type") if s.get("type") in ("aoe", "single") else "aoe",
-                "dir": d if d in SK_DIRS else "both",
-                "ground": _clamp_rect4(s.get("ground"), base["ground"]),
+                "dir": d,
+                "ground": norm_skill_rect(g, d),
                 "jump": bool(s.get("jump")),
-                "jrect": _clamp_rect4(s.get("jrect"), base["jrect"]),
+                "jrect": norm_skill_rect(_clamp_rect4(s.get("jrect"), base["jrect"]), d),
             })
     return out
 
@@ -443,7 +478,7 @@ def clamp_cfg(raw):
         raw["skills"] = [{
             "key": raw.get("atk_key") or "ControlLeft",
             "type": "aoe",
-            "dir": raw.get("range_side") if raw.get("range_side") in SK_DIRS else "both",
+            "dir": raw.get("range_side") or "center",   # 旧值由 _clamp_skills 归类
             "ground": [rp, rp, rh / 2.0, rh / 2.0],
             "jump": True,
             "jrect": [rp, rp, rh / 2.0 + jr, rh / 2.0],
@@ -549,35 +584,33 @@ def skill_rects(skill, char_box, face=0, k=1.0):
     """一个技能的两个判定框（全画面坐标 [x1,y1,x2,y2]）。
 
     ground/jrect 存的是相对人物身体中心的偏移 [左, 右, 上, 下]，
-    是「人物朝右时、画面宽度 = cfg["base_w"] 时」量出来的形态（面板上拖框时
-    就是按这个存的）。k = 当前画面宽度 / base_w：换分辨率、换系统缩放（游戏是
-    DPI-unaware，窗口会被 Windows 位图拉伸）后等比放大/缩小，技能在世界里够得着
-    的距离不变，画面上的框和实际判定也始终是同一个东西。
+    是「人物朝右时、画面宽度 = cfg["base_w"] 时」量出来的形态。k = 当前画面
+    宽度 / base_w：换分辨率、换系统缩放（游戏是 DPI-unaware，窗口会被 Windows
+    位图拉伸）后等比放大/缩小，技能在世界里够得着的距离不变，画面上的框和实际
+    判定也始终是同一个东西。
 
-    **框永远跟着朝向翻**（朝右存 [左,右]，朝左整体镜像成 [右,左]）。左右
-    对称的框翻不翻都一样，所以看着只有不对称的框（比如左0 右140）在动——
-    用户要的就是这个：挂机关着、手动按方向键走路时，画面上的框也要跟着人翻。
-    dir 只决定「出手前要不要先转身对正」：front（身前单向）每刀前都点一次
-    方向键对正，both（左右）不用——但两者实际能够着的区域都是相对人物的，
-    所以都要镜像。
+    方向只有两种，这里再按方向收一遍形态（存的时候 clamp 已经收过，这里是
+    兜底——配置可能来自旧版本或被手改）：
+      center 以人物为中心：左 = 右 = 宽/2，人物两侧都打。
+      front  正前方：左 = 0，从人物身体中心往前伸 宽，身后那块打不到。
 
-    face=0（朝向未知）：身前技能横向按 max(左,右) 对称展开当感知范围——反正
-    出手前会转身，转身后朝哪边都能够着 max(左,右)。左右技能不展开：这种技能
-    本来就不转身，框画在哪就打哪，身后就是够不着。
-    以前按“只留那半边”裁是错的：左右不对称的框（左30 右170）朝左时会塌成
-    30px 窄条。
+    **框永远跟着朝向翻**（朝右存 [左,右]，朝左整体镜像成 [右,左]）。center
+    对称，翻不翻看着一样；front 翻过去就是「人物面朝哪边打哪边」——挂机关着、
+    手动按方向键走路时也一样（server.observe_face 一直在观测位移）。
+    face=0（朝向还没读到）就按朝右画，别偷偷对称展开：以前 front 在 face=0 时
+    按 max(左,右) 两边展开当「感知范围」，结果面板填 左15 右191、画面上却是
+    ±191 的大框，看着就像填反了。
 
     跳放没开就没有第二个框。server 的 draw_skill_ranges 画的就是它。
     """
     b = char_body_box(char_box)
     cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
-    front = (skill.get("dir") or "both") == "front"
+    front = (skill.get("dir") or "center") == "front"
 
     def mk(l, r, u, d):
+        l, r = (0.0, max(l, r)) if front else (max(l, r),) * 2
         if face < 0:
             l, r = r, l               # 朝左：整体镜像（对称的框等于没变）
-        elif face == 0 and front:
-            l = r = max(l, r)         # 身前 + 不知道朝哪：对称展开当感知范围
         return [cx - l, cy - u, cx + r, cy + d]
 
     l, r, u, d = (float(v) * k for v in skill["ground"])
@@ -989,11 +1022,9 @@ class Bot:
         for sk in cfg.get("skills") or []:
             if not sk.get("key"):
                 continue                     # 还没录按键的技能不参与
-            # 身前技能拿「对称展开」当感知范围（反正出手前会先转身对正）；
-            # 左右技能不转身，框画在哪就打哪——所以把当前朝向一起算进去。
-            # 这样画面上的框和这里的判定框永远是同一个（所见即所打），换朝向
-            # 时框翻到哪边，判定也就跟着到哪边。
-            st_face = 0 if (sk.get("dir") or "both") == "front" else self._face
+            # 判定框永远按当前朝向算（所见即所打）：正前方技能框翻到哪边就
+            # 打哪边，怪在背后就是够不着——先走过去，走一步朝向翻过来就打到了。
+            st_face = self._face
             g, j = skill_rects(sk, char, st_face, k)
             gm = [m for m in monsters if m.get("box") and _intersects(g, m["box"])]
             jm = [m for m in monsters if j and m.get("box") and _intersects(j, m["box"])]
@@ -1064,7 +1095,7 @@ class Bot:
         # 空放，所以单侧技能每刀前都重新点一次方向键对正（转身 50ms + 等 130ms
         # 塞得进攻击冷却里，几乎不损攻速）。
         calibrated = self._t_turn > self._t_atk
-        one_sided = (sk.get("dir") or "both") == "front"   # 身前技能：出手前先对正
+        one_sided = (sk.get("dir") or "center") == "front"  # 正前方：出手前先对正
 
         # 进范围了：先站住，再转向目标，然后出手
         self._set_dir(0)
@@ -1091,7 +1122,7 @@ class Bot:
                 self._set_status(act="等冷却")
         else:
             # 怪只在跳放框里（头顶 / 更远）：起跳 → 空中按技能键。
-            # 两侧技能朝向不影响命中，直接跳（老行为）；单侧技能先对正再起跳，
+            # 以人物为中心的框两边都够，直接跳；正前方先对正再起跳，
             # 别跳起来打反方向。
             jump_ready = (now - self._t_jump) * 1000.0 >= JUMP_COOLDOWN_MS
             if one_sided and jump_ready and (self._face != side or not calibrated):
