@@ -1665,6 +1665,10 @@ CHAR_EPS = 0.02
 CHAR_LOCAL_RADIUS = 60     # 锁定后先在上一帧位置 ±60px 里找
 CHAR_WIDE_RADIUS = 200     # 找不到再放宽到 ±200（跳跃/瞬移，不改走全图）
 CHAR_REACQ_MISS = 6        # 连续 miss 这么多帧才回退全图重找
+CHAR_LOST_PAD_X = 0.10     # 丢了以后横向把搜索范围外扩这么多（占画面宽）。
+                           # 人物被挤到识别区边上时名字牌只剩半个在框内，框内
+                           # 永远匹配不上——不外扩就再也捞不回来。只扩横向：
+                           # 上下的 HUD（小地图/血条）比左右危险得多。
 CHAR_DIST_PENALTY = 0.05   # 多候选时对「离上次位置远」的轻微惩罚
 # 屏幕 HUD 区（底部状态栏/顶部/左右两条）里也印着玩家名字，而且那处白字的形状和
 # 名字牌完全一样（实测分数 0.92，只比真身低 0.06）。人物走出画面时全图搜索会锁到
@@ -1912,26 +1916,39 @@ def _local_search(g, tpl_w, box, radius):
     return [bx, by, bx + tw, by + th], float(mx)
 
 
-def _hud_penalty(box, W, H):
-    """候选落在 HUD 区里就扣分（人物的名字牌不会在状态栏里）。"""
+def _hud_penalty(box, W, H, roi_x=None):
+    """候选落在 HUD 区里就扣分（人物的名字牌不会在状态栏里）。
+
+    roi_x=(x1,x2) 时左右那条只在候选跑出识别区才扣：识别区本身是用户亲手框的
+    「人只会在这里」，框内再按固定 9% 判一次只会跟用户的框打架——人物贴着识别区
+    左边界时（地图尽头常见）明明在框内，却被当成左边小地图扣满 0.12，直接判丢。
+    roi_x 传 None = 完全不算左右（丢人后横向外扩捞回来时用，那时候候选**本来就
+    该**在识别区外面，再扣分等于把唯一能救回来的候选打死）。
+    """
     cx = (box[0] + box[2]) / 2.0 / W
     cy = (box[1] + box[3]) / 2.0 / H
     pen = 0.0
     if cy > CHAR_HUD_BOTTOM or cy < CHAR_HUD_TOP:
         pen += CHAR_HUD_PENALTY
-    if cx < CHAR_HUD_SIDE or cx > 1.0 - CHAR_HUD_SIDE:
+    if roi_x is None:
+        return pen
+    if cx < float(roi_x[0]) or cx > float(roi_x[1]):
         pen += CHAR_HUD_PENALTY
     return pen
 
 
-def _char_roi(shape):
+def _char_roi(shape, pad_x=0.0):
     """当前搜索范围的像素矩形 (x1, y1, x2, y2)。
 
     归一化存、按帧换算：换窗口大小后同一份配置还成立。
+    pad_x 只在「已经丢了、正在捞回来」时用：把范围横向外扩一圈，人物被挤到
+    识别区边上、名字牌只剩半个在框里时才有机会重新认出来。
     """
     with char_lock:
         x1, y1, x2, y2 = char_state["roi"]
     H, W = int(shape[0]), int(shape[1])
+    x1 = max(0.0, float(x1) - max(0.0, float(pad_x)))
+    x2 = min(1.0, float(x2) + max(0.0, float(pad_x)))
     px1 = max(0, min(W - 2, int(round(float(x1) * W))))
     py1 = max(0, min(H - 2, int(round(float(y1) * H))))
     px2 = max(px1 + 2, min(W, int(round(float(x2) * W))))
@@ -1982,22 +1999,34 @@ def find_char(frame):
             if hit is not None and radius == CHAR_WIDE_RADIUS:
                 break      # 宽搜都只有低分：别再拿低分位置凑数
 
-    # 3) 范围内全搜
-    fw = _white_map(band)
+    # 3) 全搜。人物已经丢了（last is None）时横向外扩 CHAR_LOST_PAD_X：
+    #    它可能刚被挤到识别区边上，名字牌只剩半个在框里 —— 框内永远匹配不上，
+    #    不放宽就再也找不回来（用户实测「太靠左太靠右就识别不到」）。
+    pad = CHAR_LOST_PAD_X if last is None else 0.0
+    fx1, fy1, fx2, fy2 = _char_roi(g.shape, pad)
+    fband = g[fy1:fy2, fx1:fx2]
+    fh, fwid = fband.shape[:2]
+    if th >= fh or tw >= fwid:
+        return None, 0.0
+    fw = _white_map(fband)
     res = cv2.matchTemplate(fw, tpl_w, cv2.TM_CCOEFF_NORMED)
     cands = _best_peaks(res, 5)
     if not cands:
         return None, 0.0
     if last is not None:
-        ref = ((last[0] + last[2]) / 2.0 - rx1, (last[1] + last[3]) / 2.0 - ry1)
+        ref = ((last[0] + last[2]) / 2.0 - fx1, (last[1] + last[3]) / 2.0 - fy1)
     else:
-        ref = (bw / 2.0, bh * 0.55)      # 首次：范围里偏中下（人物脚踩平台）
-    diag = (bw * bw + bh * bh) ** 0.5
+        ref = (fwid / 2.0, fh * 0.55)    # 首次：范围里偏中下（人物脚踩平台）
+    diag = (fwid * fwid + fh * fh) ** 0.5
+    with char_lock:
+        roi_n = tuple(char_state["roi"])
+    # 外扩那一档不再按识别区扣左右分（候选本来就该在框外），正常全搜仍按框判
+    roi_x = None if pad else (roi_n[0], roi_n[2])
     best = None
     for sc, x, y in cands:
-        box = [x + rx1, y + ry1, x + tw + rx1, y + th + ry1]
+        box = [x + fx1, y + fy1, x + tw + fx1, y + th + fy1]
         d = (((x + tw / 2.0) - ref[0]) ** 2 + ((y + th / 2.0) - ref[1]) ** 2) ** 0.5
-        val = sc - CHAR_DIST_PENALTY * (d / diag) - _hud_penalty(box, W, H)
+        val = sc - CHAR_DIST_PENALTY * (d / diag) - _hud_penalty(box, W, H, roi_x)
         if best is None or val > best[0]:
             best = (val, sc, x, y)
     val, sc, x, y = best
@@ -2005,7 +2034,7 @@ def find_char(frame):
     # 同名文字 0.84 要扣 0.24 只剩 0.60，直接判不通过。显示出去的仍是原始匹配分。
     if val < thresh:
         return None, float(sc)
-    return [x + rx1, y + ry1, x + tw + rx1, y + th + ry1], float(sc)
+    return [x + fx1, y + fy1, x + tw + fx1, y + th + fy1], float(sc)
 
 
 def _bbox_center(b):
@@ -2285,6 +2314,7 @@ def _bot_state():
     with char_lock:
         cbox = char_state["box"]
         cts = char_state["ts"]
+        roi = list(char_state["roi"])
     if cbox is not None and (cts <= 0 or time.time() - cts > CHAR_LOST_AFTER):
         cbox = None                      # 人物已经丢了，别拿旧位置继续打
     with bar_lock:
@@ -2296,8 +2326,10 @@ def _bot_state():
     # （client_size 在窗口丢/最小化时是 (0,0)，那种时候给 None 走停手逻辑）
     cw, chh = grabber.client_size
     size = (int(cw), int(chh)) if cw and chh else None
+    # roi 一起给 bot：识别区不只是搜索窗，还是走位的边界——人物身体中心一出
+    # 左右边界，名字牌就被框切掉一半，立刻认不出来（bot.walk_x_limits）
     return {"fg": _game_foreground(), "hp": hp, "mp": mp, "char": cbox,
-            "size": size, "monsters": mons}
+            "size": size, "roi": roi, "monsters": mons}
 
 
 game_bot = botmod.Bot(_bot_state)

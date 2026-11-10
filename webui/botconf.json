@@ -21,21 +21,21 @@
   "pick_key": "KeyZ",
   "skills": [
     {
-      "key": "KeyX",
+      "key": "ControlLeft",
       "type": "single",
-      "dir": "both",
+      "dir": "front",
       "ground": [
         0.0,
-        140.0,
-        55.0,
-        31.0
+        92.0,
+        11.0,
+        30.0
       ],
       "jump": true,
       "jrect": [
         0.0,
-        153.0,
-        103.0,
-        42.0
+        92.0,
+        73.0,
+        0.0
       ]
     }
   ],

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """bot.py 的决策用例：不发真按键，用记录器代替 sender，逐帧喂状态看按下什么。"""
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webui"))
@@ -28,7 +29,7 @@ def make(monsters=(), hp=100.0, mp=None, fg=True, char=CHAR):
 def step(b, now=None, **kw):
     st = {"fg": kw.get("fg", True), "hp": kw.get("hp", 100.0),
           "mp": kw.get("mp"), "char": kw.get("char", CHAR),
-          "size": kw.get("size"),
+          "size": kw.get("size"), "roi": kw.get("roi"),
           "monsters": kw.get("monsters", list(kw.get("m", [])))}
     b.get_state = lambda: st
     calls.clear()
@@ -636,6 +637,52 @@ check("1366 画面下 250px 外的怪在框外 → 不出手", ATK not in down_k
 c = step(b, m=M_FAR, size=(2049, 1152))
 check("2049 画面下同一只怪进框 → 出手（范围跟着放大）",
       ATK in down_keys(c), down_keys(c))
+
+print("\n[29] 走位不许走出人物识别区（名字牌一被框切掉半边就认不出人）")
+ROI_N = (0.30, 0.08, 0.60, 0.90)          # 1366 宽下：x 410~820，左右各留 3% 余量
+lim = bot.walk_x_limits((1366, 768), ROI_N)
+check("活动范围 = 识别区左右各收 3% 画面宽",
+      lim is not None and abs(lim[0] - (1366 * 0.30 + 1366 * 0.03)) < 0.01
+      and abs(lim[1] - (1366 * 0.60 - 1366 * 0.03)) < 0.01, lim)
+check("没给识别区 → 不限制（老行为）", bot.walk_x_limits((1366, 768), None) is None)
+_narrow = bot.walk_x_limits((1366, 768), (0.5, 0.1, 0.51, 0.9))
+check("识别区窄到没余地 → 围着中心给一条缝，不会两边反着判",
+      _narrow is not None and _narrow[1] - _narrow[0] == 16.0
+      and abs(sum(_narrow) / 2 - 1366 * 0.505) < 0.5, _narrow)
+
+# 站在右边界上，怪在更右边 → 不许再往右走
+EDGE_R = [760, 300, 820, 320]             # 名字牌中心 790 > hi - 1
+b = make()
+c = step(b, m=[{"name": "Stump", "box": [1150, 300, 1210, 360], "conf": 0.9}],
+         char=EDGE_R, size=(1366, 768), roi=ROI_N)
+check("已经贴到右边界 → 不按 right", "right" not in down_keys(c), c)
+check("状态说明是识别区边缘", "识别区" in b.snapshot()[1]["act"], b.snapshot()[1])
+# 同一位置，怪在左边（往里走）→ 照走，它得能自己走回来
+b = make()
+c = step(b, m=[{"name": "Stump", "box": [500, 300, 560, 360], "conf": 0.9}],
+         char=EDGE_R, size=(1366, 768), roi=ROI_N)
+check("目标在左边（往识别区里走）→ 允许走过来", "left" in down_keys(c), c)
+
+# 巡逻撞到左边界 → 立刻掉头
+EDGE_L = [420, 300, 480, 320]             # 名字牌中心 450 < lo+1，已经在墙外
+b = make()
+b.cfg["patrol"] = True
+b._patrol_dir = -1
+b._t_patrol = time.time()                 # 刚换过向，别让计时器插一脚
+c = step(b, m=[], char=EDGE_L, size=(1366, 768), roi=ROI_N)
+check("巡逻往左撞墙 → 这一帧不按 left", "left" not in down_keys(c), c)
+check("巡逻方向翻过来了", b._patrol_dir == 1, b._patrol_dir)
+step(b, m=[], char=EDGE_L, size=(1366, 768), roi=ROI_N)
+check("下一帧就按住 right 往回巡逻", b._held == 1, b._held)
+
+print("\n[30] 人物没定位时不许盲走（假锚点在画面中间，走了就再也找不回来）")
+b = make()
+b.cfg["patrol"] = True
+c = step(b, m=[{"name": "Stump", "box": [1150, 300, 1210, 360], "conf": 0.9}],
+         char=None, size=(1366, 768), roi=ROI_N)
+check("不给方向键（不走向目标）",
+      "left" not in down_keys(c) and "right" not in down_keys(c), c)
+check("状态写明原地不动", "没定位" in b.snapshot()[1]["act"], b.snapshot()[1])
 
 print(f"\n通过 {ok} / {ok + fail}")
 sys.exit(1 if fail else 0)

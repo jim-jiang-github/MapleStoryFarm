@@ -383,6 +383,34 @@ check("stats.char.body_c = 身体中心", code == 200 and
       abs(stats["char"]["body_c"][1] - BCY) < 1.5,
       stats["char"].get("body_c"))
 
+# 识别区不只是搜索窗，还是挂机走位的边界（bot.walk_x_limits）。人一旦被挤到
+# 识别区边上、名字牌只剩半个在框内，框内匹配永远不到分——丢人时横向外扩才捞得回来。
+print("[S3b] 识别区边上丢了人 → 横向外扩重找")
+_roi0 = list(srv.char_state["roi"])
+with srv.char_lock:
+    srv.char_state["roi"] = [0.50, 0.08, 0.95, 0.90]      # 名字牌中心 0.454 明确在框外
+    srv.char_state["box"], srv.char_state["ts"] = None, 0.0
+    srv.char_state["misses"] = srv.CHAR_REACQ_MISS + 2
+_scene = make_scene(hp=0.99, mp=0.80, exp=0.30)
+_box, _sc = srv.find_char(_scene)
+check("名字牌落在识别区左边外面 → 外扩后仍能认出",
+      _box is not None and _sc >= 0.8, (_box, _sc))
+_pad0 = srv.CHAR_LOST_PAD_X
+srv.CHAR_LOST_PAD_X = 0.0
+_box0, _sc0 = srv.find_char(_scene)
+srv.CHAR_LOST_PAD_X = _pad0
+check("不外扩就真找不到（证明起作用的就是这一条）", _box0 is None, (_box0, _sc0))
+check("左右惩罚只在候选跑出识别区时才扣（框内贴边不再冤枉）",
+      srv._hud_penalty([10, 300, 60, 320], W, H, (0.0, 1.0)) == 0.0
+      and srv._hud_penalty([10, 300, 60, 320], W, H, (0.20, 1.0)) > 0.0
+      and srv._hud_penalty([10, 300, 60, 320], W, H, None) == 0.0)
+check("bot 状态里带识别区（走位边界就是按它算的）",
+      srv._bot_state().get("roi") == [0.50, 0.08, 0.95, 0.90],
+      srv._bot_state().get("roi"))
+with srv.char_lock:
+    srv.char_state["roi"] = _roi0
+    srv.char_state["misses"] = 0
+
 
 def mob(name, dx, dy, w=40, h=30):
     return (name, (int(BCX + dx - w / 2), int(BCY + dy - h / 2), w, h))

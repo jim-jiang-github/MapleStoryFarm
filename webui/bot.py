@@ -634,6 +634,34 @@ def skill_scale(cfg, size):
     return min(3.0, max(0.3, float(size[0]) / bw))
 
 
+WALK_EDGE_MARGIN = 0.03   # 走位时人物身体中心离识别区左右边界至少留这么多（占画面宽）
+
+
+def walk_x_limits(size, roi):
+    """挂机走位允许的人物身体中心 x 范围 (lo, hi)；没配识别区就返回 None（不限）。
+
+    「人物识别区」（面板上那个框）不只是找人的搜索窗，它同时是挂机的**活动
+    边界**：身体中心一走出一左右边界，名字牌就有一半落在框外，模板匹配分数
+    立刻掉下来——这就是用户说的「太靠左太靠右就脱离识别区」。所以走位以它
+    当墙，左右各留一点余量（名字牌本身有半个牌宽，贴边也会被切掉半边）。
+    """
+    if not size or not roi:
+        return None
+    try:
+        w = float(size[0])
+        x1, x2 = float(roi[0]), float(roi[2])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if w <= 0 or x2 <= x1:
+        return None
+    m = max(24.0, w * WALK_EDGE_MARGIN)
+    lo, hi = x1 * w + m, x2 * w - m
+    if hi - lo < 8.0:                 # 识别区窄到没有活动余地：围绕中心给一条缝
+        mid = (x1 + x2) * w / 2.0
+        lo, hi = mid - 8.0, mid + 8.0
+    return lo, hi
+
+
 def _nearest_box(monsters, cx):
     """列表里水平离 cx 最近的一只怪的框（monsters 元素带 box）。"""
     best, best_d = None, None
@@ -799,6 +827,20 @@ class Bot:
         self._held = 0
 
     # ---- 状态 ----
+    def _can_walk(self, side, char, size, roi):
+        """往 side 再走一步会不会把人物身体中心带出识别区。
+
+        已经站在墙外（比如被击退出去）时反过来判：往里走一律放行，这样它会
+        自己走回来，而不是在墙外继续顶着。
+        """
+        lim = walk_x_limits(size, roi)
+        if lim is None:
+            return True
+        cx = _cx(char)
+        if side < 0:
+            return cx > lim[0] + 1.0
+        return cx < lim[1] - 1.0
+
     def _reset_face(self):
         """朝向记忆作废（死亡/失焦回来/丢定位）：锚点一起清，从当前位移重新攒。"""
         self._face = 0
@@ -988,6 +1030,7 @@ class Bot:
             self._count("pick")
 
         size = st.get("size")
+        roi = st.get("roi")           # 人物识别区（归一化 x1,y1,x2,y2）：走位的墙
         char = st.get("char")
         if not char:
             # 识别不到人物：默认人就在画面正中心（相机锁人，角色基本贴着
@@ -1038,6 +1081,13 @@ class Bot:
         if not cands:
             # 没有技能罩得住的怪：像以前一样朝最近的目标走 / 巡逻
             self._set_status(target="")
+            if self._synth:
+                # 人物没定位：现在的「人在画面中心」只是个假设，拿它算走位等于
+                # 闭着眼走——越走越远，名字牌也越来越找不回来。站住等识别恢复，
+                # 打击照旧（上面已经用假锚点算过一遍技能框了）。
+                self._set_dir(0)
+                self._set_status(act="人物没定位，站着不动", err="")
+                return
             tgt = _band_target(char, monsters, band, cfg["dy_tol"] * k)
             if tgt:
                 tb = tgt["box"]
@@ -1049,20 +1099,33 @@ class Bot:
                     # → 站住：再走过去也打不着，别白走
                     self._set_dir(0)
                     self._set_status(act="高度够不着")
-                elif cfg["move"]:
+                elif not cfg["move"]:
+                    self._set_dir(0)
+                    self._set_status(act="目标太远")
+                elif not self._can_walk(side, char, size, roi):
+                    # 再走就出识别区了（名字牌会被框切掉一半，立刻认不出人）
+                    # → 站住打框里能打到的，等人/怪自己回来
+                    self._set_dir(0)
+                    self._set_status(act="到识别区边缘，不再往外走")
+                else:
                     self._set_dir(side)
                     self._face = side
                     self._set_status(act="走向目标")
-                else:
-                    self._set_dir(0)
-                    self._set_status(act="目标太远")
             elif cfg["patrol"]:
                 if now - self._t_patrol >= cfg["patrol_sec"]:
                     self._patrol_dir = -self._patrol_dir
                     self._t_patrol = now
-                self._set_dir(self._patrol_dir)
-                self._face = self._patrol_dir
-                self._set_status(act="巡逻找怪")
+                if not self._can_walk(self._patrol_dir, char, size, roi):
+                    # 巡逻撞到识别区边界：立刻掉头，别顶着墙一直走
+                    self._patrol_dir = -self._patrol_dir
+                    self._t_patrol = now
+                if self._can_walk(self._patrol_dir, char, size, roi):
+                    self._set_dir(self._patrol_dir)
+                    self._face = self._patrol_dir
+                    self._set_status(act="巡逻找怪")
+                else:
+                    self._set_dir(0)
+                    self._set_status(act="巡逻到头了（识别区边界）")
             else:
                 self._set_dir(0)
                 self._set_status(act="守株待兔")
