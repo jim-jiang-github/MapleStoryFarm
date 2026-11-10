@@ -528,24 +528,38 @@ def _intersects(a, b):
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
-def skill_rects(skill, char_box):
+def skill_rects(skill, char_box, face=0):
     """一个技能的两个判定框（全画面坐标 [x1,y1,x2,y2]）。
 
     ground/jrect 存的是相对人物身体中心的偏移 [左, 右, 上, 下]，
-    这里换算成画面上的绝对矩形。跳放没开就没有第二个框。
+    是「人物朝右时」量出来的形态（面板上拖框时就是按这个存的）。
 
-    方向不在这里裁：both（全方位）和 front（身前）的**感知**框都是整个
-    矩形——front 技能出手前会先转身朝目标（one_sided 逻辑），实际只打
-    身前那半边；画面上 server 会按当前朝向只画那半边。所见即所打。
+    dir=front（身前单向）：框随朝向整体**镜像**——朝右是 [左,右]，朝左
+    就翻成 [右,左]（形状不变，够得着的区域跟着人一起翻）。以前按“只留
+    那半边”裁，左右不对称的框（比如左30 右170）朝左时会塌成 30px 窄条。
+    face=0（朝向未知）：横向按 max(左,右) 对称展开——反正出手前会先转身，
+    转身后朝目标那一侧的够得着距离就是 max(左,右)，拿它当感知范围刚好。
+
+    跳放没开就没有第二个框。server 的 draw_skill_ranges 画的就是它。
     """
     b = char_body_box(char_box)
     cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+    front = (skill.get("dir") or "both") == "front"
+
+    def mk(l, r, u, d):
+        if front:
+            if face < 0:
+                l, r = r, l           # 朝左：整体镜像
+            elif face == 0:
+                l = r = max(l, r)     # 不知道朝哪：对称展开
+        return [cx - l, cy - u, cx + r, cy + d]
+
     l, r, u, d = (float(v) for v in skill["ground"])
-    ground = [cx - l, cy - u, cx + r, cy + d]
+    ground = mk(l, r, u, d)
     jump = None
     if skill.get("jump"):
         jl, jr, ju, jd = (float(v) for v in skill["jrect"])
-        jump = [cx - jl, cy - ju, cx + jr, cy + jd]
+        jump = mk(jl, jr, ju, jd)
     return ground, jump
 
 

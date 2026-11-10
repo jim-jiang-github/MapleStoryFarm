@@ -2798,40 +2798,28 @@
     mctx.moveTo(ax - 7, ay); mctx.lineTo(ax + 7, ay);
     mctx.moveTo(ax, ay - 7); mctx.lineTo(ax, ay + 7);
     mctx.stroke();
-    // 方向指示（身前技能）：以锚点竖虚线为界，两半边分别是朝左/朝右时打的区域；
-    // 知道当前朝向时把不打的半边压暗，箭头跟着朝向亮——人物转身框就跟着翻
+    // 方向提示（身前技能）：框按「朝右」量、按这个形态存；人物朝左时整体镜像。
+    // 画个虚线灰框表示镜像后的位置，一眼看出人转向后框会翻到哪
     if (dir_ === "front" && rects.g) {
       const gr = rects.g;
       const axn = a.c[0] / lastFrameW;
-      mctx.setLineDash([4, 4]);
-      mctx.strokeStyle = "#64748b";
+      const mr = { x1: 2 * axn - gr.x2, y1: gr.y1, x2: 2 * axn - gr.x1, y2: gr.y2 };
+      mctx.setLineDash([5, 4]);
+      mctx.strokeStyle = "#94a3b8";
       mctx.lineWidth = 1;
-      mctx.beginPath();
-      mctx.moveTo(ax, Y(0)); mctx.lineTo(ax, Y(1));
-      mctx.stroke();
+      mctx.strokeRect(X(mr.x1) + .5, Y(mr.y1) + .5,
+                      (mr.x2 - mr.x1) * L.w, (mr.y2 - mr.y1) * L.h);
       mctx.setLineDash([]);
-      const dimHalf = (x1, x2) => {          // 压暗不打的那半边
-        const px = X(Math.max(0, x1));
-        const pw = (Math.min(1, x2) - Math.max(0, x1)) * L.w;
-        if (pw <= 0) return;
-        mctx.fillStyle = "rgba(100,116,139,.30)";
-        mctx.fillRect(px, Y(gr.y1), pw, (gr.y2 - gr.y1) * L.h);
-      };
-      if (lastFace > 0) dimHalf(gr.x1, axn);      // 朝右：左半边不打
-      else if (lastFace < 0) dimHalf(axn, gr.x2); // 朝左：右半边不打
-      const arrow = (x, txt, active) => {
-        mctx.font = `600 ${active ? 12 : 11}px system-ui, sans-serif`;
-        mctx.fillStyle = active ? SK_G_LINE : "#94a3b8";
-        mctx.textAlign = "center";
-        mctx.fillText(txt, x, Y(gr.y1) - 6);
-        mctx.textAlign = "left";
-      };
-      arrow((ax + X(gr.x1)) / 2, "← 朝左时打这边", lastFace < 0);
-      arrow((ax + X(gr.x2)) / 2, "朝右时打这边 →", lastFace > 0);
+      mctx.font = "600 11px system-ui, sans-serif";
+      mctx.fillStyle = "#64748b";
+      mctx.fillText("朝左时（镜像）", X(mr.x1) + 4, Y(mr.y1) + 14);
+      mctx.fillStyle = SK_G_LINE;
+      mctx.fillText("朝右时（现在调的）", X(gr.x1) + 4, Y(gr.y1) - 6);
     }
     // 顶部提示条：怎么操作、怎么收尾；锚点是兜底值时一并说明
     mctx.font = "600 12px system-ui, sans-serif";
     const hint = `SK${skillSel + 1} 范围编辑 · 拖框移动 / 拉角缩放 · 完成点「✓ 完成」或按 Esc`
+      + (dir_ === "front" ? " · 身前技能按朝右量，朝左自动镜像" : "")
       + (a.live ? "" : " ·（还没定位到人物：暂以画面中心为锚，定位后自动跟随）");
     const tw = mctx.measureText(hint).width;
     mctx.fillStyle = "rgba(15,23,42,.82)";

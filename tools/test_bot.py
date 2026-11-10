@@ -280,6 +280,20 @@ g3, _ = bot.skill_rects({"key": "KeyA", "type": "single", "dir": "front",
 check("身前技能：感知框两侧都在（出手前转身对正，实际只打身前那半边）",
       g3 == [450.0, 192.5, 810.0, 312.5], g3)
 
+print("[17b] 身前技能：框随朝向整体镜像（不对称的框不许塌成窄条）")
+ASYM = {"key": "KeyA", "type": "single", "dir": "front",
+        "ground": [30, 170, 60, 60], "jump": False, "jrect": [0, 0, 0, 0]}
+ga, _ = bot.skill_rects(ASYM, CHAR, 1)
+check("朝右：左30 右170（用存下来的形态）", ga == [600.0, 192.5, 800.0, 312.5], ga)
+gb, _ = bot.skill_rects(ASYM, CHAR, -1)
+check("朝左：整体镜像成 左170 右30（不是砍成 30px 窄条）",
+      gb == [460.0, 192.5, 660.0, 312.5], gb)
+gc, _ = bot.skill_rects(ASYM, CHAR, 0)
+check("朝向未知：按 max(左,右) 对称展开当感知范围",
+      gc == [460.0, 192.5, 800.0, 312.5], gc)
+_, gj = bot.skill_rects({**ASYM, "jump": True, "jrect": [20, 260, 100, 60]}, CHAR, -1)
+check("跳放框同样镜像", gj == [370.0, 152.5, 650.0, 312.5], gj)
+
 print("[18] 身前技能：怪在够得着的那一侧 → 转身后出手，不是走过去")
 b = make()
 b.cfg["skills"] = [{"key": "KeyA", "type": "single", "dir": "front",

@@ -511,6 +511,40 @@ check("人物左移 → 朝向翻成左（face=-1）", wait_until(
 set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30, mobs=[]))
 post("/api/bot/set", {"patrol": True})
 
+# 画框回归（用户实测「技能框都没了」的两条根因）：
+#   ① 身前技能左右不对称（左30 右170）时，朝左必须整体镜像——不许砍成 30px 窄条
+#   ② 挂机关着也得是看得见的颜色——灰线在岩石背景上等于隐形
+print("  -- 画框回归：身前技能朝左镜像 / 挂机关着也可见")
+_cfg0, _ = srv.game_bot.snapshot()
+_flat = np.full((720, 1280, 3), 150, np.uint8)
+_box = [600.0, 380.0, 640.0, 392.0]
+
+
+def _sk_span(face, on):
+    srv.game_bot.cfg["on"] = on
+    srv.game_bot.cfg["skills"] = [{"key": "KeyS", "type": "single", "dir": "front",
+                                   "ground": [30, 170, 60, 60], "jump": False,
+                                   "jrect": [30, 170, 100, 60]}]
+    srv.game_bot._status["face"] = face
+    im = _flat.copy()
+    srv.draw_skill_ranges(im, _box)
+    xs = np.nonzero(np.any(im != 150, axis=2))[1]
+    return None if len(xs) == 0 else (int(xs.min()), int(xs.max()))
+
+
+_sp_r, _sp_l = _sk_span(1, True), _sk_span(-1, True)
+check("朝右框宽 ≈200（左30+右170）",
+      _sp_r and 190 <= _sp_r[1] - _sp_r[0] <= 240, _sp_r)
+check("朝左框同样宽 ≈200（整体镜像，不是 30px 窄条）",
+      _sp_l and 190 <= _sp_l[1] - _sp_l[0] <= 240, _sp_l)
+check("朝左的框确实翻到了左边（左边界比朝右更靠左）",
+      _sp_l and _sp_r and _sp_l[0] < _sp_r[0] - 100, (_sp_l, _sp_r))
+_sp_off = _sk_span(1, False)
+check("挂机关着画框依旧可见（不再是灰线隐形）", _sp_off is not None, _sp_off)
+srv.game_bot.cfg["on"] = _cfg0["on"]
+srv.game_bot.cfg["skills"] = _cfg0["skills"]
+srv.game_bot._status["face"] = 0
+
 # 拾取
 set_frame(make_scene(hp=0.99, mp=0.80, exp=0.30, mobs=[]))
 mark_events()

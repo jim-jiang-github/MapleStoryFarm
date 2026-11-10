@@ -1999,7 +1999,8 @@ CHAR_COLOR = (255, 200, 0)      # BGR 天蓝，和识别框（绿/红/怪种色�
 #   2) 把攻击范围画到画面上，方便对着画面调距离
 #   3) 提供开关和参数接口
 BOT_RANGE_ON = (0, 190, 255)    # BGR 橙黄：挂机在跑
-BOT_RANGE_OFF = (110, 110, 110)  # 灰：挂机关着也画，不然没法调「多远算够得着」
+BOT_RANGE_OFF = (0, 140, 210)   # 暗一档的橙：挂机关着也画——灰色在岩石背景上
+                                # 根本看不见，之前就吃过这个亏（框“凭空消失”）
 
 
 def _game_foreground():
@@ -2062,9 +2063,9 @@ def draw_skill_ranges(img, box):
     时会跳起来放）。最多画 6 个，再多糊成一团。
 
     方向（dir）只有两种：both 以人物为中心的全方位，画整框；
-    front 身前单向——只画人物当前朝向那半边并带箭头，人物转身框就跟着翻
-    （框的左右两半边分别是朝左/朝右时打的区域）。朝向读不到（0）就画
-    两侧带 "?"——不知道朝哪就别假装知道。
+    front 身前单向——框是「朝右时」的形态，人物朝左时**整体镜像**跟着翻
+    （见 bot.skill_rects）；朝向读不到（0）就对称展开并带 "?"——
+    不知道朝哪就别假装知道。
     """
     cfg, st = game_bot.snapshot()
     skills = [s for s in (cfg.get("skills") or []) if s.get("key")]
@@ -2074,23 +2075,19 @@ def draw_skill_ranges(img, box):
     color = BOT_RANGE_ON if on else BOT_RANGE_OFF
     h, w = img.shape[:2]
     face = int(st.get("face") or 0)
-    b = char_body_box(box)
-    cx = int((b[0] + b[2]) / 2)
-    cy = int((b[1] + b[3]) / 2)
     for i, sk in enumerate(skills[:6]):
         dir_ = sk.get("dir") or "both"
         arrow = ""
         if dir_ == "front":
             arrow = " ->" if face > 0 else (" <-" if face < 0 else " ?")
         tag = f"SK{i + 1}"
-        rects = [(False, sk["ground"])]
-        if sk.get("jump"):
-            rects.append((True, sk["jrect"]))
-        for is_jump, (l, r, u, d) in rects:
-            if dir_ == "front" and face:
-                l, r = (0.0, r) if face > 0 else (l, 0.0)   # 只画朝向那半边
-            x1, y1 = max(2, int(cx - l)), max(2, int(cy - u))
-            x2, y2 = min(w - 3, int(cx + r)), min(h - 3, int(cy + d))
+        # 判定框和 bot 用同一份（朝向镜像/对称展开都在这一个函数里，
+        # 画的和打的永远不会对不上）
+        g, j = botmod.skill_rects(sk, box, face)
+        rects = [(False, g)] + ([(True, j)] if j else [])
+        for is_jump, rc in rects:
+            x1, y1 = max(2, int(rc[0])), max(2, int(rc[1]))
+            x2, y2 = min(w - 3, int(rc[2])), min(h - 3, int(rc[3]))
             if x2 - x1 < 6 or y2 - y1 < 6:
                 continue                   # 贴边/太扁就别画成一坨
             thick = 2 if (on and not is_jump) else 1
