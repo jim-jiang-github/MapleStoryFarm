@@ -295,6 +295,46 @@ check("朝向未知：按 max(左,右) 对称展开当感知范围",
 _, gj = bot.skill_rects({**ASYM, "jump": True, "jrect": [20, 260, 100, 60]}, CHAR, -1)
 check("跳放框同样镜像", gj == [370.0, 152.5, 650.0, 312.5], gj)
 
+print("[17c] 方向=左右也不许僵住：框一样跟着朝向翻（用户实测「朝左框不动」）")
+BOTH_ASYM = {"key": "KeyX", "type": "single", "dir": "both",
+             "ground": [0, 140, 55, 31], "jump": True, "jrect": [0, 153, 103, 42]}
+br_, _ = bot.skill_rects(BOTH_ASYM, CHAR, 1)
+check("朝右：只往右边伸 140（左0 右140，原样）",
+      br_ == [630.0, 197.5, 770.0, 283.5], br_)
+bl_, _ = bot.skill_rects(BOTH_ASYM, CHAR, -1)
+check("朝左：整体镜像，只往左边伸 140（以前这里是死的，框永远在右边）",
+      bl_ == [490.0, 197.5, 630.0, 283.5], bl_)
+bu_, bju = bot.skill_rects(BOTH_ASYM, CHAR, 0)
+check("朝向未知：照原样（左右技能不转身，框画在哪就打哪，不当成两边都够）",
+      bu_ == [630.0, 197.5, 770.0, 283.5], bu_)
+check("跳放框同理", bju == [630.0, 149.5, 783.0, 294.5], bju)
+bs_, _ = bot.skill_rects({**BOTH_ASYM, "ground": [120, 120, 55, 31]}, CHAR, -1)
+check("左右对称的框镜像前后完全一样（翻不翻看不出来，也没副作用）",
+      bs_ == [510.0, 197.5, 750.0, 283.5], bs_)
+
+print("[17d] 方向=左右 + 单边框：判定框跟着朝向走（画到哪就打到哪）")
+MONR = [{"name": "Snail", "box": [700, 240, 760, 280], "conf": 0.8}]   # 右边
+MONL = [{"name": "Snail", "box": [500, 240, 560, 280], "conf": 0.8}]   # 左边
+def bot_facing(face):
+    """造一个「已经站稳、朝向已知」的 bot（第一轮会重置朝向，得先暖一下）。"""
+    b = make()
+    b.cfg["skills"] = [BOTH_ASYM]
+    step(b, now=4000.0, m=[])          # 暖一轮：吃掉「刚拿回焦点」的朝向复位
+    b._face = face
+    return b
+
+
+c = step(bot_facing(1), now=5000.0, m=MONR)
+check("朝右：右边那只在框里 → 直接出手（不用转身，左右技能不转身）",
+      down_keys(c) == ["KeyX"], c)
+c = step(bot_facing(1), now=5000.0, m=MONL)
+check("朝右：左边那只在框外 → 不打它，先朝它走", "KeyX" not in down_keys(c), c)
+c = step(bot_facing(-1), now=5000.0, m=MONL)
+check("朝左：框镜到左边 → 左边那只出手", "KeyX" in down_keys(c), c)
+c = step(bot_facing(-1), now=5000.0, m=MONR)
+check("朝左：右边那只反而够不着了（框在哪边就打哪边）",
+      "KeyX" not in down_keys(c), c)
+
 print("[18] 身前技能：怪在够得着的那一侧 → 转身后出手，不是走过去")
 b = make()
 b.cfg["skills"] = [{"key": "KeyA", "type": "single", "dir": "front",

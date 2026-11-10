@@ -645,6 +645,30 @@ check("往右走 40px → 朝右：框只往右边伸", _fr and _f0 and _fr[0] >
 check("往左走 → 朝左：框整体镜像翻到左边", _fl and _fr and _fl[1] < _fr[1] - 80,
       (_fr, _fl))
 
+# 用户真实的配置：方向=左右 + 左0 右140（只够得着身前那半边）。以前镜像只对
+# dir=front 生效，这种框朝左时纹丝不动 —— 就是用户看到的「框不跟着朝向」。
+srv.game_bot.cfg["skills"] = [{"key": "KeyS", "type": "single", "dir": "both",
+                               "ground": [0, 140, 55, 31], "jump": False,
+                               "jrect": [0, 153, 103, 42]}]
+with srv.char_lock:
+    srv.char_state["face"], srv.char_state["face_anchor"] = 0, None
+srv.observe_face(_box)
+_b0 = _span_face()
+srv.observe_face([_box[0] + 40, _box[1], _box[2] + 40, _box[3]])
+_br = _span_face()
+srv.observe_face([_box[0] - 60, _box[1], _box[2] - 60, _box[3]])
+_bl = _span_face()
+check("左右 + 左0右140：朝向未知时照原样，只往右边伸（左右技能不当成两边都够）",
+      _b0 and _b0[1] - _b0[0] < 200 and _b0[0] > 560, _b0)
+check("左右 + 左0右140：往右走 → 框还在人物右边",
+      _br and _b0 and abs(_br[0] - _b0[0]) < 20 and abs(_br[1] - _b0[1]) < 20,
+      (_b0, _br))
+check("左右 + 左0右140：往左走 → 框整体镜像翻到左边",
+      _bl and _br and _bl[1] < _br[1] - 80, (_br, _bl))
+srv.game_bot.cfg["skills"] = [{"key": "KeyS", "type": "single", "dir": "front",
+                               "ground": [30, 170, 60, 60], "jump": False,
+                               "jrect": [30, 170, 100, 60]}]
+
 # 端到端：真靠找人线程发现「名字牌往右挪了」（不是手工喂 observe_face）
 with srv.char_lock:
     srv.char_state["face"], srv.char_state["face_anchor"] = 0, None

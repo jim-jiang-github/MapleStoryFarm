@@ -2614,10 +2614,12 @@
     if (j) paint(j, "#d97706", "rgba(217,119,6,.10)", [5, 3]);
     paint(g, "#16a34a", "rgba(22,163,74,.14)", []);
 
-    // 左上角说明：这张框是按「人物朝右」量的（身前技能朝左会整体镜像）
+    // 左上角说明：这张框是按「人物朝右」量的（人物朝左时整体镜像，画面上那条
+    // 框会跟着翻；对称的框翻不翻一样，所以只有不对称的才值得标一句）
+    const asym = Math.abs(s.ground[0] - s.ground[1]) > 1;
     c.font = "600 9.5px system-ui, sans-serif";
     c.fillStyle = "#94a3b8";
-    c.fillText(s.dir === "front" ? "身前 · 按朝右量" : "左右", 5, 11);
+    c.fillText((s.dir === "front" ? "身前" : "左右") + (asym ? " · 按朝右量" : ""), 5, 11);
   }
 
   function renderSkills() {
@@ -2640,7 +2642,7 @@
           <span class="skhnd" title="按住拖动，调整释放顺序（排前面的先匹配）">⠿</span>
           <button class="slot skkey" type="button" data-hint="按键" title="这个技能的快捷键，跟游戏里的技能键位对应。点格子 → 按一个键即设置；Del 清空、Esc 取消"></button>
           <select class="sktype" title="群攻：范围内怪 ≥2 时优先用；单体：只有 1 只时优先用。同类型里排前面的先用"><option value="aoe">群攻</option><option value="single">单体</option></select>
-          <select class="skdir" title="技能朝哪边打：左右 = 以人物为中心，框内两边都打；身前 = 只能打人物面前那半边（出手前会先转身对正，画面上的框跟着人物朝向翻）"><option value="both">左右</option><option value="front">身前</option></select>
+          <select class="skdir" title="左右 = 以人物为中心，两边都打（出手前不用转身）；身前 = 只打人物面前那半边（出手前会先转身对正）。两种的框都一样：跟着人物朝向翻，画面上那条框 = 现在这一下能够着的区域"><option value="both">左右</option><option value="front">身前</option></select>
           <span class="sktag">SK${i + 1}</span>
           <button class="skdel" type="button" title="删除这个技能">✕</button>
         </div>

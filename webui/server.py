@@ -2301,10 +2301,10 @@ def draw_skill_ranges(img, box):
     技能列表的顺序（= 释放优先级），带 J 的是跳放框（怪在里面但不在实线框里
     时会跳起来放）。最多画 6 个，再多糊成一团。
 
-    方向（dir）只有两种：both 以人物为中心的全方位，画整框；
-    front 身前单向——框是「朝右时」的形态，人物朝左时**整体镜像**跟着翻
-    （见 bot.skill_rects）；朝向读不到（0）就对称展开并带 "?"——
-    不知道朝哪就别假装知道。
+    方向（dir）只决定要不要「出手前转身对正」，框本身**永远跟着朝向翻**：
+    框是「朝右时」的形态，人物朝左就整体镜像（见 bot.skill_rects）。左右对称
+    的框翻不翻看起来一样，不对称的（左0 右140）才会明显翻边——挂机关着、
+    手动走路时也一样，朝向读不到（0）就对称展开并带 "?"。
     """
     cfg, st = game_bot.snapshot()
     skills = [s for s in (cfg.get("skills") or []) if s.get("key")]
@@ -2321,9 +2321,12 @@ def draw_skill_ranges(img, box):
             face = int(char_state["face"] or 0)
     k = botmod.skill_scale(cfg, (w, h))   # 和 bot 决策用同一个系数，所见即所打
     for i, sk in enumerate(skills[:6]):
-        dir_ = sk.get("dir") or "both"
+        # 箭头只给「不对称的框」看：这种框朝左朝右明显是两个位置，标个方向
+        # 才知道现在画的是哪一边。左右对称的框翻不翻一模一样，标了反而吵。
+        g0 = sk.get("ground") or (0, 0, 0, 0)
+        asym = abs(float(g0[0]) - float(g0[1])) > 1.0
         arrow = ""
-        if dir_ == "front":
+        if asym:
             arrow = " ->" if face > 0 else (" <-" if face < 0 else " ?")
         tag = f"SK{i + 1}"
         # 判定框和 bot 用同一份（朝向镜像/对称展开都在这一个函数里，

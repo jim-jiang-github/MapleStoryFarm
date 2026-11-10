@@ -554,11 +554,18 @@ def skill_rects(skill, char_box, face=0, k=1.0):
     DPI-unaware，窗口会被 Windows 位图拉伸）后等比放大/缩小，技能在世界里够得着
     的距离不变，画面上的框和实际判定也始终是同一个东西。
 
-    dir=front（身前单向）：框随朝向整体**镜像**——朝右是 [左,右]，朝左
-    就翻成 [右,左]（形状不变，够得着的区域跟着人一起翻）。以前按“只留
-    那半边”裁，左右不对称的框（比如左30 右170）朝左时会塌成 30px 窄条。
-    face=0（朝向未知）：横向按 max(左,右) 对称展开——反正出手前会先转身，
-    转身后朝目标那一侧的够得着距离就是 max(左,右)，拿它当感知范围刚好。
+    **框永远跟着朝向翻**（朝右存 [左,右]，朝左整体镜像成 [右,左]）。左右
+    对称的框翻不翻都一样，所以看着只有不对称的框（比如左0 右140）在动——
+    用户要的就是这个：挂机关着、手动按方向键走路时，画面上的框也要跟着人翻。
+    dir 只决定「出手前要不要先转身对正」：front（身前单向）每刀前都点一次
+    方向键对正，both（左右）不用——但两者实际能够着的区域都是相对人物的，
+    所以都要镜像。
+
+    face=0（朝向未知）：身前技能横向按 max(左,右) 对称展开当感知范围——反正
+    出手前会转身，转身后朝哪边都能够着 max(左,右)。左右技能不展开：这种技能
+    本来就不转身，框画在哪就打哪，身后就是够不着。
+    以前按“只留那半边”裁是错的：左右不对称的框（左30 右170）朝左时会塌成
+    30px 窄条。
 
     跳放没开就没有第二个框。server 的 draw_skill_ranges 画的就是它。
     """
@@ -567,11 +574,10 @@ def skill_rects(skill, char_box, face=0, k=1.0):
     front = (skill.get("dir") or "both") == "front"
 
     def mk(l, r, u, d):
-        if front:
-            if face < 0:
-                l, r = r, l           # 朝左：整体镜像
-            elif face == 0:
-                l = r = max(l, r)     # 不知道朝哪：对称展开
+        if face < 0:
+            l, r = r, l               # 朝左：整体镜像（对称的框等于没变）
+        elif face == 0 and front:
+            l = r = max(l, r)         # 身前 + 不知道朝哪：对称展开当感知范围
         return [cx - l, cy - u, cx + r, cy + d]
 
     l, r, u, d = (float(v) * k for v in skill["ground"])
@@ -983,7 +989,12 @@ class Bot:
         for sk in cfg.get("skills") or []:
             if not sk.get("key"):
                 continue                     # 还没录按键的技能不参与
-            g, j = skill_rects(sk, char, k=k)
+            # 身前技能拿「对称展开」当感知范围（反正出手前会先转身对正）；
+            # 左右技能不转身，框画在哪就打哪——所以把当前朝向一起算进去。
+            # 这样画面上的框和这里的判定框永远是同一个（所见即所打），换朝向
+            # 时框翻到哪边，判定也就跟着到哪边。
+            st_face = 0 if (sk.get("dir") or "both") == "front" else self._face
+            g, j = skill_rects(sk, char, st_face, k)
             gm = [m for m in monsters if m.get("box") and _intersects(g, m["box"])]
             jm = [m for m in monsters if j and m.get("box") and _intersects(j, m["box"])]
             if gm or jm:
