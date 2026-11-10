@@ -304,6 +304,8 @@ check("GET /api/motion 200", code == 200 and isinstance(motion, dict))
 code, stats = get("/api/stats")
 check("GET /api/stats 200 且含 bot_on/window_found",
       code == 200 and "bot_on" in stats and "window_found" in stats)
+check("人物识别状态行存在（识别出错/多久没认到都直接写在面板上）",
+      b'id="charStat"' in html and b'paintCharStat' in html)
 check("技能范围是滑块（宽/上/下），不再是数字输入框",
       b'skgrid' in html and b'class="skr"' in html and b'data-a="w"' in html
       and b'type="number"' not in html)
@@ -382,6 +384,9 @@ check("stats.char.body_c = 身体中心", code == 200 and
       abs(stats["char"]["body_c"][0] - BCX) < 1.5 and
       abs(stats["char"]["body_c"][1] - BCY) < 1.5,
       stats["char"].get("body_c"))
+check("stats.char 带 error / box（面板那句状态话就是靠它）",
+      stats["char"].get("error") == "" and stats["char"].get("box") is not None,
+      (stats["char"].get("error"), stats["char"].get("box")))
 
 # 识别区不只是搜索窗，还是挂机走位的边界（bot.walk_x_limits）。人一旦被挤到
 # 识别区边上、名字牌只剩半个在框内，框内匹配永远不到分——丢人时横向外扩才捞得回来。
@@ -409,6 +414,39 @@ check("bot 状态里带识别区（走位边界就是按它算的）",
       srv._bot_state().get("roi"))
 with srv.char_lock:
     srv.char_state["roi"] = _roi0
+    srv.char_state["misses"] = 0
+
+# 上一帧的框跑到识别区外面时，旧代码会切出空矩阵把 morphologyEx 打炸；异常被
+# char_loop 吞掉后 misses 不涨、box 不清，下一轮拿同一个坏框再炸一次 —— 永久卡死。
+# 现场：识别区右边界 1097，框中心 1204（人走到识别区外了），两分钟不刷新。
+print("[S3c] 上一帧的框跑到识别区外 → 不许抛异常，而且要跟得住")
+_true_box, _ = srv.find_char(make_scene(hp=0.99, mp=0.80, exp=0.30))
+check("先正常认出人（拿真框做基准）", _true_box is not None, _true_box)
+with srv.char_lock:
+    _roi_bak = list(srv.char_state["roi"])
+    srv.char_state["roi"] = [0.02, 0.08, 0.30, 0.90]      # 右边界 410，真框在 620 附近
+    srv.char_state["box"] = list(_true_box)
+    srv.char_state["misses"] = 0
+try:
+    _b2, _s2 = srv.find_char(make_scene(hp=0.99, mp=0.80, exp=0.30))
+    _raised = None
+except Exception as _e:                                   # noqa: BLE001
+    _b2, _s2, _raised = None, 0.0, _e
+check("框在识别区外时 find_char 不抛异常", _raised is None, _raised)
+check("仍然跟得住（搜索块并上了上一帧的框）", _b2 is not None and _s2 >= 0.8, (_b2, _s2))
+check("搜索块把识别区外的那只框并进来了",
+      srv._search_band((H, W), _true_box)[2] > _true_box[2],
+      (srv._search_band((H, W), _true_box), _true_box))
+check("空切片只返回 None，不会打炸 morphologyEx",
+      srv._local_search(np.full((100, 100), 30, np.uint8), srv.char_state["tpl_w"],
+                        [500, 500, 554, 515], 60) is None)
+check("跟踪允许掉 0.06 分（名字牌被压住一角），但位置必须在 8px 内",
+      srv._track_ok(([100, 100, 154, 115], 0.76), [100, 100, 154, 115], 0.80)
+      and not srv._track_ok(([130, 100, 184, 115], 0.76), [100, 100, 154, 115], 0.80)
+      and not srv._track_ok(([100, 100, 154, 115], 0.70), [100, 100, 154, 115], 0.80))
+with srv.char_lock:
+    srv.char_state["roi"] = _roi_bak
+    srv.char_state["box"] = None
     srv.char_state["misses"] = 0
 
 

@@ -1547,6 +1547,7 @@ char_state = {
     "face": 0,            # 从画面位移观察到的朝向（1 右 / -1 左 / 0 未知）：挂机关着时也更新
     "face_anchor": None,  # 朝向观测锚点：人物身体中心的上一次参考位置
     "error": "",
+    "errors": 0,          # 连续抛异常的轮数：连抛就丢掉这个框重找，别死抱着它
 }
 # 找人的线程句柄。以前用一个 [False] 布尔记「起过了」，一旦线程因为异常挂了，
 # 这个标记还是 True，之后就不再有人去匹配了 —— 表现就是「清掉模板之后再传图，
@@ -1670,6 +1671,11 @@ CHAR_LOST_PAD_X = 0.10     # 丢了以后横向把搜索范围外扩这么多（
                            # 永远匹配不上——不外扩就再也捞不回来。只扩横向：
                            # 上下的 HUD（小地图/血条）比左右危险得多。
 CHAR_DIST_PENALTY = 0.05   # 多候选时对「离上次位置远」的轻微惩罚
+# 跟踪可以比「重新捕获」松一点：名字牌被怪名/伤害数字压住一角时分数会从 0.92 掉到
+# 0.78 左右，但位置纹丝不动。这种照收，否则会闪一下「丢了」再重找，看着就是框在闪。
+# 前提是峰值离原位置不超过 CHAR_TRACK_PX（真的没动），位置对不上就老实判丢。
+CHAR_TRACK_DROP = 0.06
+CHAR_TRACK_PX = 8.0
 # 屏幕 HUD 区（底部状态栏/顶部/左右两条）里也印着玩家名字，而且那处白字的形状和
 # 名字牌完全一样（实测分数 0.92，只比真身低 0.06）。人物走出画面时全图搜索会锁到
 # 那儿去，看起来就是「框突然跳到左下角」。落在这些区域里的候选要额外扣分。
@@ -1898,11 +1904,20 @@ def _best_peaks(res, n=5, rx=24, ry=8):
 
 
 def _local_search(g, tpl_w, box, radius):
-    """在 box 周围 ±radius 里搜一次，返回 (box, score) 或 None（峰压在边界上）。"""
+    """在 box 周围 ±radius 里搜一次，返回 (box, score) 或 None（峰压在边界上）。
+
+    box 用的是**这张图 g 的坐标**。要是上一帧的框跑到这张图外面（人物被击退到识别
+    区外、窗口刚变过尺寸），切出来就是空矩阵，morphologyEx 直接抛
+    `!_src.empty()`；异常被 char_loop 吞掉后 misses 不涨、box 不清，下一轮拿同一个
+    坏框再抛一次 —— **永久卡死**（实测：框停在识别区外，两分钟一次都没刷新，
+    用户看到的就是「有概率识别不到」）。所以先确认切得出东西，再动 OpenCV。
+    """
     th, tw = tpl_w.shape[:2]
     H, W = g.shape[:2]
     x1, y1 = max(0, int(box[0]) - radius), max(0, int(box[1]) - radius)
     x2, y2 = min(W, int(box[2]) + radius), min(H, int(box[3]) + radius)
+    if x2 - x1 < tw or y2 - y1 < th:      # 空切片 / 比模板还小：这一级没得搜
+        return None
     roi = _white_map(g[y1:y2, x1:x2])
     if roi.shape[0] < th or roi.shape[1] < tw:
         return None
@@ -1914,6 +1929,50 @@ def _local_search(g, tpl_w, box, radius):
         return None
     bx, by = x1 + int(loc[0]), y1 + int(loc[1])
     return [bx, by, bx + tw, by + th], float(mx)
+
+
+def _track_ok(hit, lb, thresh):
+    """跟踪这一级采不采信这次命中（lb = 上一帧的框，块内坐标）。"""
+    b, sc = hit
+    if sc >= thresh:
+        return True
+    dx = (b[0] + b[2]) / 2.0 - (lb[0] + lb[2]) / 2.0
+    dy = (b[1] + b[3]) / 2.0 - (lb[1] + lb[3]) / 2.0
+    return (sc >= thresh - CHAR_TRACK_DROP
+            and dx * dx + dy * dy <= CHAR_TRACK_PX * CHAR_TRACK_PX)
+
+
+def _in_roi(box, shape):
+    """名字牌中心在不在识别区里（识别区 = 用户亲手框的「人只会在这里」）。"""
+    rx1, ry1, rx2, ry2 = _char_roi(shape)
+    cx, cy = (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0
+    return rx1 <= cx <= rx2 and ry1 <= cy <= ry2
+
+
+def _search_band(shape, last, pad_x=0.0):
+    """这一帧在哪个像素矩形里找人：(x1, y1, x2, y2)，保证非空。
+
+    识别区 + pad_x，再**并上上一帧的框**：人物被击退、或自己走到识别区外时，框已经
+    不在识别区里了，只按识别区切的话等于「从一块不包含它的图里找它」，切出来还可能
+    是空矩阵（把 morphologyEx 打炸）。并上它自己那 24px 才能继续跟住，等它走回来。
+    合并时左右不越进 HUD 条（小地图/任务栏里印着同一个名字，分数一样高，会把框
+    引走），上下同理。
+    """
+    rx1, ry1, rx2, ry2 = _char_roi(shape)
+    H, W = int(shape[0]), int(shape[1])
+    if pad_x and pad_x > 0:
+        d = int(round(W * float(pad_x)))
+        rx1, rx2 = max(0, rx1 - d), min(W, rx2 + d)
+    if last is not None:
+        hx1, hx2 = int(W * CHAR_HUD_SIDE), int(W * (1.0 - CHAR_HUD_SIDE))
+        hy1, hy2 = int(H * CHAR_HUD_TOP), int(H * CHAR_HUD_BOTTOM)
+        nx1 = max(hx1, min(rx1, int(last[0]) - 24))
+        nx2 = min(hx2, max(rx2, int(last[2]) + 24))
+        ny1 = max(hy1, min(ry1, int(last[1]) - 16))
+        ny2 = min(hy2, max(ry2, int(last[3]) + 16))
+        if nx2 - nx1 >= 8 and ny2 - ny1 >= 8:     # 框已经离谱到框外就别并了
+            rx1, ry1, rx2, ry2 = nx1, ny1, nx2, ny2
+    return rx1, ry1, rx2, ry2
 
 
 def _hud_penalty(box, W, H, roi_x=None):
@@ -1982,28 +2041,29 @@ def find_char(frame):
     if th >= H or tw >= W:
         return None, 0.0
 
-    rx1, ry1, rx2, ry2 = _char_roi(g.shape)
-    band = g[ry1:ry2, rx1:rx2]            # 只在这一块里找
+    # 搜索块 = 识别区 ∪ 上一帧的框（框跑到识别区外时还跟得住，不会切出空图）
+    bx1, by1, bx2, by2 = _search_band(g.shape, last)
+    band = g[by1:by2, bx1:bx2]
     bh, bw = band.shape[:2]
     if th >= bh or tw >= bw:
         return None, 0.0
 
     # 1) / 2) 局部跟踪：命中且过门限就算数，不必回到全搜
     if last is not None and misses <= CHAR_REACQ_MISS:
-        lb = [last[0] - rx1, last[1] - ry1, last[2] - rx1, last[3] - ry1]  # 换成块内坐标
+        lb = [last[0] - bx1, last[1] - by1, last[2] - bx1, last[3] - by1]  # 换成块内坐标
         for radius in (CHAR_LOCAL_RADIUS, CHAR_WIDE_RADIUS):
             hit = _local_search(band, tpl_w, lb, radius)
-            if hit is not None and hit[1] >= thresh:
+            if hit is not None and _track_ok(hit, lb, thresh):
                 b = hit[0]
-                return [b[0] + rx1, b[1] + ry1, b[2] + rx1, b[3] + ry1], hit[1]
+                return [b[0] + bx1, b[1] + by1, b[2] + bx1, b[3] + by1], hit[1]
             if hit is not None and radius == CHAR_WIDE_RADIUS:
                 break      # 宽搜都只有低分：别再拿低分位置凑数
 
-    # 3) 全搜。人物已经丢了（last is None）时横向外扩 CHAR_LOST_PAD_X：
-    #    它可能刚被挤到识别区边上，名字牌只剩半个在框里 —— 框内永远匹配不上，
-    #    不放宽就再也找不回来（用户实测「太靠左太靠右就识别不到」）。
-    pad = CHAR_LOST_PAD_X if last is None else 0.0
-    fx1, fy1, fx2, fy2 = _char_roi(g.shape, pad)
+    # 3) 全搜。人物已经丢了（last is None）、或者框已经跑到识别区外面（被击退/走出
+    #    去了/上次是外扩捞回来的）时横向外扩 CHAR_LOST_PAD_X：这时候它本来就不在
+    #    框里，不扩就再也找不回来。
+    pad = CHAR_LOST_PAD_X if (last is None or not _in_roi(last, g.shape)) else 0.0
+    fx1, fy1, fx2, fy2 = _search_band(g.shape, last, pad)
     fband = g[fy1:fy2, fx1:fx2]
     fh, fwid = fband.shape[:2]
     if th >= fh or tw >= fwid:
@@ -2204,14 +2264,27 @@ def char_loop():
             # 整轮包起来：以前 snapshot 在 try 外面，取帧一抛异常线程就静悄悄死了
             with char_lock:
                 char_state["error"] = f"{type(e).__name__}: {e}"
-            time.sleep(0.5)
+                char_state["errors"] += 1
+                # 连着几轮都抛，说明手里这个框是坏的（跑到搜索块外面、坐标越界…）：
+                # 不丢掉它就会每轮拿同一个坏框再抛一次 —— 永久卡死，看着就是
+                # 「识别不到了」但错误提示一直在。清掉重找才有出路。
+                if char_state["errors"] >= 3:
+                    char_state["box"] = None
+                    char_state["pending"] = None
+                    char_state["guard"] = 0
+                    char_state["misses"] = CHAR_REACQ_MISS + 1
+            time.sleep(0.3)
             continue
         now = time.time()
         face_box = None            # 这次被采信的框：拿去观测朝向（锁外调用，锁不可重入）
         with char_lock:
             char_state["error"] = ""
+            char_state["errors"] = 0
             char_state["score"] = round(score, 3)
-            if box is not None and score >= char_state["thresh"]:
+            # 跟踪允许比重新捕获松 CHAR_TRACK_DROP（名字牌被压住一角时分数会掉一点，
+            # 但位置没动）：判分口径在 find_char 里，这里别再拿原门限二次卡一遍，
+            # 否则那个「松一点」等于没生效。
+            if box is not None and score >= char_state["thresh"] - CHAR_TRACK_DROP:
                 shown, pend, ev = chase_char_box(
                     char_state["box"], box, char_state["pending"])
                 char_state["box"] = shown
@@ -2867,6 +2940,10 @@ async def stats():
             "scale": char_state["scale"],
             "guard": char_state["guard"],   # >0：疑似跳变，正在攒帧确认
             "roi": list(char_state["roi"]),   # 搜索范围（归一化 x1,y1,x2,y2）
+            # 最近一轮找人抛的异常（页面直接显示出来）：以前它只躺在接口里，
+            # 页面上只有「框没了」，分不清是没认到还是线程在报错。
+            "error": char_state["error"],
+            "box": list(char_state["box"]) if char_state["box"] else None,
             # 身体中心（全分辨率像素）：技能范围框以它为锚点，前端画布编辑用
             "body_c": (lambda b: [round((b[0] + b[2]) / 2, 1), round((b[1] + b[3]) / 2, 1)]
                        )(char_body_box(char_state["box"]))

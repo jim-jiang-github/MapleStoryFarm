@@ -127,6 +127,12 @@
   .bars > .row.conf .k { font-size: 10.5px; flex: 0 0 auto; }
   .bars > .row.conf .v { flex: 1 1 auto; display: flex; align-items: center; gap: 4px; min-width: 0; }
   .bars > .row.conf .v b { font-size: 10.5px; flex: 0 0 auto; }
+  /* 人物识别状态一句话：正常显示匹配分，丢了显示多少秒没认到、出错显示错误。
+     以前框没了页面上没有任何解释，「没认到」和「线程在报错」看着一模一样。 */
+  .chstat { font-size: 10px; line-height: 1.3; color: var(--hint);
+            margin: -1px 0 2px; word-break: break-all; }
+  .chstat.warn { color: #b45309; }
+  .chstat.err { color: #dc2626; }
   /* 标记顺序是 bk/btrack/bv，这里用 order 摆成"标签 - 轨道 - 数值" */
   .bar { display: flex; align-items: center; gap: 8px; }
   .bk {
@@ -587,6 +593,7 @@
               <span class="k">人物匹配精度</span>
               <span class="v"><input id="charRange" class="rng" type="range" min="0.40" max="0.98" step="0.01" value="0.80" title="名字牌模板的匹配分门限。名字牌这种固定字体稳定在 0.95 以上，低于 0.85 基本是认错地方；标记忽有忽无就往下调一点"><b id="charVal">0.80</b></span>
             </div>
+            <div class="chstat" id="charStat" hidden></div>
             <div class="bar" data-k="hp"><span class="bk">HP</span><span class="bv">—</span><span class="btrack"><i></i><u class="mark" title="喝药线：血量掉到这条线就自动喝药"></u><u class="thr"></u></span></div>
             <div class="potrow" id="potChain" title="备用红药键 1~4：喝药键的药空了（按了血量没涨回来），就按这里的顺序换着按，直到喝上为止。点格子 → 按一个键即设置；再按 Del 清空、Esc 取消">
               <button class="slot" data-i="0" type="button"></button><button class="slot" data-i="1" type="button"></button><button class="slot" data-i="2" type="button"></button><button class="slot" data-i="3" type="button"></button>
@@ -1284,6 +1291,7 @@
       if (r) paintRoi();
     }
     if (!!c.has_tpl !== charHasTpl) showCharTpl(!!c.has_tpl);
+    paintCharStat(c);
     if (!charHasTpl) return;
     if (Date.now() > charLockUntil) {
       const inp = $("charRange");
@@ -1292,6 +1300,32 @@
         $("charVal").textContent = Number(c.thresh).toFixed(2);
       }
     }
+  }
+
+  /* 一句话说清「现在认人认到哪一步了」：
+     正常 → 匹配分；丢了 → 多少秒没认到；线程抛异常 → 把错误直接显示出来。
+     以前框一没页面上没有任何解释，「没认到」和「识别线程在报错」看着完全一样。 */
+  function paintCharStat(c) {
+    const el = $("charStat");
+    if (!el) return;
+    if (!c || !c.has_tpl || c.enabled === false) { el.hidden = true; return; }
+    let msg, cls = "";
+    const age = typeof c.age === "number" ? c.age : null;
+    if (c.error) {
+      msg = "识别出错：" + String(c.error).slice(0, 60);
+      cls = "err";
+    } else if (age === null) {
+      msg = "还没认出人：名字牌要基本完整地落在识别区里";
+      cls = "warn";
+    } else if (age > 2) {
+      msg = `已经 ${age < 10 ? age.toFixed(1) : Math.round(age)} 秒没认到人`;
+      cls = "warn";
+    } else {
+      msg = `匹配 ${Number(c.score || 0).toFixed(2)} · 已锁定`;
+    }
+    el.textContent = msg;
+    el.className = "chstat " + cls;
+    el.hidden = false;
   }
 
   /* ---------- 人物搜索范围（ROI） ----------
