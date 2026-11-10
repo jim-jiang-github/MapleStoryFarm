@@ -686,7 +686,7 @@
               </div>
             </details>
             <details class="group" data-cap="挂机">
-              <summary><b>挂机</b><span class="gsum" id="sumBot">—</span></summary>
+              <summary><b>挂机</b></summary>
               <div class="gbody">
             <div class="row conf">
               <span class="k">按键出口</span>
@@ -2348,12 +2348,6 @@
     set("sumDet", [
       key("detect").replace("识别: ", ""),
       key("confVal"), key("hitVal") + "帧", opt("fpsSel").replace("（跑满）", ""),
-    ].join(" · "));
-    set("sumBot", [
-      "血 " + key("hpVal"), "蓝 " + key("mpVal"),
-      key("atkVal") + "间隔", opt("inputSel") + "出口",
-      "拾取" + ($("pickBtn").classList.contains("on") ? "开" : "关"),
-      "巡逻" + ($("patrolBtn").classList.contains("on") ? "开" : "关"),
     ].join(" · "));
     set("sumSkills", skillsNow.length
       ? skillsNow.length + " 个 · " + skillsNow.map((s) => potKeyLabel(s.key) || "?").join(" ")
