@@ -2214,6 +2214,7 @@
   let skillSnap = "";            // 上次同步的 skills JSON（没变不重画）
   let lastBodyC = null;          // 最近一次轮询到的人物身体中心
   let lastFrameW = 0, lastFrameH = 0;
+  let lastFace = 0;              // 人物当前朝向（bot 状态：1 右 / -1 左 / 0 未知）
 
   function paintGroupSums() {
     const key = (id) => { const el = $(id); const s = el ? el.textContent.trim() : ""; return s || (el && el.dataset.hint) || "—"; };
@@ -2548,7 +2549,7 @@
           <span class="skhnd" title="按住拖动，调整释放顺序（排前面的先匹配）">⠿</span>
           <button class="slot skkey" type="button" data-hint="按键" title="这个技能的快捷键，跟游戏里的技能键位对应。点格子 → 按一个键即设置；Del 清空、Esc 取消"></button>
           <select class="sktype" title="群攻：范围内怪 ≥2 时优先用；单体：只有 1 只时优先用。同类型里排前面的先用"><option value="aoe">群攻</option><option value="single">单体</option></select>
-          <select class="skdir" title="技能朝哪边打：左右 = 框内两边都算；身前 = 只打人物朝向那半边（出手前会先转身对正，左右两半边分别是朝左/朝右时打的区域）；仅左/仅右 = 固定只打那半边，另一边的怪不进判定"><option value="both">左右</option><option value="front">身前</option><option value="left">仅左</option><option value="right">仅右</option></select>
+          <select class="skdir" title="技能朝哪边打：左右 = 以人物为中心，框内两边都打；身前 = 只能打人物面前那半边（出手前会先转身对正，画面上的框会跟着人物朝向翻——框的左右两半边分别是朝左/朝右时打的区域）"><option value="both">左右</option><option value="front">身前</option></select>
           <span class="sktag">SK${i + 1}</span>
           <button class="skdel" type="button" title="删除这个技能">✕</button>
         </div>
@@ -2797,9 +2798,11 @@
     mctx.moveTo(ax - 7, ay); mctx.lineTo(ax + 7, ay);
     mctx.moveTo(ax, ay - 7); mctx.lineTo(ax, ay + 7);
     mctx.stroke();
-    // 方向指示：以锚点竖虚线为界，不参与判定的半边压暗 + 活动侧箭头
-    if (dir_ !== "both") {
+    // 方向指示（身前技能）：以锚点竖虚线为界，两半边分别是朝左/朝右时打的区域；
+    // 知道当前朝向时把不打的半边压暗，箭头跟着朝向亮——人物转身框就跟着翻
+    if (dir_ === "front" && rects.g) {
       const gr = rects.g;
+      const axn = a.c[0] / lastFrameW;
       mctx.setLineDash([4, 4]);
       mctx.strokeStyle = "#64748b";
       mctx.lineWidth = 1;
@@ -2807,31 +2810,24 @@
       mctx.moveTo(ax, Y(0)); mctx.lineTo(ax, Y(1));
       mctx.stroke();
       mctx.setLineDash([]);
-      if (dir_ === "left" && gr) {           // 仅左：右半边压暗
+      const dimHalf = (x1, x2) => {          // 压暗不打的那半边
+        const px = X(Math.max(0, x1));
+        const pw = (Math.min(1, x2) - Math.max(0, x1)) * L.w;
+        if (pw <= 0) return;
         mctx.fillStyle = "rgba(100,116,139,.30)";
-        mctx.fillRect(ax, Y(gr.y1), (gr.x2 - a.c[0] / lastFrameW) * L.w,
-                      (gr.y2 - gr.y1) * L.h);
-      } else if (dir_ === "right" && gr) {   // 仅右：左半边压暗
-        mctx.fillStyle = "rgba(100,116,139,.30)";
-        mctx.fillRect(X(gr.x1), Y(gr.y1),
-                      (a.c[0] / lastFrameW - gr.x1) * L.w, (gr.y2 - gr.y1) * L.h);
-      }
-      // 箭头画在框顶上方：front 两侧各一个（朝哪边打哪边），left/right 只画活动侧
-      const arrow = (x, txt) => {
-        mctx.font = "600 11px system-ui, sans-serif";
-        mctx.fillStyle = dir_ === "front" ? "#475569" : SK_G_LINE;
+        mctx.fillRect(px, Y(gr.y1), pw, (gr.y2 - gr.y1) * L.h);
+      };
+      if (lastFace > 0) dimHalf(gr.x1, axn);      // 朝右：左半边不打
+      else if (lastFace < 0) dimHalf(axn, gr.x2); // 朝左：右半边不打
+      const arrow = (x, txt, active) => {
+        mctx.font = `600 ${active ? 12 : 11}px system-ui, sans-serif`;
+        mctx.fillStyle = active ? SK_G_LINE : "#94a3b8";
         mctx.textAlign = "center";
-        mctx.fillText(txt, x, Y(rects.g.y1) - 6);
+        mctx.fillText(txt, x, Y(gr.y1) - 6);
         mctx.textAlign = "left";
       };
-      if (dir_ === "front") {
-        arrow((ax + X(rects.g.x1)) / 2, "← 朝左时打这边");
-        arrow((ax + X(rects.g.x2)) / 2, "朝右时打这边 →");
-      } else if (dir_ === "left") {
-        arrow((ax + X(rects.g.x1)) / 2, "← 只打左边");
-      } else {
-        arrow((ax + X(rects.g.x2)) / 2, "只打右边 →");
-      }
+      arrow((ax + X(gr.x1)) / 2, "← 朝左时打这边", lastFace < 0);
+      arrow((ax + X(gr.x2)) / 2, "朝右时打这边 →", lastFace > 0);
     }
     // 顶部提示条：怎么操作、怎么收尾；锚点是兜底值时一并说明
     mctx.font = "600 12px system-ui, sans-serif";
@@ -2862,6 +2858,7 @@
       if (!r.cfg) return;
       paintBotCfg(r.cfg);
       const st = r.status || {};
+      if (typeof st.face === "number") lastFace = st.face;   // 身前技能的画面框跟着朝向翻
       // 状态行已删，异常状态（出错/失焦/识别没开）挂到挂机按钮的悬浮提示上，不占面板
       const warn = st.err
         || (r.detect_on ? "" : "识别没开，脚本看不到怪（只会巡逻）")

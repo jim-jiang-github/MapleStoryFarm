@@ -2061,9 +2061,10 @@ def draw_skill_ranges(img, box):
     技能列表的顺序（= 释放优先级），带 J 的是跳放框（怪在里面但不在实线框里
     时会跳起来放）。最多画 6 个，再多糊成一团。
 
-    方向（dir）：both 双向画整框 / left·right 只画那半边 / front 身前单向——
-    只画人物当前朝向那半边并带箭头；朝向读不到（0）就画两侧带 "?"，不知道
-    朝哪就别假装知道。
+    方向（dir）只有两种：both 以人物为中心的全方位，画整框；
+    front 身前单向——只画人物当前朝向那半边并带箭头，人物转身框就跟着翻
+    （框的左右两半边分别是朝左/朝右时打的区域）。朝向读不到（0）就画
+    两侧带 "?"——不知道朝哪就别假装知道。
     """
     cfg, st = game_bot.snapshot()
     skills = [s for s in (cfg.get("skills") or []) if s.get("key")]
@@ -2086,9 +2087,8 @@ def draw_skill_ranges(img, box):
         if sk.get("jump"):
             rects.append((True, sk["jrect"]))
         for is_jump, (l, r, u, d) in rects:
-            l, r = botmod._dir_extents(dir_, l, r)
             if dir_ == "front" and face:
-                l, r = (0.0, r) if face > 0 else (l, 0.0)
+                l, r = (0.0, r) if face > 0 else (l, 0.0)   # 只画朝向那半边
             x1, y1 = max(2, int(cx - l)), max(2, int(cy - u))
             x2, y2 = min(w - 3, int(cx + r)), min(h - 3, int(cy + d))
             if x2 - x1 < 6 or y2 - y1 < 6:
