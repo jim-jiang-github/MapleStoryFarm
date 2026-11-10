@@ -21,7 +21,7 @@
   "pick_key": "KeyZ",
   "skills": [
     {
-      "key": "ControlLeft",
+      "key": "KeyX",
       "type": "single",
       "dir": "front",
       "ground": [
@@ -36,7 +36,8 @@
         92.0,
         73.0,
         0.0
-      ]
+      ],
+      "cd_ms": 0
     },
     {
       "key": "KeyC",
@@ -54,10 +55,10 @@
         88.0,
         83.0,
         40.0
-      ]
+      ],
+      "cd_ms": 0
     }
   ],
-  "atk_ms": 420,
   "pick": true,
   "pick_ms": 130,
   "patrol": true,
