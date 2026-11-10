@@ -942,29 +942,28 @@ _base = get("/api/char")[1]
 check("基线：标定宽度 = 当前画面宽 1366", _base["calib_w"] == 1366, _base["calib_w"])
 # 整幅画面放大 1.5 倍：名字牌跟着变大，等价于把游戏窗口从 1366 拉到 2049。
 # 尺度还停在旧值 → 真实环境里匹配分掉到 0.6、框消失（合成字没那么脆，
-# 这里不靠「框丢不丢」触发，直接调重标接口——它和后台自动重标是同一段逻辑）
+# 这里不靠「框丢不丢」触发，直接调 char_loop 里那个自愈函数）
 _big = cv2.resize(make_scene(hp=0.99, mp=0.80, exp=0.30),
                   None, fx=1.5, fy=1.5, interpolation=cv2.INTER_LINEAR)
 set_frame(_big)
 time.sleep(0.4)
-code, r = post("/api/char/recalibrate", {})
-check("重标接口返回成功", code == 200 and r.get("ok"), r)
-check("尺度换到了 ≈1.5 倍", abs(r.get("scale", 0) - _base["scale"] * 1.5) < 0.12,
-      f"base={_base['scale']} new={r.get('scale')}")
-check("标定宽度更新成新画面宽", r.get("calib_w") == int(_big.shape[1]), r.get("calib_w"))
+# 面板上那个「重标尺度」按钮已经删了（换窗口时这段逻辑本来就会自己跑）：
+# 直接调自愈函数，验的还是同一段逻辑
+_ok = srv._auto_recalibrate(_big)
+check("尺度自愈：窗口变大后重标成功", _ok is True, _ok)
+check("尺度换到了 ≈1.5 倍",
+      abs(srv.char_state["scale"] - _base["scale"] * 1.5) < 0.12,
+      f"base={_base['scale']} new={srv.char_state['scale']}")
+check("标定宽度更新成新画面宽", srv.char_state["calib_w"] == int(_big.shape[1]),
+      srv.char_state["calib_w"])
 check("重标后 ME 框还在", wait_until(
     lambda: get("/api/char")[1]["box"] is not None, timeout=8),
     detail=str(get("/api/char")[1]))
-# 没画面时重标要老实报错，不能瞎改尺度
+# 窗口尺寸没再变 → 什么都不做（不然每 4 秒一轮全尺度扫描，白烧 CPU）
 _sc = srv.char_state["scale"]
-with srv.grabber.lock:
-    _cs = srv.grabber.client_size
-    srv.grabber.client_size = (0, 0)
-code, r = post("/api/char/recalibrate", {})
-check("没画面时重标返回失败提示", code == 400 and not r.get("ok"), r)
-with srv.grabber.lock:
-    srv.grabber.client_size = _cs
-check("失败的这次没有改动尺度", srv.char_state["scale"] == _sc, srv.char_state["scale"])
+check("窗口没再变时不去瞎扫（返回 False、尺度不动）",
+      srv._auto_recalibrate(_big) is False and srv.char_state["scale"] == _sc,
+      srv.char_state["scale"])
 
 # ---------------- S10 抓屏优先级：窗口直读 > 抓屏幕 ----------------
 print("[S10] 抓屏优先级：先读游戏窗口绘制表面（原生像素），失败才退回抓屏幕")

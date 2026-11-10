@@ -2189,7 +2189,7 @@ def _apply_char_scale(tpl, scale, frame_gray):
     _save_char_conf()
 
 
-def _auto_recalibrate(frame, force=False):
+def _auto_recalibrate(frame):
     """跟丢后纠正匹配尺度 —— 名字牌是 2D UI，像素尺寸只跟窗口大小走。
 
     以前只认「窗口尺寸变了」这一个证据，而且 frame_size 只存在内存里：重启后
@@ -2203,7 +2203,10 @@ def _auto_recalibrate(frame, force=False):
       ② 没有 calib_w（老配置/第一次）→ 全尺度扫描兜底，门槛 0.88，
          宁可不动也别把好模板改成坏的（老注释里那次的教训）。
     窗口宽度没变、也没有待验证的比例 → 什么都不做，别每 4 秒扫一遍。
-    force=True（手动重标）：跳过下面两道「省着点」的闸门，立刻扫。
+
+    只由 char_loop 在跟丢 4 秒后自动调用。面板上那个「重标尺度」按钮已经删了：
+    换窗口/换分辨率时第 ① 条本来就会自动跟上，手动点它并不比等这 4 秒多做
+    任何事情（用户实测「点了也没用」，判断是对的）。
     """
     with char_lock:
         tpl = char_state["tpl"]
@@ -2229,12 +2232,11 @@ def _auto_recalibrate(frame, force=False):
     # ② 兜底：全尺度扫描。窗口尺寸没变过就没必要扫（缩放不会自己变）。
     #    扫不出结果最多试 3 次（人物可能正好被特效/对话框遮住），之后等窗口
     #    尺寸再变才重扫——不然每 4 秒一轮全尺度扫描太费 CPU。
-    if not force:
-        if prev_size == (W, H):
+    if prev_size == (W, H):
+        return False
+    with char_lock:
+        if char_state["sweep_fails"] >= 3:
             return False
-        with char_lock:
-            if char_state["sweep_fails"] >= 3:
-                return False
     score, scale = _char_scale_sweep(tpl, gray)
     if score < max(CHAR_SCALE_MIN_SCORE, thresh) or abs(scale - old_scale) <= 0.02:
         with char_lock:
@@ -3565,30 +3567,6 @@ async def char_status():
             "error": char_state["error"],
             "thread": _char_thread_alive(),   # 找人线程是否活着（排查「标记不动了」）
         })
-
-
-@app.post("/api/char/recalibrate")
-async def char_recalibrate():
-    """手动重标匹配尺度（页面「重标」按钮 / 排查用）。
-
-    什么时候要用：换了分辨率、拉大/缩小了游戏窗口之后，名字牌的像素尺寸变了，
-    但旧尺度还留在配置里——表现就是「人物明明在，框就是不出现」、分数卡在 0.6。
-    后台本来会在长时间跟丢时自愈（见 _auto_recalibrate），这里给一个立刻执行的入口。
-    """
-    frame = grabber.snapshot()
-    h, w = frame.shape[:2]
-    if grabber.client_size[0] == 0:
-        return JSONResponse({"ok": False, "msg": "现在没有画面（游戏窗口不可见）"},
-                            status_code=400)
-    ok = await asyncio.to_thread(_auto_recalibrate, frame, True)
-    with char_lock:
-        out = {"ok": bool(ok), "scale": char_state["scale"],
-               "score": round(char_state["score"], 3),
-               "calib_w": char_state["calib_w"], "frame_w": int(w),
-               "thresh": char_state["thresh"]}
-    if not ok:
-        out["msg"] = "没找到可靠的尺度（人物不在画面里，或模板本身不对）——试试重新框一次名字牌"
-    return JSONResponse(out)
 
 
 @app.post("/api/char/template")
