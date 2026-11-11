@@ -9,10 +9,10 @@ import atexit
 import base64
 import collections
 import ctypes
+import ipaddress
 import json
 import os
 import re
-import secrets
 import shutil
 import socket
 import subprocess
@@ -3042,8 +3042,10 @@ app.add_middleware(
 )
 INDEX = apppaths.res_file("index.html")
 
-# 外网访问时的口令门（可选）：设了环境变量 PREVIEW_TOKEN 才生效，本地用不受影响。
-# 理由：这个页面等于"看你的屏幕 + 能把游戏窗口提到前台"，把 URL 直接公开风险太大。
+# 外网访问时的口令门（可选）：设了环境变量 PREVIEW_TOKEN 才生效。本机和局域网
+# （手机/平板连家里 WiFi 直连）永远免口令——口令只拦「绕过路由器直接从公网进来」
+# 的访问（比如有人在路由器上做了端口转发）。隧道流量不在这层管：cloudflared 是
+# 从 127.0.0.1 转发进来的，天然放行。
 PREVIEW_TOKEN = (os.environ.get("PREVIEW_TOKEN") or "").strip()
 
 
@@ -3051,10 +3053,20 @@ def _is_loopback(host):
     return host in ("127.0.0.1", "::1", "localhost")
 
 
+def _is_lan(host):
+    """本机回环或私网地址（含 IPv6 ULA/链路本地）：这些都不该要口令。"""
+    if _is_loopback(host):
+        return True
+    try:
+        ip = ipaddress.ip_address((host or "").split("%", 1)[0])
+    except ValueError:
+        return False          # 解析不出来的按"不是局域网"处理，宁可多问一次口令
+    return ip.is_private or ip.is_link_local
+
+
 @app.middleware("http")
 async def _token_gate(request, call_next):
-    # 本机自己看不折腾：从 127.0.0.1 打开直接放行；局域网/外网一律要口令。
-    if not PREVIEW_TOKEN or _is_loopback(getattr(request.client, "host", "")):
+    if not PREVIEW_TOKEN or _is_lan(getattr(request.client, "host", "")):
         return await call_next(request)
     if request.query_params.get("k") == PREVIEW_TOKEN:
         resp = await call_next(request)
@@ -3158,7 +3170,6 @@ async def tunnel_get():
 
 @app.post("/api/tunnel/start")
 async def tunnel_start():
-    global PREVIEW_TOKEN
     with tunnel_lock:
         if _tunnel_alive():
             return JSONResponse({"ok": True, "running": True, "tool": tunnel_state["tool"]})
@@ -3182,11 +3193,9 @@ async def tunnel_start():
             cmd = [npx, "-y", "tunnelmole", str(PORT)]
             pattern = TUNNEL_TM_RE
 
-        # 公开地址等于「能看你的屏幕 + 能把游戏窗口提到前台」，不能裸奔：
-        # 没口令就现生成一个，之后局域网/外网访问都要带 ?k=（本机 127.0.0.1 免）。
-        if not PREVIEW_TOKEN:
-            PREVIEW_TOKEN = "msfarm" + secrets.token_hex(3)
-            _log(f"外网访问口令已生成：{PREVIEW_TOKEN}")
+        # 口令门只在设了 PREVIEW_TOKEN 环境变量时才开（自己主动要的那种）；
+        # 默认不生成：局域网访问（手机连 WiFi 直连）本来就不该被口令拦一道。
+        # 隧道地址是随机域名 + 只在点按钮期间存在，公开窗口可控。
 
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:

@@ -419,7 +419,7 @@
   }
   #detect { white-space: nowrap; }
   .actions { display: flex; flex-wrap: wrap; gap: 8px; }
-  /* 外网穿透：按钮下面那行公网地址（点一下复制完整链接，带口令） */
+  /* 外网穿透：按钮下面那行公网地址（点一下复制完整链接） */
   .wanline {
     margin-top: 8px; padding: 6px 9px; display: none;
     font-size: 11.5px; line-height: 1.5; color: #1d4ed8;
@@ -428,7 +428,15 @@
   }
   .wanline.show { display: block; }
   .wanline b { color: #7c2d12; font-weight: 600; }
-  #wanBtn.busy { background: #fff7ed; border-color: #fdba74; color: #9a3412; }
+  /* 建立中：按钮本体当进度条——橙色从左往右灌，灌到 92% 停住等地址（真实
+     总时长不好估，走「假进度 + 到点补满」的常规做法，别让用户对着死按钮等） */
+  #wanBtn.busy {
+    background: linear-gradient(90deg, #fdba74 0 var(--p, 0%),
+                #fff7ed var(--p, 0%) 100%);
+    border-color: #fdba74; color: #9a3412;
+  }
+  #wanBtn.on { color: #166534; }
+  #wanStop { margin-left: 0; }    /* 紧贴外网按钮，不要 mini 默认那 6px 间距 */
   /* 包按钮用的 span：display:contents 让里面的按钮仍按 .actions 的 flex 排 */
   #calBox { display: contents; }
   #calBox[hidden] { display: none; }
@@ -767,7 +775,8 @@
           <button id="toggle">暂停</button>
           <button id="botBtn" title="自动打怪：血低喝药、打范围内的怪、全程按 Z 拾取。只有游戏窗口在前台时才会发按键">挂机: 关</button>
           <button id="focusBtn" title="把游戏窗口抬到最前并给焦点（截图前必做）">前置游戏</button>
-          <button id="wanBtn" title="一键内网穿透：生成一个带口令的 https 公网地址，手机在外面（4G/别处 WiFi）也能看画面。再点一下关掉">外网: 关</button>
+          <button id="wanBtn" title="一键内网穿透：生成一个 https 公网地址，手机在外面（4G/别处 WiFi）也能看画面。建立时按钮上有进度条；好了以后点它复制链接">外网: 关</button>
+          <button id="wanStop" class="mini" hidden title="关掉外网隧道（地址随之失效）">✕</button>
           <input type="file" id="charFile" accept="image/*" hidden>
           <!-- 标定/自动定位平时用不上：auto 定位在后台自己跑，坐标存在 webui/bars.json。
                真要手动框的时候在地址后面加 ?cal=1 把这两个按钮放出来。 -->
@@ -2638,10 +2647,15 @@
 
   /* ================= 外网穿透（一键） =================
      后端 /api/tunnel/start 自己起 cloudflared（没有就退 tunnelmole），公网地址从
-     子进程输出里抓；这里只管按钮文案、轮询和「点一下复制带口令的完整链接」。
-     口令在起隧道时自动生成（不能裸奔：这个页面等于能看你屏幕），本机 127.0.0.1 免。 */
+     子进程输出里抓。这里管四件事：
+       建立中  → 按钮本体当进度条（橙色从左往右灌，假进度到 92% 等地址）
+       起来了  → 按钮变「复制外网链接」：点一下把手机版链接放进剪贴板
+       关隧道  → 按钮旁的 ✕（开着外网时才出现）
+       地址行  → 按钮下面那行，点一下同样能复制
+     内网（手机连家里 WiFi 直连局域网地址）照常访问，全程不要口令。 */
   let wanTimer = null;
   let wanTries = 0;
+  const WAN_WAIT_S = 8;   // 进度条走满的预期秒数（地址一般 3~8 秒出来）
 
   async function copyText(txt) {
     try {
@@ -2659,16 +2673,26 @@
   }
 
   function paintWan(d) {
-    const btn = $("wanBtn"), line = $("wanLine");
-    const busy = !d.running && !d.err && !d.url && (d.elapsed || 0) > 0;
+    const btn = $("wanBtn"), stop = $("wanStop"), line = $("wanLine");
+    const waiting = d.running && !d.url && !d.err;   // 隧道活着但地址还没分下来
     btn.classList.toggle("on", !!d.running);
-    btn.classList.toggle("busy", busy);
-    btn.textContent = d.running ? "外网: 开" : (busy ? "外网: 建立中…" : "外网: 关");
+    btn.classList.toggle("busy", waiting);
+    if (waiting) {
+      btn.textContent = "外网: 建立中…";
+      // 假进度：按已耗时灌到 92% 封顶。真实总时长估不准，进度条的意义是
+      // 「没死机，还在动」；地址一到（或报错）会切到别的状态收尾
+      btn.style.setProperty("--p",
+        Math.min(92, (d.elapsed || 0) / WAN_WAIT_S * 100).toFixed(1) + "%");
+    } else {
+      btn.textContent = d.running ? "外网: 开" : "外网: 关";
+      btn.style.removeProperty("--p");
+    }
+    stop.hidden = !(d.running || waiting);
     if (d.url) {
       line.dataset.url = d.mobile || d.url;
       line.classList.add("show");
       line.innerHTML = "手机打开 → <b>" + (d.mobile || d.url) + "</b>（点这里复制）";
-      line.title = "桌面版：" + (d.desktop || d.url) + (d.token ? "　口令：" + d.token : "");
+      line.title = "桌面版：" + (d.desktop || d.url);
     } else if (d.err) {
       line.dataset.url = "";
       line.classList.add("show");
@@ -2701,27 +2725,46 @@
 
   $("wanBtn").addEventListener("click", async () => {
     const btn = $("wanBtn");
+    if (btn.classList.contains("busy")) return;   // 建立中不响应，别把节奏打断
     btn.disabled = true;
     try {
       const cur = await fetch("/api/tunnel", { cache: "no-store" }).then(r => r.json());
-      const stop = cur.running || ((cur.elapsed || 0) > 0 && !cur.err);
-      if (stop) {
-        await postJSON("/api/tunnel/stop", {});
-        clearTimeout(wanTimer); wanTimer = null;
-        paintWan({ running: false, url: "", err: "", token: "" });
-        toast("外网已关闭");
-      } else {
-        await postJSON("/api/tunnel/start", {});
-        toast("正在建立公网地址，几秒后这里会出现链接…");
-        wanTries = 0;
-        clearTimeout(wanTimer);
-        wanTimer = setTimeout(wanPoll, 700);
+      if (cur.running && cur.url) {
+        // 开着：点按钮 = 复制外网链接（手机版优先，分享给谁都能直接打开）
+        const u = cur.mobile || cur.url;
+        toast(await copyText(u) ? "已复制外网链接：" + u : u);
+        return;
       }
+      if (cur.running && !cur.url) {
+        toast("正在建立公网地址，地址出来前别急…");
+        return;
+      }
+      await postJSON("/api/tunnel/start", {});
+      paintWan({ running: true, url: "", err: "", elapsed: 0 });  // 立刻进「建立中」
+      toast("正在建立公网地址，按钮上的进度条会走完…");
+      wanTries = 0;
+      clearTimeout(wanTimer);
+      wanTimer = setTimeout(wanPoll, 700);
     } catch (e) {
       toast("外网操作失败：" + (e && e.message ? e.message : e));
       wanPoll();
     } finally {
       btn.disabled = false;
+    }
+  });
+
+  $("wanStop").addEventListener("click", async () => {
+    $("wanStop").disabled = true;
+    try {
+      await postJSON("/api/tunnel/stop", {});
+      clearTimeout(wanTimer); wanTimer = null;
+      paintWan({ running: false, url: "", err: "" });
+      toast("外网已关闭（地址失效，内网访问不受影响）");
+    } catch (e) {
+      toast("关闭失败：" + (e && e.message ? e.message : e));
+      wanPoll();
+    } finally {
+      $("wanStop").disabled = false;
     }
   });
 
