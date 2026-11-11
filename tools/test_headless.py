@@ -946,7 +946,7 @@ check("find_dot：两颗黄点，取离 prev 近的（不是大的）",
 code, r = post("/api/mm/zone", {"zone": [0.7, 0.1, 0.3, 0.9]})
 check("POST /api/mm/zone 排序归一", code == 200 and r["zone"] == [0.3, 0.1, 0.7, 0.9], r)
 code, r = post("/api/mm/zone", {"zone": "zz"})
-check("非法范围 → 空（限位关）", code == 200 and r["zone"] == [], r)
+check("非法范围 → 400 报错（不再静默清空成「未启用」）", code == 400, r)
 code, r = post("/api/mm/box", {"box": [0.0, 0.0, 0.17, 0.26]})
 check("POST /api/mm/box ok", code == 200 and r["box"] == [0.0, 0.0, 0.17, 0.26], r)
 

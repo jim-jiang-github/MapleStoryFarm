@@ -1510,7 +1510,11 @@ CHAR_TPL_FILE = apppaths.data_file("chartpl.png")
 CHAR_CONF_FILE = apppaths.data_file("charconf.json")
 CHAR_THRESH_DEFAULT = 0.80
 CHAR_MIN_W, CHAR_MIN_H = 24, 8      # 比这还小的框多半是框歪了
-CHAR_LOST_AFTER = 0.6               # 超过这么久没命中就不再画标记（秒）
+CHAR_LOST_AFTER = 3.0               # 没命中后按住旧位置多久才当真丢了（秒）。
+                                    # 人物经常只是名字牌被挡（怪贴脸/掉落物/特效
+                                    # 盖住），等一会儿自己就恢复：期间按住最后
+                                    # 认到的位置不动（画面标记照画、bot 拿旧框
+                                    # 照常打），超时才清框走「丢失」逻辑。
 CHAR_FPS = 15
 # 怪物框与人物身体框的重叠比例（交集/较小框面积）超过它，就当这只怪「和人物
 # 完全重叠」：人挡怪/怪挡人时 YOLO 的框会乱抖，锁定和挂机跟着乱选目标，不如
@@ -2313,7 +2317,12 @@ def char_loop():
                 char_state["pending"] = None
                 char_state["guard"] = 0
                 char_state["misses"] += 1
-                if char_state["misses"] > CHAR_REACQ_MISS:   # 连续没命中就当丢了
+                # 这一下没认到 ≠ 丢了：大概率名字牌被挡住（怪贴脸/掉落物盖住），
+                # 按住最后认到的位置 CHAR_LOST_AFTER 秒等它自己恢复——期间画面
+                # 标记和 bot 用的框都停在旧位置不动，别一丢就清框触发「往回走」
+                # 的误动作。清框按时间不按 miss 帧数判：帧率会抖，时间窗才稳。
+                # misses 只留给 find_char 决定局部跟还是全图重找，不再管清框。
+                if char_state["ts"] > 0 and now - char_state["ts"] > CHAR_LOST_AFTER:
                     char_state["box"] = None
                     char_state["ts"] = 0.0
                     char_state["face"] = 0                    # 没定位就没有朝向可言
@@ -2396,7 +2405,7 @@ def _bot_state():
         cts = char_state["ts"]
         roi = list(char_state["roi"])
     if cbox is not None and (cts <= 0 or time.time() - cts > CHAR_LOST_AFTER):
-        cbox = None                      # 人物已经丢了，别拿旧位置继续打
+        cbox = None                      # 遮挡兜底的保持窗也过了：真丢了，别拿旧位置继续打
     with bar_lock:
         hp = bar_state["values"].get("hp")
         mp = bar_state["values"].get("mp")
@@ -3549,7 +3558,19 @@ async def mm_set_box(body: dict = Body(...)):
 @app.post("/api/mm/zone")
 async def mm_set_zone(body: dict = Body(...)):
     """圈/清活动范围（在 mm_box 里归一化 x1,y1,x2,y2；空数组 = 关掉限位）。"""
-    zone = botmod._clamp_rect01(body.get("zone"), [])
+    zone = body.get("zone")
+    if isinstance(zone, list) and len(zone) == 4:
+        # 在整帧预览上拖的框经常比小地图框大一圈（手抖出界几个像素很正常）：
+        # 先裁剪进小地图框再校验。以前一出界 _clamp_rect01 就整个判废存成空，
+        # 接口还回 ok:true、页面弹「已保存」——实际存了个空范围，状态永远
+        # 「未启用」，看着就是保存不生效。
+        try:
+            zone = [max(0.0, min(1.0, float(v))) for v in zone]
+        except (TypeError, ValueError):
+            zone = []
+    zone = botmod._clamp_rect01(zone, [])
+    if body.get("zone") and not zone:
+        return JSONResponse({"error": "范围拖太小或没圈到小地图上，重圈一次"}, status_code=400)
     cfg = game_bot.update_cfg({"mm_zone": zone})
     return JSONResponse({"ok": True, "zone": cfg["mm_zone"]})
 

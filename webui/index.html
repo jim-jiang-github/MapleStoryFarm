@@ -3370,9 +3370,11 @@
     postJSON(mode === "box" ? "/api/mm/box" : "/api/mm/zone", body)
       .then((res) => {
         if (!res || !res.ok) throw new Error();
+        if (mode === "zone" && !(res.zone && res.zone.length))
+          throw new Error("范围没存上：拖大一点，把框落进小地图里再试");
         toast(mode === "box" ? "小地图位置已保存" : "范围已保存，黄点跟踪开始生效");
       })
-      .catch(() => toast("保存失败", true));
+      .catch((e) => toast((e && e.message) || "保存失败", true));
   }
 
   function mmEvtPos(e) {
