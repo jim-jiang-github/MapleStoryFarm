@@ -90,12 +90,16 @@ LOW_DETECT_CONF = 0.10
 # 阈值调高只是把 0.2/0.3 这种拿不准的框藏起来，不影响已经确认的目标继续被跟踪。
 # 这个值可以在页面上用滑块实时改（/api/detect/conf），存在同目录的 detconf.json。
 SHOW_CONF_DEFAULT = float(os.environ.get("PREVIEW_SHOW_CONF") or 0.80)
-SHOW_HITS_DEFAULT = int(os.environ.get("PREVIEW_MIN_HITS") or 6)
+# 稳定帧数 6→3：确认延迟从 ~400ms 降到 ~200ms，挂机反应快一倍。跟踪器还有
+# 卡尔曼续命和去重兜着，误检冒头两帧的概率实测没涨（这是当初调到 6 的顾虑）。
+SHOW_HITS_DEFAULT = int(os.environ.get("PREVIEW_MIN_HITS") or 3)
 SHOW_CONF_FILE = apppaths.data_file("detconf.json")
+# 推理帧率默认封顶（detconf.json 里没存过这个键时用；0=不限仍可通过页面选回）
+DET_FPS_DEFAULT = int(os.environ.get("PREVIEW_MAX_FPS") or 15)
 # ---- 显示稳定（解决「冒出来一两帧又消失」）----
 # 置信度高不等于目标真实：误检偶尔也会连着两帧拿到 0.7。原来「连续 2 帧」就确认，
 # 于是这种误检会被画两帧再消失。现在显示端另加三道闸：
-#   1) show_hits：累计命中这么多帧才允许第一次出现（默认 6 帧 ≈ 0.2~0.3 秒）
+#   1) show_hits：累计命中这么多帧才允许第一次出现（默认 3 帧 ≈ 0.2 秒 @15fps）
 #   2) DISPLAY_MAX_MISS：连续 2 帧没观测到就不再画，避免幽灵框停在原地
 #      （这时框用的是卡尔曼预测 + 上一次达标的分数，所以标签上的数字仍然 >= 门限）
 #   3) 同一只怪被两条轨迹重复框住时只画一条（见 DUP_TRACK_IOU）
@@ -1196,7 +1200,10 @@ det_state = {
     "lock_box": None,    # 上次锁定的框：目标短暂丢失时用它就近接回，而不是跳去别的怪
     "lock_ts": 0.0,      # 最后一次锁上的时间（超过 3 秒就不再用 lock_box 找）
     "mask": True,        # UI 排除区开关：涂掉固定 UI 区域再推理
-    "max_fps": 0,        # 推理帧率上限：0=不限（跑满）；5~30 按目标帧率给循环踩刹车
+    "max_fps": DET_FPS_DEFAULT,   # 推理帧率上限：0=不限（跑满）；5~30 按目标帧率
+                        # 给循环踩刹车。默认 15：单帧推理 ~44ms，跑满 22fps 的
+                        # 那几帧全是重复画面（显示端又不每帧刷框），封到 15 省
+                        # 三分之一 CPU，确认延迟几乎不变
     "next_infer": 0.0,   # 下一帧推理的计划时刻（节流用，按计划推进以吸收 sleep 误差）
     "mode": "fast",      # fast(20+FPS) / accurate(精度优先)
     "show_conf": SHOW_CONF_DEFAULT,   # 显示门限：低于它的目标不画框/不计数
@@ -1301,7 +1308,7 @@ def _load_det_conf() -> dict:
         raw = {}
     return {"show_conf": _clamp_conf(raw.get("show_conf", SHOW_CONF_DEFAULT)),
             "show_hits": _clamp_hits(raw.get("show_hits", SHOW_HITS_DEFAULT)),
-            "max_fps": _clamp_fps(raw.get("max_fps", 0))}
+            "max_fps": _clamp_fps(raw.get("max_fps", DET_FPS_DEFAULT))}
 
 
 def _save_det_conf() -> None:
@@ -2855,6 +2862,7 @@ def detect_loop():
 
     n, t0 = 0, time.perf_counter()
     prev_small = None   # 相机补偿用：上一帧缩略灰度图
+    infer_buf = None    # 推理帧复用缓冲（涂 UI 用）：省掉每帧 ~3MB 的整帧分配
     SMALL_W, SMALL_H = 342, 192
 
     while True:
@@ -2905,8 +2913,17 @@ def detect_loop():
         tick = time.perf_counter()
         rects = mask_rects() if det_state["mask"] else None
         try:
-            # 推理用涂掉 UI 的副本；画框画在原始帧上，画面里 UI 照常可见
-            infer_src = apply_ui_mask(frame.copy(), rects) if rects else frame
+            # 推理用涂掉 UI 的副本；画框画在原始帧上，画面里 UI 照常可见。
+            # 副本不再每帧 frame.copy()（1080p ≈ 3MB）：分配 + 页表 churn 在
+            # 高帧率下比拷贝本身还亏。改成一块常驻缓冲 np.copyto 复用——
+            # res 只在本轮取坐标用完就丢，不会有人拿着旧引用看被改写的内存。
+            if rects:
+                if infer_buf is None or infer_buf.shape != frame.shape:
+                    infer_buf = np.empty_like(frame)
+                np.copyto(infer_buf, frame)
+                infer_src = apply_ui_mask(infer_buf, rects)
+            else:
+                infer_src = frame
             res = model.predict(infer_src, imgsz=cfg["imgsz"],
                                 conf=min(cfg["conf"], LOW_DETECT_CONF),
                                 verbose=False, device="cpu")[0]

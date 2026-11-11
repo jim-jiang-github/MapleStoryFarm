@@ -91,7 +91,7 @@ c = step(b, m=mon)
 check("这一帧不出手", ATK not in down_keys(c), c)
 check("状态是等朝向生效", b.snapshot()[1]["act"] == "等朝向生效", b.snapshot()[1])
 
-print("[1c] 过了 130ms 才按技能键")
+print("[1c] 过了转身等待期（100ms）才按技能键")
 settle(b)
 c = step(b, m=mon)
 check("这一帧按了技能键", down_keys(c) == [ATK], c)
@@ -139,13 +139,18 @@ check("去巡逻/守株待兔", b.snapshot()[1]["act"] in ("巡逻找怪", "守�
 print("[6b] 头顶差得不多的怪 → 跳放：跳 → 100ms → 技能键（两侧技能不转身，直接跳）")
 b = make()
 top_mon = [{"name": "Snail", "box": [690, 130, 750, 190], "conf": 0.8}]   # 怪底 190，离攻击区顶 2.5px
-c = step(b, m=top_mon)
-check("跳+技能键连招", down_keys(c) == [JUMP, ATK], c)
+c = step(b, now=100.0, m=top_mon)
+check("起跳那一帧只按跳键（不 sleep 卡循环）", down_keys(c) == [JUMP], c)
 check("没按方向（两侧技能跳放不转身，老行为）",
       not any(k in ("left", "right") for k in down_keys(c)), c)
+check("状态是起跳", b.snapshot()[1]["act"].startswith("起跳"), b.snapshot()[1])
+c = step(b, now=100.05, m=top_mon)
+check("空中 100ms 未到：不出招也不干别的", down_keys(c) == [], c)
+c = step(b, now=100.25, m=top_mon)
+check("到点续招按技能键", down_keys(c) == [ATK], c)
 check("状态是跳放", b.snapshot()[1]["act"] == f"跳放 {bot._key_label(ATK)}",
       b.snapshot()[1])
-c = step(b, m=top_mon)
+c = step(b, now=100.5, m=top_mon)
 check("跳跃冷却内不再跳", (JUMP, True) not in c, c)
 
 print("[6c] 头顶差太多的怪（超出跳跃判定框）→ 根本不进决策，去巡逻")
@@ -403,7 +408,9 @@ check("先转身对正（别跳起来打反方向）", down_keys(c) == ["left"],
 settle(b)
 b._t_atk = 0.0                       # 已经对正过
 c = step(b, now=5000.3, m=top_left)
-check("对正后跳放：跳+技能键", down_keys(c) == [JUMP, "KeyA"], c)
+check("对正后起跳", down_keys(c) == [JUMP], c)
+c = step(b, now=5000.5, m=top_left)
+check("空中到点续招技能键", down_keys(c) == ["KeyA"], c)
 
 print("[21] 怪多优先群攻、单只优先单体、同类型排前面的先用")
 b = make()
@@ -482,8 +489,10 @@ b.cfg["skills"] = [
     {"key": "KeyD", "type": "aoe", "ground": [0, 0, 40, 40],
      "jump": True, "jrect": [400, 400, 320, 60]},
 ]
-c = step(b, m=top)
-check("所有地面框都空 → 跳放 KeyD", down_keys(c) == [JUMP, "KeyD"], c)
+c = step(b, now=100.0, m=top)
+check("所有地面框都空 → 起跳（KeyD 走空中段）", down_keys(c) == [JUMP], c)
+c = step(b, now=100.2, m=top)
+check("到点空中放 KeyD", down_keys(c) == ["KeyD"], c)
 
 print("[21d] 技能没录按键 → 跳过，不算候选")
 b = make()
@@ -528,8 +537,10 @@ b.cfg["skills"] = [
      "jump": True, "jrect": [400, 400, 320, 60], "cd_ms": 5000},
 ]
 c = step(b, now=100.0, m=top)
-check("第一次正常跳放", down_keys(c) == [JUMP, "KeyD"], c)
-c = step(b, now=101.2, m=top)             # 跳跃冷却过了，但 KeyD 的 CD 没到
+check("第一次正常起跳", down_keys(c) == [JUMP], c)
+c = step(b, now=100.2, m=top)              # 空中到点 → 续招
+check("到点续招 KeyD", down_keys(c) == ["KeyD"], c)
+c = step(b, now=101.2, m=top)              # 跳跃冷却过了，但 KeyD 的 CD 没到
 check("技能 CD 里不起跳", down_keys(c) == [], c)
 check("状态报等CD", b.snapshot()[1]["act"].startswith("等CD"), b.snapshot()[1]["act"])
 

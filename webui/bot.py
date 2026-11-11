@@ -102,12 +102,17 @@ def _key_label(name):
 
 # 转身后等多久再攻击（毫秒）。方向键和 Ctrl 挨着发出去，游戏会在同一帧里
 # 一起处理，结果往往按「转身前」的朝向出招——看着就是朝着反方向挥刀。
-TURN_SETTLE_MS = 130
+# 实测 100ms 够游戏把朝向渲染出来；再长只是白等，出手前摇变长。
+TURN_SETTLE_MS = 100
 TURN_TAP_MS = 50          # 转身时方向键按住多久：够游戏认一次转向，又不至于真的迈一步
 JUMP_COOLDOWN_MS = 900    # 两次跳的最小间隔：起跳+落地+站稳要这么久，比这快就是原地抽搐
 MOVE_FACE_PX = 10         # 朝向观测阈值：身体中心往一边累计挪过这么多像素 = 朝那边
                          # （模板匹配的抖动就 ±几像素，凑不够这个数，不会误翻）
-JUMP_CAST_MS = 100        # 跳放连招：按下跳键后隔这么久再按技能键（起跳到能出手的手感值）
+JUMP_CAST_MS = 100        # 跳放连招：按下跳键后隔这么久再按技能键（起跳到能出手的手感值）。
+                         # 以前这里是 time.sleep(100ms)：50Hz 决策循环整个被卡住，
+                         # 起跳的 100ms 里喝药/失焦检查全都停摆。现在拆成状态机：
+                         # 起跳那帧只按跳键并记下要出的技能键（_jcast），到点后的
+                         # 某一轮再把技能键按出去——循环始终 20ms 一拍，不再阻塞。
 ATK_GAP_MS = 150          # 两次出手之间的防抖底线（毫秒）：技能 CD 都填 0 也不能按着
                           # 20ms 的决策循环狂按；真正的出手节奏由各技能自己的 CD 管
 
@@ -818,6 +823,8 @@ class Bot:
         self._t_jump = 0.0
         self._t_sk = {}         # 每个技能上次出手的时刻（键 = 技能键名）
         self._t_pick = 0.0
+        self._jcast = None      # 跳放空中段：(技能键, 起跳时刻)。非 None = 跳已按、
+                                # 技能键还没按；到点那一轮按出去后清空（详见 _step）
         self._patrol_dir = 1
         self._mm_wall = None      # 小地图墙（-1/1/None），每帧按黄点重算
 
@@ -906,6 +913,8 @@ class Bot:
             self.sender(name, False)
             self._down.discard(name)
         self._held = 0
+        # 空中的跳放连招一并作废：键都松了（失焦/停机/换配置），续招没有意义
+        self._jcast = None
 
     # ---- 状态 ----
     def _can_walk(self, side, char, size, roi, chase=0.0):
@@ -1111,6 +1120,23 @@ class Bot:
             self._tap(cfg["pick_key"], 25)
             self._t_pick = now
             self._count("pick")
+
+        # 2.5) 跳放空中段：上一帧（或前几帧）起跳了，现在到点 → 按技能键。
+        #      这 100ms 里循环照常每 20ms 一拍跑（喝药/拾取/失焦检查都不停），
+        #      到点那一轮续招、然后回到正常决策。连招期间不出别的招（人在空中，
+        #      转身/站放都来不及生效），直接 return。
+        if self._jcast is not None:
+            jkey, jt = self._jcast
+            if (now - jt) * 1000.0 >= JUMP_CAST_MS:
+                self._jcast = None
+                self._tap(jkey)
+                self._t_atk = now
+                self._t_sk[jkey] = now
+                self._count("atk")
+                self._set_status(act=f"跳放 {_key_label(jkey)}", err="")
+            else:
+                self._set_status(act=f"空中待出招 {_key_label(jkey)}", err="")
+            return
 
         # 小地图限位：黄点贴到允许范围的边，出界方向封死（_can_walk 里查）。
         # 黄点丢了/没圈范围 = None，只靠识别区那道墙。
@@ -1327,11 +1353,9 @@ class Bot:
                 self._set_status(act=act)
                 return
             self._tap(cfg["jump_key"])
-            time.sleep(JUMP_CAST_MS / 1000.0)
-            self._tap(sk["key"])
             self._t_jump = now
-            self._t_atk = now
-            self._t_sk[sk["key"]] = now
+            # 不再 sleep(JUMP_CAST_MS) 卡住整个循环：记下要出的技能键，
+            # 到点后的某一轮（上面的 2.5 段）把它按出去
+            self._jcast = (sk["key"], now)
             self._count("jmp")
-            self._count("atk")
-            self._set_status(act=f"跳放 {_key_label(sk['key'])}", err="")
+            self._set_status(act=f"起跳（准备空中放 {_key_label(sk['key'])}）", err="")
