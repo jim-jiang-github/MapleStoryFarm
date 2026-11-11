@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -4047,6 +4048,21 @@ def port_busy(host, port):
         return s.connect_ex((host, port)) == 0
 
 
+def _is_our_instance(port):
+    """占着这个口的是不是本服务的老实例（双击了两次 / 上次没退干净）。
+
+    是自家人的话再起一个新实例只会互相抢屏抢按键，直接复用老的；端口自增
+    只应该发生在「别的程序占了口」的时候。判断办法：拿 /api/stats 探一下，
+    只有本服务会在这条路径上返回 200 的 JSON。
+    """
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/stats",
+                                    timeout=1.5) as r:
+            return 200 <= r.status < 300
+    except Exception:  # noqa: BLE001  连不上/不是 HTTP/超时：都当不是自己
+        return False
+
+
 def lan_ipv4():
     """本机在局域网里的地址（手机连同一个 WiFi 时该用这个，而不是穿透域名）。
 
@@ -4156,16 +4172,34 @@ def _diag_bootstrap():
 
 
 if __name__ == "__main__":
-    local = f"http://127.0.0.1:{PORT}"
     # 打包成 exe 之后用户就是双击运行的，不会记得加 --open；
     # 不自动开页面的话，双击只会看到一块黑框，还得自己去浏览器敲地址。
     want_open = ("--open" in sys.argv) or getattr(sys, "frozen", False)
 
     if port_busy("127.0.0.1", PORT):
-        print(f"already running -> {local}")
-        if want_open:
-            webbrowser.open(local)
-        raise SystemExit(0)
+        if _is_our_instance(PORT):
+            # 占口的是自家的老实例（双击两次/上次没退干净）：再起一个只会
+            # 互相抢屏抢按键，照旧行为——开个页面指过去，自己退出。
+            local = f"http://127.0.0.1:{PORT}"
+            print(f"already running -> {local}")
+            if want_open:
+                webbrowser.open(local)
+            raise SystemExit(0)
+        # 别的程序占了口：往后找空位（8766、8767…最多让 20 个），别让一个
+        # 无关进程把整个面板憋死。隧道命令、启动横幅都是运行时才读 PORT，
+        # 这里改了它们自动跟上。
+        for cand in range(PORT + 1, PORT + 21):
+            if not port_busy("127.0.0.1", cand):
+                print(f"端口 {PORT} 被别的程序占了 -> 换 {cand}（记住浏览器里"
+                      f"的地址以实际打印的为准）")
+                PORT = cand
+                break
+        else:
+            print(f"端口 {PORT}~{PORT + 20} 全被占用，起不来；"
+                  f"关掉占口的程序再试，或设环境变量 PREVIEW_PORT 指定别的口")
+            raise SystemExit(1)
+
+    local = f"http://127.0.0.1:{PORT}"
 
     _diag_bootstrap()
     _log(f"服务启动 port={PORT} pid={os.getpid()}")
