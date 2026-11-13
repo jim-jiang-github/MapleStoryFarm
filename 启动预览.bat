@@ -8,15 +8,15 @@ cd /d "%~dp0"
 title Capture Preview
 
 set "PICKED="
-for %%C in ("python" "C:\Users\JimJiang\.workbuddy\binaries\python\versions\3.13.12\python.exe") do (
+for %%C in ("C:\Users\Administrator\AppData\Roaming\uv\python\cpython-3.12.9-windows-x86_64-none\python.exe" "python" "C:\Users\JimJiang\.workbuddy\binaries\python\versions\3.13.12\python.exe") do (
     if not defined PICKED (
-        %%~C -c "import mss,cv2,fastapi,uvicorn,win32gui,numpy" >nul 2>nul
+        %%~C -c "import mss,cv2,fastapi,uvicorn,win32gui,numpy,ultralytics,openvino" >nul 2>nul
         if not errorlevel 1 set "PICKED=%%~C"
     )
 )
 
 if not defined PICKED (
-    echo [ERROR] No usable Python found ^(need 3.10+ with mss, opencv-python, fastapi, uvicorn, pywin32^).
+    echo [ERROR] No usable Python found ^(need 3.10+ with mss, opencv-python, fastapi, uvicorn, pywin32, ultralytics, openvino^).
     echo.
     pause
     exit /b 1
@@ -29,11 +29,11 @@ echo.
 
 "%PICKED%" "webui\server.py" --open
 
-rem ---- ËÀÍöÈ¡Ö¤£º¾«È·ÍË³öÊ±¿Ì + µ±Ê±È«Á¿½ø³Ì±í ----
-rem service.log Àï python ×Ô¼ºµÄ¼ÇÂ¼Ö¹ÓÚ¡¸·þÎñÆô¶¯¡¹£¬ËÀÍö·½Ê½¿´²»¼û£»
->> "webui\service.log" echo [%date% %time%] python ÍË³ö exit=%errorlevel%
+rem ---- ï¿½ï¿½ï¿½ï¿½È¡Ö¤ï¿½ï¿½ï¿½ï¿½È·ï¿½Ë³ï¿½Ê±ï¿½ï¿½ + ï¿½ï¿½Ê±È«ï¿½ï¿½ï¿½ï¿½ï¿½Ì±ï¿½ ----
+rem service.log ï¿½ï¿½ python ï¿½Ô¼ï¿½ï¿½Ä¼ï¿½Â¼Ö¹ï¿½Ú¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+>> "webui\service.log" echo [%date% %time%] python ï¿½Ë³ï¿½ exit=%errorlevel%
 >> "webui\service.log" tasklist
 
 echo.
-echo Service stopped. (exit code %errorlevel% ^| ÍË³öÔ­Òò¼û webui\service.log)
+echo Service stopped. (exit code %errorlevel% ^| ï¿½Ë³ï¿½Ô­ï¿½ï¿½ï¿½ webui\service.log)
 pause

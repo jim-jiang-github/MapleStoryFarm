@@ -764,6 +764,10 @@
               <span class="k"></span>
               <span class="v" style="justify-content:flex-start"><button id="addSkillBtn" class="mini" title="加一个技能：录快捷键 → 选群攻/单体 → 在卡片里填左/右/上/下（相对人物身体中心的像素）">+ 添加技能</button><b class="sub">⠿ 拖动换顺序 · ▾ 折叠 · ◎ 只看这张的范围</b></span>
             </div>
+            <div class="row conf">
+              <span class="k">原地挂机</span>
+              <span class="v"><button id="campFlipBtn" class="mini" title="开：不追怪，只打当前技能范围内的目标；关：怪在范围外时会走过去。">关</button><b class="sub">只保留原地打怪，不再做定时反向动作</b></span>
+            </div>
               </div>
             </details>
           </div>
@@ -2610,6 +2614,7 @@
     }
   }
   $("pickBtn").addEventListener("click", () => toggleBotFlag("pick", $("pickBtn")));
+  $("campFlipBtn").addEventListener("click", () => toggleBotFlag("camp_flip", $("campFlipBtn")));
   function paintBotBtn(cfg) {
     $("botBtn").textContent = cfg.on ? "挂机: 开" : "挂机: 关";
     $("botBtn").className = cfg.on ? "on" : "";
@@ -2628,6 +2633,8 @@
     }
     $("pickBtn").classList.toggle("on", !!cfg.pick);
     $("pickBtn").textContent = cfg.pick ? "开" : "关";
+    $("campFlipBtn").classList.toggle("on", !!cfg.camp_flip);
+    $("campFlipBtn").textContent = cfg.camp_flip ? "开" : "关";
     paintBotBtn(cfg);
   }
 
