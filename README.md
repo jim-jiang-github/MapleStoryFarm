@@ -10,6 +10,18 @@
 
 默认 http://127.0.0.1:8765 。本地直连走 MJPEG（最省 CPU），画面、检测框、状态条读数都在同一个页面里。
 
+**启动时间为什么是这样**（实测拆账，别再来回猜）：
+
+| 阶段 | 耗时 |
+|---|---|
+| `启动预览.bat` 选解释器 | 0 s（已去掉 import 探测，之前那句 `import ultralytics,openvino` 每次要 3.9 s） |
+| 跑到端口可访问（`/api/ver` 返回 200） | **约 3.3 s**（模块导入 1.7 s 为主） |
+| 后台预热识别模型（到 `preloaded`） | +5.7 s（import 2.3 s + OpenVINO 首帧编译 3.3 s，与上一段并行） |
+
+所以从双击到页面能用约 3~4 秒，到「识别点了就出框」约 10 秒——预热是后台线程，页面先能用、识别后到位。
+两处别再改回去：① bat 里不要加 import 探活（真缺包 server 启动会把 ImportError 打在窗口里）；
+② 自动开页面必须等端口真的 bind（原来写死 1.2 s 定时器，会比 bind 早 2 秒，用户先看到「无法连接」）。
+
 **改完代码要重启服务。** `index.html` 是每次请求现读磁盘的，`server.py` 的路由却是启动时定下的，所以很容易撞上"页面已经是新的、接口还是旧的"：新按钮点了没反应、控制台报 `Cannot read properties of undefined`。判断方法很简单——`curl 127.0.0.1:8765/api/bot`，返回 404 就是进程没重启。前端现在会把这种情况直接写成「服务在跑旧代码，重启后可用」。
 
 ## 外网访问
@@ -327,6 +339,91 @@
 
 注意：游戏窗口被别的窗口挡住时，抓到的是挡住它的那个窗口，匹配自然找不到人（页面上的「前置游戏」按钮可以先把游戏抬回前台）。
 
+## 测谎仪跟随（模板匹配触发）
+
+面板上「测谎仪跟随」分组。逻辑在 `webui/lietrack.py`（移植 `ScreenTrackerApp/`
+的追踪器与平滑鼠标），**条件触发**：平时什么都不做，画面上出现「谎言探测仪」弹窗才接管鼠标，
+跟着测谎仪里的白团 / 隐身漩涡走；触发一次跟满 `run_sec`（默认 15 秒）自动松手。
+
+```
+模板匹配认出弹窗标题 → YOLO11n 检测(3类) → YoloTracker 门控/滑行/超前瞄准
+                     → 150Hz 弹簧插值 → SetCursorPos
+```
+
+### 触发为什么不用 OCR
+
+先试过 RapidOCR 认「游戏开始前 / 请前往安全地点」这类中文关键词，能用但太慢也太脆：
+一次 0.5~2.7 秒，引擎冷启动 9 秒；机器一忙（CPU 打满）就更慢，用户的主观感受就是
+「识别到关键词用了很久」。而这里是**认一张固定的 UI 标题图**，不需要认任意文字：
+
+| | OCR | 模板匹配（现在） |
+|---|---|---|
+| 单次耗时 | 0.56 s，满载时 2.1~3.3 s | **~0.115 s**（含抓帧，实测 114~129 ms） |
+| 冷启动 | ~9 s | 图一读就有，YOLO 预热另算，后台 6 s 内完成 |
+| 误判来源 | 中文断词、字号、抗锯齿 | 只有「长得一样」才会命中 |
+
+所以 `trigger` 默认 `template`；`trigger: "ocr"` 那条路（RapidOCR + 关键词）还留着，
+只是不再是默认，回退时把 `lietrack.json` 里的 `trigger` 改回去即可。
+
+- **模板**：`webui/lietrack_tpl.png`（86×18），从弹窗截图里裁出来的标题「谎言探测仪」那一行。
+  用 `cv2.matchTemplate`（`TM_CCOEFF_NORMED`，灰度，多尺度 0.90~1.10）全帧搜索；
+  `tpl_thresh` 默认 **0.70**。实测：真实弹窗在画面上 **0.95~1.0**；稳到不动的普通游戏画面
+  **~0.58**（画面底部名字牌一带），空画面 <0.1。要换模板只要替换这个 png（尺寸随意，
+  它自己按尺度扫），文件名通过 `template` 配置项指过去。
+  中文路径读图用 `cv2.imdecode(np.fromfile(...))`，`cv2.imread` 在中文路径下返回 None。
+- **触发后跟多久**：命中只负责「起跑」。跑起来之后**弹窗消失、目标暂时丢失都不收手**，
+  一直跟到 `run_sec`（默认 **15 秒**，面板上可改 1~120）跑满才自动松手。
+  中途 `YoloTracker` 判 LOST 时不清盘，而是重置回 INIT 等中心重捕。跑满时弹窗还赖在
+  画面上，也不会立刻重新起跑——必须等它先消失一次，否则会变成「一直跟下去」。
+- **去抖**：连续 `hit_frames`（默认 2）轮判定都命中才算在场。`hold_sec` 只影响面板上
+  「弹窗在场」这行字的显示，不影响跟多久。
+- **面板倒计时**：跟随中状态行显示 `剩余 Ns`，来自 `status.run_left`。
+- **坐标**：模型是按「整个客户区归一化到 750×500」训练的（见 `ScreenTrackerApp/eval/collect_dataset.py`
+  里的 `CANVAS_W, CANVAS_H`），所以把客户区整帧缩到 750×500 送进模型，输出再按 `region`
+  的物理宽高缩回屏幕坐标。不需要人工框选区域。
+- **频率与 CPU**：追踪 12 fps、触发判定 2 Hz。**空闲时不抓帧**——只有「到点该做一次触发判定」
+  或「正在跟」才调 `frame_provider()`（`find_window` + `client_region` + 整帧 copy 一点都不便宜，
+  早先每 5 ms 抓一次把 4 核压到 100%，OCR 单帧因此涨到 3 秒）。改完实测总 CPU 从 **100% → 65~77%**。
+- **必须前台（硬要求，没有开关）**：只在游戏窗口在前台时抓图/动鼠标。这条**不提供开关**——
+  试过做成可关，关掉之后光标会在别的窗口里乱跑，不值得。状态行此时写「已暂停检测」。
+  唯一的例外是「跟随测试」：那几秒里用的是模拟窗口，不走这道闸门。
+  另外**最小化的窗口抓不到**（BitBlt 对最小化窗口返回黑图；抓屏也只抓得到屏幕上真实画着的东西）。
+- **安全闸**：`move_mouse` 关掉就只识别不动手（面板状态行照样显示目标坐标，第一次用建议先这样验）；
+  面板「松开」按钮立刻 `stop_tracking`，之后弹簧线程不再写一次 `SetCursorPos`。
+
+API：
+
+| 接口 | 用途 |
+|---|---|
+| `GET /api/lietrack` | 配置 + 状态（`present`=弹窗在场，`tracking`=正握着鼠标，`score`/`tpl_ok`=模板与相似度） |
+| `POST /api/lietrack/set` | 改配置（`enabled` / `trigger` / `tpl_thresh` / `run_sec` / `move_mouse` / `only_foreground` / `track_fps` …），落盘 `lietrack.json` |
+| `POST /api/lietrack/probe` | 对当前画面跑一次触发判定，返回 `score/thresh/box/ms`（调门限用这个） |
+| `POST /api/lietrack/release` | 立刻松开鼠标（不动开关） |
+| `POST /api/lietrack/poptest` | 截当前游戏画面 → 把弹窗图居中合成 → 用**运行时同一套**模板匹配判一次（不用等真弹窗） |
+| `GET /api/lietrack/poptest.png` | 上一次弹窗测试的合成图（面板里直接显示） |
+| `POST /api/lietrack/selftest` | 跟随测试：拉起 `LieDetector\LieDetector.exe` 模拟窗口，绕过触发判定强制跟几秒，报 state/target/真实光标位置 |
+| `POST /api/lietrack/selftest/stop` | 结束测试：松手、取帧切回游戏、把游戏抬回前台 |
+
+两个自测都是给「不想等游戏碰巧弹窗」用的：
+
+- **弹窗测试**（推荐）：`grabber.snapshot()` 拿一张当前画面 → 把 `webui/lietrack_dlg.png`
+  （那张 438×390 的弹窗原图）**按原尺寸**贴到正中间 → 跑 `TemplateTrigger.detect`。
+  实测相似度 **1.000**、定位 (470,191)、137 ms，命中。**别把弹窗放大**：模板就是从这张原图
+  裁的，放大到 640 宽只能靠多尺度硬撑，实测掉到 0.561 就认不出来了。
+- **跟随测试**：`LieDetector.exe` 是 Unity 做的「测谎仪复刻」，它还有个自绘的
+  `调参面板 — 测谎仪复刻` 窗口（类名 `LieTunerWnd`）在控制舞台。注意两件事：
+  ① Unity 窗口 BitBlt 拿不到新帧（窗口 DC 里永远是启动画面，mean 恒 33.8），所以测试期间
+  取帧改走**屏幕抓取**，窗口不能被挡住；② 靠窗口标题认会抓错（资源管理器窗口标题里
+  也能带 "LieDetector"），必须按 **进程 exe + 类名 `UnityWndClass`** 认。
+  舞台没在「跑」的时候画面是静止的（实测连续 2 秒帧差 0.0），YOLO 也就检不出目标，
+  面板会显示「没跟起来 · INIT · 目标没锁到」——这不是链路坏了，是模拟器停在静态画面上。
+
+`trigger=ocr` 时用的是 RapidOCR（`rapidocr-onnxruntime`，PP-OCR，实测能读出游戏里的
+「小地图 / 金银岛 / 鳄鱼潭1」）；没装就退化成「关键词小图 + 模板匹配」（Pillow 渲染系统中文字体，
+多字号扫），命中门槛 0.55。`/api/lietrack` 里的 `ocr_engine` 仍然会写当前用的引擎。
+之前 server.py 里那段 `OCR_WARNING_TEXT` / `cv2.putText` 模板匹配是**不可用的死代码**——
+`cv2.putText` 根本渲染不了中文，生成出来的模板是问号方块，已由本模块取代。
+
 ## 打包成 exe（拷到别的电脑）
 
 目标机器不用装 Python，把整个文件夹拷过去双击就能跑：
@@ -373,6 +470,7 @@ dist/MapleStoryFarm/
 pip install mss opencv-python fastapi uvicorn pywin32 numpy scipy
 pip install imageio-ffmpeg     # 外网视频用，自带 ffmpeg 可执行文件（不用单独装 50MB 的 ffmpeg）
 pip install pyserial           # 挂机走 CH9329F 硬件按键时才需要；没装会自动退到 SendInput
+pip install rapidocr-onnxruntime  # 测谎仪跟随的关键词 OCR；没装会自动退化到模板匹配（命中率差）
 ```
 
 CH9329F 小板还需要装 CH343 串口驱动（设备管理器里出现 `USB-Enhanced-SERIAL CH343` 就是好了）。挂机服务会把 COM 口占住，这时 `hidbot.exe` 用不了同一个口。

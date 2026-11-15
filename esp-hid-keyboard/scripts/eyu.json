@@ -1,0 +1,195 @@
+{
+  "name": "eyu",
+  "groups": [
+    {
+      "repeat": 7,
+      "steps": [
+        {
+          "action": "press",
+          "key": "right",
+          "sleep": {
+            "mode": "fixed",
+            "value": 2
+          }
+        },
+        {
+          "action": "press",
+          "key": "d",
+          "sleep": {
+            "mode": "fixed",
+            "value": 6
+          }
+        },
+        {
+          "action": "release",
+          "key": "d",
+          "sleep": {
+            "mode": "fixed",
+            "value": 0.3
+          }
+        },
+        {
+          "action": "releaseall",
+          "key": "",
+          "sleep": {
+            "mode": "fixed",
+            "value": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "repeat": 2,
+      "steps": [
+        {
+          "action": "press",
+          "key": "left",
+          "sleep": {
+            "mode": "fixed",
+            "value": 2
+          }
+        },
+        {
+          "action": "press",
+          "key": "d",
+          "sleep": {
+            "mode": "fixed",
+            "value": 6
+          }
+        },
+        {
+          "action": "release",
+          "key": "d",
+          "sleep": {
+            "mode": "fixed",
+            "value": 0.3
+          }
+        },
+        {
+          "action": "releaseall",
+          "key": "",
+          "sleep": {
+            "mode": "fixed",
+            "value": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "repeat": 3,
+      "steps": [
+        {
+          "action": "press",
+          "key": "left",
+          "sleep": {
+            "mode": "fixed",
+            "value": 2
+          }
+        }
+      ]
+    },
+    {
+      "repeat": 1,
+      "steps": [
+        {
+          "action": "tap",
+          "key": "right",
+          "sleep": {
+            "mode": "fixed",
+            "value": 0.5
+          }
+        }
+      ]
+    }
+  ],
+  "loops": 0,
+  "steps": [
+    {
+      "action": "press",
+      "key": "right",
+      "sleep": {
+        "mode": "fixed",
+        "value": 2
+      }
+    },
+    {
+      "action": "press",
+      "key": "d",
+      "sleep": {
+        "mode": "fixed",
+        "value": 6
+      }
+    },
+    {
+      "action": "release",
+      "key": "d",
+      "sleep": {
+        "mode": "fixed",
+        "value": 0.3
+      }
+    },
+    {
+      "action": "releaseall",
+      "key": "",
+      "sleep": {
+        "mode": "fixed",
+        "value": 0.3
+      }
+    },
+    {
+      "action": "press",
+      "key": "left",
+      "sleep": {
+        "mode": "fixed",
+        "value": 2
+      }
+    },
+    {
+      "action": "press",
+      "key": "d",
+      "sleep": {
+        "mode": "fixed",
+        "value": 6
+      }
+    },
+    {
+      "action": "release",
+      "key": "d",
+      "sleep": {
+        "mode": "fixed",
+        "value": 0.3
+      }
+    },
+    {
+      "action": "releaseall",
+      "key": "",
+      "sleep": {
+        "mode": "fixed",
+        "value": 0.3
+      }
+    },
+    {
+      "action": "press",
+      "key": "left",
+      "sleep": {
+        "mode": "fixed",
+        "value": 2
+      }
+    },
+    {
+      "action": "tap",
+      "key": "right",
+      "sleep": {
+        "mode": "fixed",
+        "value": 0.5
+      }
+    }
+  ],
+  "timer": [
+    {
+      "interval": 600,
+      "key": "home",
+      "hold": 0
+    }
+  ]
+}

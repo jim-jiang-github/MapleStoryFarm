@@ -1,5 +1,5 @@
 {
-  "on": true,
+  "on": false,
   "hp_pct": 30.0,
   "pot_sec": 3.0,
   "pot_key": "pot8",
@@ -18,17 +18,17 @@
     ""
   ],
   "jump_key": "AltLeft",
-  "pick_key": "KeyZ",
+  "pick_key": "KeyX",
   "skills": [
     {
-      "key": "KeyX",
+      "key": "KeyS",
       "type": "single",
       "dir": "front",
       "ground": [
         0.0,
-        74.0,
+        419.0,
         11.0,
-        30.0
+        78.0
       ],
       "jump": false,
       "jrect": [
@@ -43,6 +43,7 @@
   "pick": true,
   "pick_ms": 130,
   "move": true,
+  "camp_flip": true,
   "dy_tol": 150,
   "base_w": 1366,
   "input": "auto",

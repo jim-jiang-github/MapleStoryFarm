@@ -375,6 +375,7 @@ DEFAULTS = {
     # （旧的「定时换向巡逻」已删）找怪只有一种走法：圈了小地图范围就
     # 从左扫到右、到边掉头；没圈范围就站在原地等怪，怪出现了照常追着打。
     "move": True,        # 怪在技能范围外时走过去
+    "camp_flip": False,  # 原地打怪：不追怪，只打范围内目标
     "dy_tol": 150,       # 纵向容差：目标候选带在技能范围并集之下再扩这么多（像素）
     "base_w": 0,
     # ↑ 技能范围是按「画面宽度 = base_w」量的基准（0 = 未知，1:1 用）。
@@ -1128,6 +1129,12 @@ class Bot:
         if self._jcast is not None:
             jkey, jt = self._jcast
             if (now - jt) * 1000.0 >= JUMP_CAST_MS:
+                monsters = st.get("monsters") or []
+                char = st.get("char")
+                if not char or not monsters:
+                    self._jcast = None
+                    self._set_status(act="跳放取消（无目标）", err="")
+                    return
                 self._jcast = None
                 self._tap(jkey)
                 self._t_atk = now
@@ -1193,6 +1200,7 @@ class Bot:
         k = skill_scale(cfg, size)   # 换分辨率/换 DPI 后技能范围等比换算
         cands = []          # (skill, 地面框, 跳放框, 地面怪, 跳放怪)
         band = None         # 所有判定框的并集：走路目标的候选带
+        camp_mode = bool(cfg.get("camp_flip"))
         for sk in cfg.get("skills") or []:
             if not sk.get("key"):
                 continue                     # 还没录按键的技能不参与
@@ -1210,6 +1218,32 @@ class Bot:
                     max(band[2], rect[2]), max(band[3], rect[3])]
 
         if not cands:
+            # 原地挂机时不能只看当前朝向：front（正前方）技能只盖一边，
+            # 如果人物一直朝右，左边刷怪就会被当成"没候选"而永远不转身。
+            # 这里在站桩模式下额外试算左右两边的技能框，只要任一侧能罩到怪，
+            # 就先轻点方向键转过去，下一轮按正常出手流程打掉。
+            if camp_mode and monsters:
+                for probe_side in (-1, 1):
+                    if probe_side == self._face:
+                        continue
+                    for sk in cfg.get("skills") or []:
+                        if not sk.get("key"):
+                            continue
+                        g_probe, j_probe = skill_rects(sk, char, probe_side, k)
+                        hit_ground = any(m.get("box") and _intersects(g_probe, m["box"]) for m in monsters)
+                        hit_jump = bool(j_probe) and any(
+                            m.get("box") and _intersects(j_probe, m["box"]) for m in monsters)
+                        if hit_ground or hit_jump:
+                            self._set_dir(0)
+                            self._tap("right" if probe_side > 0 else "left", TURN_TAP_MS)
+                            self._face = probe_side
+                            self._t_turn = now
+                            self._set_status(act="原地转身找怪", err="")
+                            return
+            if camp_mode:
+                self._set_dir(0)
+                self._set_status(target="", act="守株待兔", err="")
+                return
             # 没有技能罩得住的怪：朝最近的目标走 / 巡逻
             self._set_status(target="")
             tgt = _band_target(char, monsters, band, cfg["dy_tol"] * k)
@@ -1248,7 +1282,7 @@ class Bot:
             if why == "高度够不着":
                 self._set_dir(0)
                 self._set_status(act=why)
-            elif bool(cfg.get("mm_zone")) and st.get("dot") is not None:
+            elif (not cfg.get("camp_flip")) and bool(cfg.get("mm_zone")) and st.get("dot") is not None:
                 # 圈了小地图范围且黄点在跟：扫满整个范围——从左走到右、
                 # 到边才掉头（定时换向只会原地抽搐，扫不完）。
                 # 没圈范围 / 黄点丢了：站住等怪（「守株待兔」）。

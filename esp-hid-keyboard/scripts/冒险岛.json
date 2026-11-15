@@ -1,0 +1,46 @@
+{
+  "name": "冒险岛",
+  "steps": [
+    {
+      "action": "press",
+      "key": "s",
+      "sleep": {
+        "mode": "fixed",
+        "value": 10
+      }
+    },
+    {
+      "action": "release",
+      "key": "s",
+      "sleep": {
+        "mode": "fixed",
+        "value": 0.3
+      }
+    },
+    {
+      "action": "tap",
+      "key": "left",
+      "sleep": {
+        "mode": "random",
+        "min": 0.3,
+        "max": 1
+      }
+    },
+    {
+      "action": "tap",
+      "key": "right",
+      "sleep": {
+        "mode": "random",
+        "min": 0.3,
+        "max": 1
+      }
+    }
+  ],
+  "loops": 10,
+  "timer": [
+    {
+      "interval": 10.6,
+      "key": "e"
+    }
+  ]
+}
