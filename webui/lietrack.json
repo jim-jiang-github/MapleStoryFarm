@@ -1,0 +1,21 @@
+{
+  "enabled": true,
+  "trigger": "template",
+  "template": "lietrack_tpl.png",
+  "tpl_thresh": 0.7,
+  "keywords": [
+    "游戏开始前",
+    "请前往安全地点"
+  ],
+  "ocr_fps": 2.0,
+  "ocr_max_w": 960,
+  "ocr_engine": "auto",
+  "track_fps": 12.0,
+  "det_conf": 0.1,
+  "hold_sec": 1.5,
+  "run_sec": 15.0,
+  "lost_sec": 2.0,
+  "hit_frames": 2,
+  "move_mouse": true,
+  "weights": "lietrack_ft3.pt"
+}

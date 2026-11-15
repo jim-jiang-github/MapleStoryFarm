@@ -65,6 +65,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paths as apppaths  # noqa: E402  （见 webui/paths.py：源码/打包后的资源与数据目录）
 from track import Tracker  # noqa: E402  （见 webui/track.py：卡尔曼 + 匈牙利 + ByteTrack）
 import bot as botmod  # noqa: E402  （见 webui/bot.py：挂机按键与决策）
+import lietrack as ltmod  # noqa: E402  （见 webui/lietrack.py：测谎仪关键词触发 + 追踪）
 import netinfo  # noqa: E402  （见 webui/netinfo.py：局域网地址，滤掉虚拟网卡）
 
 
@@ -214,12 +215,62 @@ def _next_mask_id():
 UI_MASKS = load_masks()
 
 
+def _render_text_template(text, font_scale=1.0, thickness=2, pad=12):
+    """Render a fixed Chinese warning string into a grayscale template for matching."""
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (tw, th), base = cv2.getTextSize(text, font, font_scale, thickness)
+    img = np.zeros((th + base + pad * 2, tw + pad * 2, 3), np.uint8)
+    cv2.putText(img, text, (pad, pad + th), font, font_scale, (255, 255, 255),
+                thickness, cv2.LINE_AA)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+
+# ---- 旧的「警告文字模板匹配」：保留定义但已不再使用（cv2.putText 渲染不了中文，
+# ---- 下面这组模板其实是问号方块，从来没命中过）。关键词 OCR 现在走 webui/lietrack.py。
+OCR_WARNING_TEXT = "游戏开始前，请前往安全地点。"
+OCR_MATCH_THRESH = 0.62
+OCR_FPS = 2
+ocr_lock = threading.Lock()
+ocr_state = {
+    "enabled": True,
+    "text": OCR_WARNING_TEXT,
+    "present": False,
+    "score": 0.0,
+    "updated": 0.0,
+    "fps": 0.0,
+    "error": "",
+}
+OCR_TEMPLATES = [
+    _render_text_template(OCR_WARNING_TEXT, font_scale=0.9, thickness=2),
+    _render_text_template(OCR_WARNING_TEXT, font_scale=1.0, thickness=2),
+    _render_text_template(OCR_WARNING_TEXT, font_scale=1.1, thickness=2),
+]
+
+
 def apply_ui_mask(frame, rects=None):
     """把这些区域涂成中性灰：模型根本看不到固定 UI，从根上消灭"灯泡变蝙蝠"。"""
     h, w = frame.shape[:2]
     for fx1, fy1, fx2, fy2 in (rects if rects is not None else mask_rects()):
         frame[int(fy1 * h):int(fy2 * h), int(fx1 * w):int(fx2 * w)] = MASK_GRAY
     return frame
+
+
+def _ocr_match_warning(frame):
+    """Detect the fixed pre-game warning text from the upper screen area."""
+    h, w = frame.shape[:2]
+    roi = frame[:max(80, int(h * 0.35)), :]
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    best = 0.0
+    for tpl in OCR_TEMPLATES:
+        th, tw = tpl.shape[:2]
+        if gray.shape[0] < th or gray.shape[1] < tw:
+            continue
+        res = cv2.matchTemplate(gray, tpl, cv2.TM_CCOEFF_NORMED)
+        score = float(res.max()) if res.size else 0.0
+        if score > best:
+            best = score
+    return best
 
 
 def in_ui_mask(box, w, h, rects=None):
@@ -550,6 +601,134 @@ class Grabber(threading.Thread):
 
 grabber = Grabber()
 grabber.start()
+
+# ---------------- 测谎仪跟随（模板匹配触发） ----------------
+# 逻辑在 webui/lietrack.py：模板匹配认出「谎言探测仪」弹窗 → YOLO 追踪白团/漩涡 →
+# 150Hz 弹簧插值把真实光标平滑贴上去。和挂机互不干涉（挂机走键盘，这里只用鼠标）。
+# 触发源就是画面上那张固定的弹窗标题图，所以不需要人工框选区域：模型是按「整个客户区
+# 归一化到 750×500」训练的，整帧缩放送进去，坐标再按客户区物理尺寸缩回屏幕即可。
+LIETRACK_FILE = apppaths.data_file("lietrack.json")
+
+# 「跟随测试」用：不急真等游戏弹窗，用 LieDetector\LieDetector.exe（Unity 做的模拟
+# 测谎窗口）来验一遍「抓帧 → 模型 → 鼠标」这条链路。置上 hwnd 后取帧就改抓它。
+_LT_TEST = {"hwnd": 0, "exe": None, "only_fg_bak": None}
+
+
+def _proc_image(hwnd):
+    """窗口所属进程的完整 exe 路径（小写）。拿不到返回空串。"""
+    k32 = ctypes.windll.kernel32
+    u32 = ctypes.windll.user32
+    pid = ctypes.c_ulong(0)
+    u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    h = k32.OpenProcess(0x1000, False, pid.value)   # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        n = ctypes.c_ulong(1024)
+        if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)):
+            return buf.value.replace("/", "\\").lower()
+        return ""
+    finally:
+        k32.CloseHandle(h)
+
+
+def _lie_window():
+    """找 LieDetector 那个窗口：按 **进程 exe** + 窗口类认。
+
+    别按标题认——资源管理器窗口标题里也带 "LieDetector" 字样，之前就抓错过一次。
+    """
+    hits = []
+
+    def cb(h, _):
+        if not win32gui.IsWindowVisible(h):
+            return
+        txt = win32gui.GetWindowText(h)
+        if "liedetector" not in txt.lower():
+            return
+        if win32gui.GetClassName(h) != "UnityWndClass":
+            return
+        if "liedetector.exe" not in _proc_image(h):
+            return
+        hits.append(h)
+
+    try:
+        win32gui.EnumWindows(cb, None)
+    except Exception:  # noqa: BLE001
+        return 0
+    return hits[0] if hits else 0
+
+
+def _lie_exe_path():
+    """LieDetector.exe 的路径：项目根的 LieDetector/ 下（打包后也在资源目录旁边）。"""
+    cands = [Path(apppaths.RES_DIR).parent / "LieDetector" / "LieDetector.exe",
+             Path(apppaths.RES_DIR) / "LieDetector" / "LieDetector.exe"]
+    for p in cands:
+        if p.exists():
+            return p
+    return cands[0]
+
+
+def _screen_shot(region):
+    """抓屏幕上一块矩形（BGR）。Unity 窗口 BitBlt 拿不到新帧，只能走这条。"""
+    with SCREENSHOT() as sct:
+        raw = sct.grab(region)
+        return np.asarray(raw)[:, :, :3].copy()
+
+
+def lietrack_frame():
+    """给追踪线程的取帧回调：(客户区帧, 屏幕物理区域)。没有画面就 (None, None)。"""
+    th = _LT_TEST["hwnd"]
+    if th and win32gui.IsWindow(th):
+        # 测试窗口是 Unity(DX) 画的：BitBlt 窗口 DC 只会返回启动画面的旧帧（实测
+        # mean 恒定 33.8、真画面在屏幕上是另一幅），所以这里必须抓屏幕。
+        # 代价是窗口不能被别的窗口挡住。
+        region = client_region(th)
+        if region is not None:
+            try:
+                return _screen_shot(region), region
+            except Exception as e:  # noqa: BLE001
+                with lietrack.lock:
+                    lietrack.st["error"] = f"测试窗口抓屏失败: {type(e).__name__}: {e}"
+    hwnd = find_window()
+    region = client_region(hwnd) if hwnd else None
+    if region is None:
+        return None, None
+    frame = grabber.snapshot()
+    if frame is None:
+        return None, None
+    return frame, region
+
+
+lietrack = ltmod.LieTrack(frame_provider=lietrack_frame,
+                          cfg_file=LIETRACK_FILE,
+                          foreground=lambda: _game_foreground())
+
+
+def _start_lietrack():
+    """真正把追踪线程拉起来。
+
+    必须在模块**导入完**之后再调：foreground 回调指向本模块后面才定义的
+    `_game_foreground`，导入期就 start 的话线程第一轮就会 NameError 直接死掉
+    （服务看起来正常，面板一直「待命」，鼠标永远不动）。
+    无头自测（tools/test_headless.py）里不起线程：那边没有游戏窗口，也没必要
+    让一个后台线程一直去 EnumWindows 找窗口。
+    """
+    if os.environ.get("MAPLE_HEADLESS") == "1":
+        return
+    if not lietrack.is_alive():
+        lietrack.start()
+
+    # 后台预热：模板图 + lietrack 的 YOLO。不预热的话第一次命中要等 5 秒以上
+    # （ultralytics 导入 + 模型首帧编译），用户会以为「识别到关键词很慢」。
+    def _warmup_lietrack():
+        try:
+            r = lietrack.warmup()
+            print(f"lietrack warmup -> {r}")
+        except Exception as e:  # noqa: BLE001
+            print(f"lietrack warmup 失败: {type(e).__name__}: {e}")
+
+    threading.Thread(target=_warmup_lietrack, name="lietrack-warm", daemon=True).start()
 
 # ---------------- 状态条识别（HP / MP / EXP） ----------------
 # 三条是固定 UI：位置固定、颜色固定、只沿水平方向变化。所以不走训练/推理，
@@ -3968,6 +4147,212 @@ async def char_conf(v: float = 0, enabled: int = -1, dir: str = "",
                          "dir": char_state["dir"], "roi": list(char_state["roi"])})
 
 
+@app.get("/api/lietrack")
+async def lietrack_get():
+    """测谎仪跟随：配置 + 运行状态（面板上那一行就是这里来的）。
+
+    status 里的 present / tracking 是两个不同的东西：
+      present  = 现在认出「谎言探测仪」弹窗了（模板匹配；trigger=ocr 时是关键词）
+      tracking = 追踪线程正握着鼠标在跟（弹窗消失后还会继续跟到 run_sec 跑满）
+    """
+    st = lietrack.snapshot()
+    weights = Path(st.get("model") or st["cfg"]["weights"])
+    have_w = weights.exists() if weights.is_absolute() else \
+        (Path(apppaths.RES_DIR) / weights).exists()
+    tpl = lietrack.tpl
+    return JSONResponse({
+        "cfg": st["cfg"], "status": st, "weights_ok": bool(have_w),
+        "tpl_ok": (bool(getattr(tpl, "loaded", False)) if tpl is not None else None),
+        "test": bool(_LT_TEST["hwnd"]),
+        "foreground": _game_foreground(),
+        "window_found": grabber.window_found,
+        "ocr_engine": (lietrack.ocr.name or "未初始化"),
+    })
+
+
+@app.post("/api/lietrack/set")
+async def lietrack_set(payload: dict = Body(...)):
+    """改配置（可只传一部分）。改 trigger=ocr 时关键词可传字符串或数组。"""
+    cfg = lietrack.set_cfg(dict(payload or {}))
+    return JSONResponse({"ok": True, "cfg": cfg, "status": lietrack.snapshot()})
+
+
+@app.post("/api/lietrack/probe")
+async def lietrack_probe():
+    """对当前画面跑一次触发判定（默认模板匹配），返回相似度/文本——验门限用这个。"""
+    return JSONResponse(await asyncio.to_thread(lietrack.probe))
+
+
+@app.post("/api/lietrack/release")
+async def lietrack_release():
+    """立刻松开鼠标（不动用「是否启用」开关，下次认出弹窗还会再触发）。"""
+    lietrack.release("面板手动松开")
+    return JSONResponse({"ok": True, "status": lietrack.snapshot()})
+
+
+def _run_selftest(sec=10.0):
+    """「跟随测试」：拉起 LieDetector.exe（Unity 模拟测谎窗口），把取帧切到它，
+    绕过触发判定强制跟 sec 秒，然后用**真实光标位置**验一遍到底有没有跟上。
+
+    为什么要这个：真游戏里那个弹窗只在打小游戏时才出现，一次验证要等很久；
+    这个模拟窗口随时能开，抓帧/模型/鼠标整条链路都能当场验。
+    """
+    exe = _lie_exe_path()
+    if not exe.exists():
+        return {"ok": False, "msg": f"没找到模拟器：{exe}"}
+    hwnd = _lie_window()
+    if not hwnd:
+        try:
+            subprocess.Popen([str(exe)], cwd=str(exe.parent))
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "msg": f"启动 {exe.name} 失败: {type(e).__name__}: {e}"}
+        for _ in range(60):          # Unity 有 splash，等它出场景（最多 ~18 秒）
+            time.sleep(0.3)
+            hwnd = _lie_window()
+            if hwnd:
+                break
+    if not hwnd:
+        return {"ok": False, "msg": "模拟器起来了但没找到它的窗口（Unity 场景还在加载？）"}
+    try:
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        win32gui.SetForegroundWindow(hwnd)      # 抓屏幕要它露出来，不能被挡
+    except Exception:  # noqa: BLE001
+        pass
+    time.sleep(0.8)
+
+    region = client_region(hwnd)
+    if region is None:
+        return {"ok": False, "msg": "模拟器窗口尺寸异常（还没渲染出画面？）"}
+    _LT_TEST["hwnd"] = hwnd
+    _LT_TEST["exe"] = str(exe)
+    lietrack.release("测试开始")
+    sec = max(3.0, min(float(sec or 10.0), 60.0))
+    lietrack.force(sec)
+
+    frames0 = lietrack.st.get("frames", 0)
+    time.sleep(min(2.5, sec * 0.4))
+    st = lietrack.snapshot()
+    try:
+        cur = win32gui.GetCursorPos()
+    except Exception:  # noqa: BLE001
+        cur = None
+    moved = st.get("frames", 0) - frames0
+    return {
+        "ok": True, "sec": sec, "window": {"title": win32gui.GetWindowText(hwnd),
+                                          "hwnd": hwnd, **region},
+        "tracking": st.get("tracking"), "state": st.get("state"),
+        "target": st.get("target"), "cursor": list(cur) if cur else None,
+        "canvas": st.get("canvas"), "frames": moved,
+        "error": st.get("error", ""), "move_mouse": st["cfg"].get("move_mouse"),
+        "msg": ("测试跑起来了" if st.get("tracking") else "没跟起来，看 error"),
+    }
+
+
+@app.post("/api/lietrack/selftest")
+async def lietrack_selftest(payload: dict = Body(default={})):
+    """面板「跟随测试」：启模拟器 → 强制跟随几秒 → 报结果。"""
+    sec = (payload or {}).get("sec", 10)
+    return JSONResponse(await asyncio.to_thread(_run_selftest, sec))
+
+
+@app.post("/api/lietrack/selftest/stop")
+async def lietrack_selftest_stop():
+    """结束测试：松手、取帧切回游戏窗口、把游戏抬回前台，别把挂机晾在后面。"""
+    _LT_TEST["hwnd"] = 0
+    lietrack.release("跟随测试结束")
+    with lietrack.lock:
+        lietrack._force_until = 0.0
+        lietrack.st["present"] = False
+        lietrack.st["keyword"] = ""
+    try:
+        bring_to_front()
+    except Exception:  # noqa: BLE001
+        pass
+    return JSONResponse({"ok": True, "status": lietrack.snapshot()})
+
+
+def _load_dialog_image():
+    """那张「谎言探测仪」弹窗原图（438×390，`webui/lietrack_dlg.png`）。"""
+    p = Path(apppaths.RES_DIR) / "lietrack_dlg.png"
+    if not p.exists():
+        return None
+    img = cv2.imdecode(np.fromfile(str(p), dtype=np.uint8), cv2.IMREAD_COLOR)
+    return img
+
+
+def _run_poptest(width=0):
+    """「弹窗测试」：截一张当前游戏画面 → 把弹窗图合成到正中间 → 跑一遍触发判定。
+
+    走的是和运行时**完全相同**的 TemplateTrigger（同一个模板、同一个门限），
+    只是画面是合成的，所以不用等游戏里真的弹窗就能验「认不认得出」。
+
+    width 默认 0 = 弹窗按原图尺寸（438×390）贴上去。**别随便放大**：模板就是从
+    这张原图裁的，放大到 640 后多尺度硬撑不上（实测 0.56，认不出来）。
+    """
+    hwnd = find_window()
+    if not hwnd:
+        return {"ok": False, "msg": "没抓到游戏窗口（最小化 / 还没进游戏？）"}
+    frame = grabber.snapshot()
+    if frame is None:
+        return {"ok": False, "msg": "游戏窗口没有画面"}
+    dlg = _load_dialog_image()
+    if dlg is None:
+        return {"ok": False, "msg": "缺 webui/lietrack_dlg.png（弹窗原图）"}
+    h, w = frame.shape[:2]
+    width = int(width or 0)
+    if width <= 0 or width > w - 20:
+        width = min(dlg.shape[1], w - 20)
+    k = width / dlg.shape[1]
+    dw, dh = width, int(round(dlg.shape[0] * k))
+    if dh > h - 20:
+        dh = h - 20
+        dw = int(round(dlg.shape[1] * dh / dlg.shape[0]))
+    small = cv2.resize(dlg, (dw, dh), interpolation=cv2.INTER_AREA)
+    x, y = (w - dw) // 2, (h - dh) // 2
+    composed = frame.copy()
+    composed[y:y + dh, x:x + dw] = small
+
+    t0 = time.perf_counter()
+    try:
+        trg = lietrack._ensure_tpl()
+        score, box = trg.detect(composed)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "msg": f"模板加载失败: {type(e).__name__}: {e}"}
+    ms = (time.perf_counter() - t0) * 1000
+    cfg = lietrack.get_cfg()
+    hit = score >= float(cfg["tpl_thresh"])
+    out = Path(apppaths.DATA_DIR) / "lietrack_poptest.png"
+    try:
+        cv2.imencode(".png", composed)[1].tofile(str(out))
+    except Exception:  # noqa: BLE001
+        out = None
+    return {
+        "ok": True, "hit": bool(hit), "score": round(float(score), 4),
+        "thresh": float(cfg["tpl_thresh"]), "box": list(box) if box else None,
+        "ms": round(ms, 1), "png": str(out) if out else "",
+        "caption": f"相似度 {score:.3f}（门限 {cfg['tpl_thresh']:.2f}）"
+                   + (" → 认出来了，会触发" if hit else " → 没认出来"),
+    }
+
+
+@app.post("/api/lietrack/poptest")
+async def lietrack_poptest(payload: dict = Body(default={})):
+    """面板「弹窗测试」：游戏画面 + 居中合成弹窗 → 直接跑触发判定。"""
+    width = (payload or {}).get("width", 0)
+    return JSONResponse(await asyncio.to_thread(_run_poptest, width))
+
+
+@app.get("/api/lietrack/poptest.png")
+async def lietrack_poptest_png():
+    """上一次「弹窗测试」的合成图（面板里直接显示）。"""
+    p = Path(apppaths.DATA_DIR) / "lietrack_poptest.png"
+    if not p.exists():
+        return Response(status_code=404)
+    return Response(p.read_bytes(), media_type="image/png",
+                    headers={"Cache-Control": "no-store, max-age=0"})
+
+
 @app.get("/api/snapshot")
 async def snapshot(focus: int = 0, fresh: int = 1, bars: int = 0,
                    w: int = 0, q: int = 0):
@@ -4203,6 +4588,8 @@ if __name__ == "__main__":
 
     _diag_bootstrap()
     _log(f"服务启动 port={PORT} pid={os.getpid()}")
+    # 模块已经全部导入完（_game_foreground 等回调这时才都在），可以安全起追踪线程
+    _start_lietrack()
 
     print(f"preview -> {local}   (Ctrl+C to stop)")
     if HOST in ("0.0.0.0", "::"):
@@ -4214,7 +4601,18 @@ if __name__ == "__main__":
         else:
             print("手机(同 WiFi) -> 没找到可用地址（电脑没连 WiFi / 网线？）")
     if want_open:
-        threading.Timer(1.2, lambda: webbrowser.open(local)).start()
+        # 别用固定延时：uvicorn 从导入到真正 bind 要 3 秒左右（模块导入 + 预热线程抢
+        # CPU），固定 1.2 秒开页面会先撞上「无法连接」，看着就像服务没起来。这里等
+        # 端口真的被监听了再开。
+        def _open_when_ready():
+            for _ in range(120):                 # 最多等 30 秒
+                if port_busy("127.0.0.1", PORT):
+                    break
+                time.sleep(0.25)
+            time.sleep(0.3)                      # 让首页静态文件先落位
+            webbrowser.open(local)
+
+        threading.Thread(target=_open_when_ready, daemon=True).start()
     try:
         uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
     except KeyboardInterrupt:
