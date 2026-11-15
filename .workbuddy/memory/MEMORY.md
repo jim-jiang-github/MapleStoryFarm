@@ -19,6 +19,9 @@
   公网访问 `/` 会 302 到 `/m`（`?full=1` 强开主页面）。
 - 血条量测：`measure_bar` → `slot_bounds` 找整条槽当分母；`%` 由后端给，
   前端只钳位不要再乘 100。
+- 测谎仪跟随：`webui/lietrack.py` + `webui/lietrack.json`，OCR 关键词触发、
+  YOLO 追白团/漩涡、150Hz 弹簧移光标。坐标是「整帧 → 750×500 画布 → 屏幕」，
+  不需要框选区域。接口 `/api/lietrack*`，面板「测谎仪跟随」分组。
 - 已彻底砍掉 H.264 / HLS / MSE 那条链路，只留 MJPEG。别再引回来。
 - 抓屏前提：游戏窗口必须在前台且可见，否则读数会接近 0（`/api/window/focus` 可前置）。
 - **游戏进程以管理员身份运行**：普通权限的服务无法 `ShowWindow(SW_RESTORE)` 还原它的

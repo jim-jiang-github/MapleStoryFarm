@@ -41,7 +41,8 @@ APP_NAME = "MapleStoryFarm"
 
 # 打进 exe 的只读资源。配置 json 也带一份当默认值，第一次运行时由 paths.py
 # 复制到 data/，之后用户改的都是 data/ 那份。
-RES_GLOBS = ("*.html", "*.json", "*.png")
+# *.pt = 测谎仪跟随的 YOLO11n 权重（webui/lietrack_ft3.pt，5.5MB）
+RES_GLOBS = ("*.html", "*.json", "*.png", "*.pt")
 MODELS = [
     ("model_int8_fast_openvino_model", True),    # 速度模型：必须
     ("model_int8_openvino_model", False),        # 精度模型：可选
@@ -157,6 +158,25 @@ def optional_psutil():
     return ["--hidden-import", "psutil"]
 
 
+def optional_rapidocr():
+    """装了 RapidOCR 就把「中文关键词 OCR」一起打进去（测谎仪的条件触发要用）。
+
+    没装也能跑：服务会退化到「关键词小图 + 模板匹配」，只是对游戏字体的命中率
+    差一些，面板状态行里能看到当前用的是哪个引擎（engine=template）。
+    """
+    try:
+        import rapidocr_onnxruntime  # noqa: F401
+    except ImportError:
+        log("没装 rapidocr-onnxruntime -> 包里只有模板匹配兜底（关键词识别弱）")
+        return []
+    log("带上 RapidOCR + onnxruntime（关键词 OCR）")
+    return [
+        "--collect-all", "rapidocr_onnxruntime",     # 模型文件在里面，必须整包收
+        "--collect-all", "onnxruntime",
+        "--hidden-import", "onnxruntime.capi.onnxruntime_pybind11_state",
+    ]
+
+
 def tunnel_flags():
     """带上 cloudflared.exe：面板上的「外网」一键穿透要用它。
 
@@ -265,7 +285,14 @@ def build(onefile, with_accurate, clean, dry_run=False):
     cmd += model_flags(with_accurate)
     cmd += optional_pyserial()
     cmd += optional_psutil()
+    rapidocr_flags = optional_rapidocr()
+    cmd += rapidocr_flags
     cmd += tunnel_flags()
+    # onnxruntime 本来是排除的（ultralytics 只有导出 onnx 才用），但带上 RapidOCR
+    # 时它就是 OCR 的推理后端，不能再剔
+    exclude = list(EXCLUDE_MODULES)
+    if rapidocr_flags:
+        exclude = [m for m in exclude if m not in ("onnxruntime", "onnx")]
 
     # ultralytics：模型/跟踪器运行时按名字导入，必须整包收
     cmd += [
@@ -290,7 +317,7 @@ def build(onefile, with_accurate, clean, dry_run=False):
         "--exclude-module", "tkinter",
         "--exclude-module", "PyQt5",
         "--exclude-module", "PySide6",
-        *[x for m in EXCLUDE_MODULES for x in ("--exclude-module", m)],
+        *[x for m in exclude for x in ("--exclude-module", m)],
         str(WEBUI / "server.py"),
     ]
 

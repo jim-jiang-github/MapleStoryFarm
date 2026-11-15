@@ -23,16 +23,16 @@
     {
       "key": "KeyS",
       "type": "single",
-      "dir": "center",
+      "dir": "front",
       "ground": [
-        419.0,
+        0.0,
         419.0,
         11.0,
         78.0
       ],
       "jump": false,
       "jrect": [
-        92.0,
+        0.0,
         92.0,
         50.0,
         37.0

@@ -611,6 +611,18 @@
     outline: none;
   }
   .filterrow input:focus { border-color: #a8a29e; }
+  /* 测谎仪跟随的关键词输入框：复用 .filterrow input 的观感，但放在设置行里 */
+  .gbody input.kw {
+    min-width: 0;
+    padding: 4px 8px;
+    font: inherit; font-size: 12px;
+    color: var(--text);
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    outline: none;
+  }
+  .gbody input.kw:focus { border-color: #a8a29e; }
   /* 宽屏时按钮/输入框别拉成一整条，贴着左边排成一行更清爽 */
   @media (min-width: 720px) {
     .actions button { flex: 0 0 auto; min-width: 104px; padding: 7px 16px; }
@@ -768,6 +780,45 @@
               <span class="k">原地挂机</span>
               <span class="v"><button id="campFlipBtn" class="mini" title="开：不追怪，只打当前技能范围内的目标；关：怪在范围外时会走过去。">关</button><b class="sub">只保留原地打怪，不再做定时反向动作</b></span>
             </div>
+              </div>
+            </details>
+            <details class="group" data-cap="测谎仪">
+              <summary><b>测谎仪跟随</b><span class="gsum" id="sumLie">—</span></summary>
+              <div class="gbody">
+                <div class="row conf">
+                  <span class="k">条件触发</span>
+                  <span class="v"><button id="lieBtn" title="开 = 画面上出现「谎言探测仪」弹窗就自动接管鼠标，跟着里面的白团/漩涡走；关 = 什么也不动（只保留「测匹配」这个调试功能）">跟随: 关</button></span>
+                </div>
+                <div class="row conf">
+                  <span class="k">识别方式</span>
+                  <span class="v" style="font-size:12px;opacity:.75">模板匹配 · 弹窗标题「谎言探测仪」</span>
+                </div>
+                <div class="row conf">
+                  <span class="k">相似度门限</span>
+                  <span class="v">
+                    <input id="lieThr" class="kw" type="text" inputmode="decimal" placeholder="0.70" title="模板相似度（0.40~0.98）。1.0 = 像素完全一致；调高少误判，调低更灵敏。改完按回车或点别处生效" />
+                  </span>
+                </div>
+                <div class="row conf">
+                  <span class="k">跟随时长</span>
+                  <span class="v">
+                    <input id="lieSec" class="kw" type="text" inputmode="numeric" placeholder="15" title="触发一次跟多少秒，到点自动松手。中途弹窗消失、目标暂时丢了都不会提前收手。改完按回车或点别处生效" /> 秒
+                  </span>
+                </div>
+                <div class="row conf">
+                  <span class="k">动鼠标</span>
+                  <span class="v">
+                    <button id="lieMoveBtn" class="mini" title="关掉就只识别、只算坐标（下面的状态行能看到目标位置），真实光标一下都不动——第一次用建议先这样确认能认出目标">开</button>
+                    <button id="lieProbe" class="mini" title="对当前画面跑一次模板匹配，把相似度打出来。门限设得对不对，用它验证最快（弹窗开着时应该 0.9+，平时接近 0）">测匹配</button>
+                    <button id="lieRelBtn" class="mini" title="立刻松开鼠标（不关开关，下一次认出弹窗还会再跟）">松开</button>
+                    <button id="lieTestBtn" class="mini" title="不用等游戏里真的弹出测谎仪：启动 LieDetector\LieDetector.exe 这个模拟窗口，绕过触发判定直接跟几秒，用真实光标位置验一遍「抓帧→模型→鼠标」这条链路。再点一次 = 结束测试、把游戏抬回前台">跟随测试</button>
+                    <button id="liePopBtn" class="mini" title="截一张当前游戏画面，把「谎言探测仪」弹窗图合成到正中间，再用运行时的同一套模板匹配判一次。不用等真弹窗就能验认不认得出；结果图和相似度都会显示出来">弹窗测试</button>
+                  </span>
+                </div>
+                <div class="chstat" id="lieStat" hidden></div>
+                <div id="liePopWrap" hidden style="margin-top:6px">
+                  <img id="liePopImg" alt="弹窗合成测试图" style="max-width:100%;border-radius:6px;border:1px solid rgba(0,0,0,.15)" />
+                </div>
               </div>
             </details>
           </div>
@@ -3207,6 +3258,277 @@
   pollBot();
   setInterval(pollBot, 500);
   wanPoll();        // 刷新页面后把「外网: 开/关」和已有链接恢复出来
+
+  /* ================= 测谎仪跟随（模板匹配触发） =================
+     后端在 webui/lietrack.py：画面上出现「谎言探测仪」弹窗（模板匹配认出标题）
+     → YOLO 追白团/漩涡 → 弹簧插值把真实光标贴上去。这里只负责开关和状态显示。
+     为什么不用 OCR：中文 OCR 一次 0.5~2.7 秒还有 9 秒冷启动，认一张固定 UI 图
+     用 matchTemplate 十几毫秒就够，稳定得多。 */
+  async function lieFetch(url, opts) {
+    const res = await fetch(url, { cache: "no-store", ...(opts || {}) });
+    const r = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(r.msg || r.detail || ("接口 " + res.status
+        + (res.status === 404 ? "（服务还在跑旧代码，重启后可用）" : "")));
+    }
+    return r;
+  }
+
+  function paintLieCfg(cfg) {
+    if (!cfg) return;
+    $("lieBtn").textContent = cfg.enabled ? "跟随: 开" : "跟随: 关";
+    $("lieBtn").className = cfg.enabled ? "on" : "";
+    $("lieMoveBtn").classList.toggle("on", !!cfg.move_mouse);
+    $("lieMoveBtn").textContent = cfg.move_mouse ? "开" : "关";
+    // 正在输入时别被轮询覆盖（会把人打字打断）
+    if (document.activeElement !== $("lieThr") && cfg.tpl_thresh) {
+      $("lieThr").value = Number(cfg.tpl_thresh).toFixed(2);
+    }
+    if (document.activeElement !== $("lieSec") && cfg.run_sec) {
+      $("lieSec").value = Math.round(cfg.run_sec);
+    }
+  }
+
+  function paintLie(r) {
+    const st = r.status || {};
+    const cfg = r.cfg || st.cfg || {};
+    paintLieCfg(cfg);
+    const el = $("lieStat");
+    const score = Number(st.score || 0);
+    const thr = Number(cfg.tpl_thresh || 0.7);
+    const ms = st.ocr_ms ? `${Math.round(st.ocr_ms)}ms` : "";
+    let msg = "", cls = "";
+    if (!cfg.enabled) {
+      msg = "未启用：打开开关后，认出「谎言探测仪」弹窗才会接管鼠标";
+      cls = "warn";
+    } else if (st.error) {
+      msg = "出错：" + String(st.error).slice(0, 70);
+      cls = "err";
+    } else if (!r.weights_ok) {
+      msg = `找不到追踪模型 ${cfg.weights}：放回 webui/ 目录再重启`;
+      cls = "err";
+    } else if (!r.window_found) {
+      msg = "没抓到游戏窗口（最小化 / 还没进游戏？）";
+      cls = "warn";
+    } else if (st.tracking) {
+      const tgt = st.target ? `(${st.target[0]}, ${st.target[1]})` : "识别中";
+      const left = st.run_left > 0 ? ` · 剩余 ${Math.ceil(st.run_left)}s` : "";
+      msg = `跟随中${left} · 目标 ${tgt} · ${st.state}`;
+      if (r.foreground === false) { msg += " · 游戏不在前台，已暂停"; cls = "warn"; }
+    } else if (st.present) {
+      msg = `认出「谎言探测仪」弹窗（相似度 ${score.toFixed(2)}），正在起追踪…`;
+    } else if (r.foreground === false) {
+      msg = "待命 · 游戏不在前台，已暂停检测";
+      cls = "warn";
+    } else {
+      msg = `待命 · 模板 ${score.toFixed(2)} / 门限 ${thr.toFixed(2)}` + (ms ? ` · ${ms}` : "");
+      if (r.test) msg = `测试窗口 · ` + msg.replace("待命 · ", "");
+    }
+    if (st.tpl_error) { msg += " · " + st.tpl_error; cls = cls || "err"; }
+    if (st.note && !st.tracking) msg += `（上次：${st.note}）`;
+    el.hidden = false;
+    el.className = "chstat " + cls;
+    el.textContent = msg;
+    // 折叠状态下的摘要：不开也能看出在干嘛
+    $("sumLie").textContent = !cfg.enabled ? "关"
+      : st.tracking ? "跟随中" : st.present ? "命中" : "待命";
+  }
+
+  async function pollLie() {
+    try {
+      const r = await lieFetch("/api/lietrack");
+      paintLie(r);
+    } catch (e) {
+      const el = $("lieStat");
+      el.hidden = false;
+      el.className = "chstat err";
+      el.textContent = "测谎仪跟随接口不可用：" + e.message;
+      $("sumLie").textContent = "—";
+    }
+  }
+
+  $("lieBtn").addEventListener("click", async () => {
+    $("lieBtn").disabled = true;
+    try {
+      const on = !$("lieBtn").classList.contains("on");
+      const r = await lieFetch("/api/lietrack/set", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: on }),
+      });
+      paintLieCfg(r.cfg);
+      toast(on ? "已开启条件触发：画面上出现「谎言探测仪」弹窗就自动跟随（记得把游戏切回前台）"
+               : "已关闭：鼠标不会再被接管");
+      pollLie();
+    } catch (e) {
+      toast("切换失败：" + e.message, true);
+    } finally {
+      $("lieBtn").disabled = false;
+    }
+  });
+
+  $("lieMoveBtn").addEventListener("click", async () => {
+    $("lieMoveBtn").disabled = true;
+    try {
+      const on = !$("lieMoveBtn").classList.contains("on");
+      const r = await lieFetch("/api/lietrack/set", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ move_mouse: on }),
+      });
+      paintLieCfg(r.cfg);
+      toast(on ? "已允许移动鼠标" : "只识别不动鼠标：状态行里能看到目标坐标");
+    } catch (e) {
+      toast("切换失败：" + e.message, true);
+    } finally {
+      $("lieMoveBtn").disabled = false;
+    }
+  });
+
+  let lieTestOn = false;
+  $("lieTestBtn").addEventListener("click", async () => {
+    const btn = $("lieTestBtn"), el = $("lieStat");
+    btn.disabled = true;
+    el.hidden = false;
+    el.className = "chstat";
+    if (!lieTestOn) {
+      btn.textContent = "启动模拟器…";
+      el.textContent = "正在启动 LieDetector.exe（Unity 有启动画面，第一次要几秒）…";
+      try {
+        const r = await lieFetch("/api/lietrack/selftest", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sec: Math.max(5, Number($("lieSec").value) || 8) }),
+        });
+        if (!r.ok) {
+          el.className = "chstat err";
+          el.textContent = r.msg || "测试没起来";
+        } else {
+          lieTestOn = true;
+          const tgt = r.target ? `(${r.target[0]}, ${r.target[1]})` : "没锁到目标";
+          const cur = r.cursor ? `(${r.cursor[0]}, ${r.cursor[1]})` : "?";
+          el.className = "chstat " + (r.tracking ? "" : "warn");
+          el.textContent = `${r.tracking ? "测试跟随中" : "没跟起来"} · ${r.state} · 目标 ${tgt}`
+            + ` · 光标 ${cur} · 检测 ${r.frames} 帧`
+            + (r.error ? ` · ${r.error}` : "");
+          btn.textContent = "停止测试";
+        }
+      } catch (e) {
+        el.className = "chstat err";
+        el.textContent = "测试请求失败：" + e.message;
+      }
+    } else {
+      btn.textContent = "结束中…";
+      try {
+        await lieFetch("/api/lietrack/selftest/stop", { method: "POST" });
+        lieTestOn = false;
+        btn.textContent = "跟随测试";
+        toast("测试结束，取帧已切回游戏窗口");
+        pollLie();
+      } catch (e) {
+        toast("结束测试失败：" + e.message, true);
+      }
+    }
+    btn.disabled = false;
+    if (!lieTestOn) btn.textContent = "跟随测试";
+  });
+
+  $("liePopBtn").addEventListener("click", async () => {
+    const btn = $("liePopBtn"), el = $("lieStat");
+    btn.disabled = true;
+    el.hidden = false;
+    el.className = "chstat";
+    el.textContent = "正在截图 + 合成弹窗 + 跑模板匹配…";
+    try {
+      const r = await lieFetch("/api/lietrack/poptest", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ width: 0 }),
+      });
+      if (!r.ok) {
+        el.className = "chstat err";
+        el.textContent = r.msg || "弹窗测试失败";
+        $("liePopWrap").hidden = true;
+      } else {
+        el.className = "chstat " + (r.hit ? "" : "warn");
+        el.textContent = `弹窗测试 · ${r.caption} · ${Math.round(r.ms)}ms`
+          + (r.box ? ` · 位置 (${r.box[0]}, ${r.box[1]})` : "");
+        const img = $("liePopImg");
+        img.src = "/api/lietrack/poptest.png?t=" + Date.now();
+        $("liePopWrap").hidden = false;
+      }
+    } catch (e) {
+      el.className = "chstat err";
+      el.textContent = "弹窗测试请求失败：" + e.message;
+      $("liePopWrap").hidden = true;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $("lieThr").addEventListener("change", async () => {
+    const thr = Math.max(0.40, Math.min(0.98, Number($("lieThr").value) || 0));
+    try {
+      const r = await lieFetch("/api/lietrack/set", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tpl_thresh: thr }),
+      });
+      paintLieCfg(r.cfg);
+      toast(`相似度门限改成 ${r.cfg.tpl_thresh}（弹窗开着时应该能到 0.9 以上）`);
+    } catch (e) {
+      toast("保存失败：" + e.message, true);
+    }
+  });
+
+  $("lieSec").addEventListener("change", async () => {
+    const sec = Math.max(1, Math.min(120, Math.round(Number($("lieSec").value) || 0)));
+    try {
+      const r = await lieFetch("/api/lietrack/set", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_sec: sec }),
+      });
+      paintLieCfg(r.cfg);
+      toast(`每次触发跟 ${r.cfg.run_sec} 秒，到点自动松手`);
+    } catch (e) {
+      toast("保存失败：" + e.message, true);
+    }
+  });
+
+  $("lieProbe").addEventListener("click", async () => {
+    $("lieProbe").disabled = true;
+    const el = $("lieStat");
+    el.hidden = false;
+    el.className = "chstat";
+    el.textContent = "正在做模板匹配…";
+    try {
+      const r = await lieFetch("/api/lietrack/probe", { method: "POST" });
+      if (!r.ok) {
+        el.className = "chstat warn";
+        el.textContent = r.msg || "匹配没结果";
+      } else {
+        const s = Number(r.score || 0), thr = Number(r.thresh || 0);
+        el.className = "chstat " + (r.hit ? "" : "warn");
+        el.textContent = `相似度 ${s.toFixed(3)}（门限 ${thr.toFixed(2)}）`
+          + ` · 耗时 ${Math.round(r.ms)}ms`
+          + (r.hit ? " → 认出弹窗，会触发" : " → 没认出弹窗")
+          + (r.box ? ` · 位置 (${r.box[0]}, ${r.box[1]})` : "");
+      }
+    } catch (e) {
+      el.className = "chstat err";
+      el.textContent = "匹配请求失败：" + e.message;
+    } finally {
+      $("lieProbe").disabled = false;
+    }
+  });
+
+  $("lieRelBtn").addEventListener("click", async () => {
+    try {
+      await lieFetch("/api/lietrack/release", { method: "POST" });
+      toast("鼠标已松开（开关还开着，下次认出弹窗会再跟）");
+      pollLie();
+    } catch (e) {
+      toast("松开失败：" + e.message, true);
+    }
+  });
+
+  pollLie();
+  setInterval(pollLie, 800);
 
   /* 面板上两个实时参数：识别阈值（浮点）和稳定帧数（整数）。共用一套绑定：
      拖动时先改数字（立刻有反馈），停手 120ms 再发请求，避免每一像素都打一次后端。 */

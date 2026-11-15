@@ -7,16 +7,18 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 title Capture Preview
 
-set "PICKED="
-for %%C in ("C:\Users\Administrator\AppData\Roaming\uv\python\cpython-3.12.9-windows-x86_64-none\python.exe" "python" "C:\Users\JimJiang\.workbuddy\binaries\python\versions\3.13.12\python.exe") do (
-    if not defined PICKED (
-        %%~C -c "import mss,cv2,fastapi,uvicorn,win32gui,numpy,ultralytics,openvino" >nul 2>nul
-        if not errorlevel 1 set "PICKED=%%~C"
-    )
+rem No import probe here: importing ultralytics+openvino costs 3-4s on every start.
+rem Use the hardcoded uv python (the one with all deps); fall back to python on PATH.
+rem If a package is really missing, server.py prints the ImportError in this window.
+set "PICKED=C:\Users\Administrator\AppData\Roaming\uv\python\cpython-3.12.9-windows-x86_64-none\python.exe"
+if not exist "%PICKED%" set "PICKED="
+if not defined PICKED (
+    where python >nul 2>nul
+    if not errorlevel 1 set "PICKED=python"
 )
 
 if not defined PICKED (
-    echo [ERROR] No usable Python found ^(need 3.10+ with mss, opencv-python, fastapi, uvicorn, pywin32, ultralytics, openvino^).
+    echo [ERROR] No usable Python found ^(put python on PATH, or edit the hardcoded path in this .bat^).
     echo.
     pause
     exit /b 1

@@ -1,0 +1,134 @@
+{
+  "name": "333",
+  "groups": [
+    {
+      "repeat": 0,
+      "steps": [
+        {
+          "action": "press",
+          "key": "d",
+          "sleep": {
+            "mode": "random",
+            "min": 50,
+            "max": 25
+          }
+        },
+        {
+          "action": "release",
+          "key": "d",
+          "sleep": {
+            "mode": "fixed",
+            "value": 0.3
+          }
+        },
+        {
+          "action": "tap",
+          "key": "left",
+          "sleep": {
+            "mode": "fixed",
+            "value": 0.3
+          }
+        },
+        {
+          "action": "tap",
+          "key": "d",
+          "sleep": {
+            "mode": "fixed",
+            "value": 0.3
+          }
+        },
+        {
+          "action": "tap",
+          "key": "right",
+          "sleep": {
+            "mode": "fixed",
+            "value": 0.5
+          }
+        },
+        {
+          "action": "tap",
+          "key": "right",
+          "sleep": {
+            "mode": "fixed",
+            "value": 0.3
+          }
+        },
+        {
+          "action": "tap",
+          "key": "r",
+          "sleep": {
+            "mode": "fixed",
+            "value": 0.3
+          }
+        }
+      ]
+    }
+  ],
+  "loops": 1,
+  "steps": [
+    {
+      "action": "press",
+      "key": "d",
+      "sleep": {
+        "mode": "random",
+        "min": 50,
+        "max": 25
+      }
+    },
+    {
+      "action": "release",
+      "key": "d",
+      "sleep": {
+        "mode": "fixed",
+        "value": 0.3
+      }
+    },
+    {
+      "action": "tap",
+      "key": "left",
+      "sleep": {
+        "mode": "fixed",
+        "value": 0.3
+      }
+    },
+    {
+      "action": "tap",
+      "key": "d",
+      "sleep": {
+        "mode": "fixed",
+        "value": 0.3
+      }
+    },
+    {
+      "action": "tap",
+      "key": "right",
+      "sleep": {
+        "mode": "fixed",
+        "value": 0.5
+      }
+    },
+    {
+      "action": "tap",
+      "key": "right",
+      "sleep": {
+        "mode": "fixed",
+        "value": 0.3
+      }
+    },
+    {
+      "action": "tap",
+      "key": "r",
+      "sleep": {
+        "mode": "fixed",
+        "value": 0.3
+      }
+    }
+  ],
+  "timer": [
+    {
+      "interval": 500,
+      "key": "home",
+      "hold": 0
+    }
+  ]
+}
